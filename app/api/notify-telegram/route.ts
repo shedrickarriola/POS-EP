@@ -5,7 +5,7 @@ import { createClient } from '@supabase/supabase-js';
 // Initialize Supabase Admin (needed to check logs)
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY! // Use Service Role Key for bypass RLS if needed
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY! // Use Service Role Key for bypass RLS if needed
 );
 
 export async function POST(request: Request) {
