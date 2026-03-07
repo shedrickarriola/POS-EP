@@ -66,6 +66,7 @@ export default function ExecutiveTerminal() {
     role: 'staff',
     branch_id: '',
     org_id: '',
+    password: '', // Add this
   });
 
   const [selectedBranch, setSelectedBranch] = useState<any>(null);
@@ -225,11 +226,51 @@ export default function ExecutiveTerminal() {
   };
 
   const handleAddStaff = async () => {
-    const { error } = await supabase.from('profiles').insert([staffForm]);
-    if (!error) {
+    if (!staffForm.email || !staffForm.password || !staffForm.branch_id) {
+      return alert('Email, Password, and Branch are required.');
+    }
+
+    try {
+      // Step 1: Create the User in Supabase Auth
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email: staffForm.email,
+        password: staffForm.password,
+        options: {
+          data: {
+            full_name: staffForm.full_name,
+          },
+        },
+      });
+
+      if (authError) throw authError;
+      if (!authData.user) throw new Error('Auth creation failed.');
+
+      // Step 2: Create the Profile record linked to the new Auth ID
+      const { error: profileError } = await supabase.from('profiles').insert([
+        {
+          id: authData.user.id, // Link to Auth ID
+          email: staffForm.email,
+          full_name: staffForm.full_name,
+          role: staffForm.role,
+          branch_id: staffForm.branch_id,
+          org_id: staffForm.org_id,
+        },
+      ]);
+
+      if (profileError) throw profileError;
+
+      alert('Staff member authorized successfully!');
       setModals({ ...modals, staff: false });
-      showSuccess(`${staffForm.role} Authorized`);
-      fetchInitialData();
+      setStaffForm({
+        email: '',
+        full_name: '',
+        role: 'staff',
+        branch_id: '',
+        org_id: '',
+        password: '',
+      });
+    } catch (err: any) {
+      alert(`Deployment Error: ${err.message}`);
     }
   };
 
@@ -290,7 +331,7 @@ export default function ExecutiveTerminal() {
       {/* HEADER */}
       <nav className="max-w-7xl mx-auto flex justify-between items-center mb-10 border-b border-slate-800 pb-6">
         <h1 className="text-xl font-black text-white italic uppercase tracking-tighter">
-          PHARMA<span className="text-emerald-500">_CORE</span>
+          ECONO<span className="text-emerald-500">_DRUGSTORE</span>
         </h1>
         <div className="flex items-center gap-6">
           <div className="bg-slate-900/50 py-1.5 px-4 rounded-full flex items-center gap-3 border border-white/5">
@@ -714,6 +755,15 @@ export default function ExecutiveTerminal() {
                 placeholder="Full Name"
                 onChange={(e) =>
                   setStaffForm({ ...staffForm, full_name: e.target.value })
+                }
+              />
+              <input
+                type="password"
+                placeholder="Security Password"
+                className="w-full bg-slate-900 border border-white/5 rounded-2xl px-6 py-4 text-xs font-mono outline-none focus:border-purple-500"
+                value={staffForm.password}
+                onChange={(e) =>
+                  setStaffForm({ ...staffForm, password: e.target.value })
                 }
               />
               <input
