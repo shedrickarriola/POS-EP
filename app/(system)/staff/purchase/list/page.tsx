@@ -1,0 +1,557 @@
+'use client';
+import React, { useEffect, useState } from 'react';
+import { supabase } from '@/lib/supabase';
+import { useRouter } from 'next/navigation';
+import {
+  ChevronDown,
+  ChevronUp,
+  ChevronLeft,
+  ChevronRight,
+  ArrowLeft,
+  Layers,
+  Search,
+  Calendar,
+  XCircle,
+  DollarSign,
+  Truck,
+  User,
+  Calculator,
+  CheckCircle2,
+  ShieldCheck,
+  Clock,
+  AlertCircle,
+  Store,
+} from 'lucide-react';
+
+export default function PurchaseOrderList() {
+  const router = useRouter();
+
+  // Auth & Role States
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [isVerifying, setIsVerifying] = useState<string | null>(null);
+
+  // Branch State
+  const [currentBranchId, setCurrentBranchId] = useState<string | null>(null);
+  const [currentBranchName, setCurrentBranchName] = useState<string>('');
+
+  // Data States
+  const [orders, setOrders] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [expandedRow, setExpandedRow] = useState<string | null>(null);
+
+  // Pagination & Filter States
+  const [currentPage, setCurrentPage] = useState(0);
+  const [totalCount, setTotalCount] = useState(0);
+  const [pageSize] = useState(12);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+
+  // Financial Stats
+  const [monthlyStats, setMonthlyStats] = useState({
+    total: 0,
+    generic: 0,
+    branded: 0,
+  });
+  const [filterStats, setFilterStats] = useState({
+    total: 0,
+    generic: 0,
+    branded: 0,
+  });
+
+  // 1. Sync with Staff Hub 'active_branch' and Session
+  useEffect(() => {
+    const initSession = async () => {
+      setLoading(true);
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (session) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('full_name, role')
+          .eq('id', session.user.id)
+          .single();
+        setCurrentUser(profile);
+      }
+
+      const savedBranch = localStorage.getItem('active_branch');
+      if (savedBranch) {
+        try {
+          const parsed = JSON.parse(savedBranch);
+          setCurrentBranchId(parsed.id);
+          setCurrentBranchName(parsed.branch_name || 'Active Branch');
+        } catch (e) {
+          console.error('Context Error:', e);
+        }
+      }
+      setLoading(false);
+    };
+    initSession();
+  }, []);
+
+  // 2. Main Data Fetching
+  useEffect(() => {
+    if (currentBranchId) {
+      fetchData();
+    }
+  }, [currentPage, searchTerm, startDate, endDate, currentBranchId]);
+
+  async function fetchData() {
+    try {
+      setLoading(true);
+      const now = new Date();
+      const firstOfMonth = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        1
+      ).toISOString();
+
+      // Get Monthly Aggregates
+      const { data: monthData } = await supabase
+        .from('purchase_orders')
+        .select('total_amount, generic_amt, branded_amt')
+        .eq('branch_id', currentBranchId)
+        .gte('created_at', firstOfMonth);
+
+      setMonthlyStats({
+        total:
+          monthData?.reduce((sum, row) => sum + (row.total_amount || 0), 0) ||
+          0,
+        generic:
+          monthData?.reduce((sum, row) => sum + (row.generic_amt || 0), 0) || 0,
+        branded:
+          monthData?.reduce((sum, row) => sum + (row.branded_amt || 0), 0) || 0,
+      });
+
+      // Fetch Paginated Orders + Joined Items
+      let dataQuery = supabase
+        .from('purchase_orders')
+        .select(
+          `
+          *, 
+          profiles (full_name), 
+          purchase_order_items (*)
+        `,
+          { count: 'exact' }
+        )
+        .eq('branch_id', currentBranchId);
+
+      if (searchTerm) {
+        dataQuery = dataQuery.or(
+          `po_number.ilike.%${searchTerm}%,invoice_id.ilike.%${searchTerm}%,supplier_name.ilike.%${searchTerm}%`
+        );
+      }
+      if (startDate) dataQuery = dataQuery.gte('created_at', startDate);
+      if (endDate)
+        dataQuery = dataQuery.lte('created_at', `${endDate}T23:59:59`);
+
+      const from = currentPage * pageSize;
+      const { data, count, error } = await dataQuery
+        .order('created_at', { ascending: false })
+        .range(from, from + pageSize - 1);
+
+      if (error) throw error;
+      setOrders(data || []);
+      setTotalCount(count || 0);
+
+      setFilterStats({
+        total:
+          data?.reduce((sum, row) => sum + (row.total_amount || 0), 0) || 0,
+        generic:
+          data?.reduce((sum, row) => sum + (row.generic_amt || 0), 0) || 0,
+        branded:
+          data?.reduce((sum, row) => sum + (row.branded_amt || 0), 0) || 0,
+      });
+    } catch (err: any) {
+      console.error('Fetch Error:', err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const handleVerifyOrder = async (orderId: string) => {
+    if (!currentUser) return;
+    setIsVerifying(orderId);
+    try {
+      const { error } = await supabase
+        .from('purchase_orders')
+        .update({
+          is_checked: true,
+          checked_by_name: currentUser.full_name,
+          checked_at: new Date().toISOString(),
+        })
+        .eq('id', orderId);
+      if (error) throw error;
+      fetchData();
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setIsVerifying(null);
+    }
+  };
+
+  const canVerify = ['branch_admin', 'org_manager', 'super_admin'].includes(
+    currentUser?.role
+  );
+
+  return (
+    <div className="min-h-screen w-full bg-slate-950 text-white p-4 md:px-6 md:py-4 font-sans selection:bg-blue-500/30">
+      {!currentBranchId && !loading && (
+        <div className="fixed inset-0 z-50 bg-slate-950/95 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-red-500/20 p-8 rounded-2xl max-w-sm w-full text-center shadow-2xl">
+            <AlertCircle className="text-red-500 mx-auto mb-4" size={32} />
+            <h2 className="text-xl font-black uppercase italic tracking-tighter mb-2">
+              Branch_Context_Null
+            </h2>
+            <p className="text-slate-400 text-xs font-mono mb-6">
+              Archive access requires a valid Branch ID.
+            </p>
+            <button
+              onClick={() => router.push('/staff')}
+              className="w-full py-3 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs font-black uppercase tracking-widest transition-all"
+            >
+              Return to Dashboard
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* HEADER SECTION */}
+      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-end mb-6 gap-4">
+        <div>
+          <button
+            onClick={() => router.push('/staff')}
+            className="flex items-center gap-1.5 text-slate-500 hover:text-white transition-colors mb-2 text-[10px] font-bold uppercase tracking-widest group"
+          >
+            <ArrowLeft
+              size={12}
+              className="group-hover:-translate-x-1 transition-transform"
+            />{' '}
+            Back to Dashboard
+          </button>
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-blue-500/10 rounded-xl border border-blue-500/20">
+              <Store size={22} className="text-blue-500" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-black italic tracking-tighter uppercase leading-none">
+                Purchase_<span className="text-blue-500">Archives</span>
+              </h1>
+              <p className="text-[9px] text-slate-500 font-mono mt-1 uppercase tracking-widest flex items-center gap-2">
+                {currentBranchName.replace(/\s+/g, '_')}{' '}
+                <span className="text-blue-500">•</span>{' '}
+                {currentUser?.full_name}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-3 w-full lg:w-auto">
+          <div className="bg-slate-900/50 border border-white/5 p-3 rounded-xl flex-1 lg:flex-none lg:min-w-[150px]">
+            <p className="text-[8px] font-black text-emerald-400/70 uppercase tracking-widest mb-1 flex items-center gap-1">
+              <Calculator size={10} /> Filter Match
+            </p>
+            <p className="text-base font-black text-slate-100 font-mono">
+              ₱
+              {filterStats.total.toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+              })}
+            </p>
+          </div>
+          <div className="bg-blue-600/5 border border-blue-500/20 p-3 rounded-xl flex-1 lg:flex-none lg:min-w-[150px]">
+            <p className="text-[8px] font-black text-blue-400 uppercase tracking-widest mb-1 flex items-center gap-1">
+              <DollarSign size={10} /> Monthly Inflow
+            </p>
+            <p className="text-base font-black text-slate-100 font-mono">
+              ₱
+              {monthlyStats.total.toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+              })}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* SEARCH AND FILTERS */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-7 gap-3 mb-6">
+        <div className="relative lg:col-span-3">
+          <Search
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600"
+            size={14}
+          />
+          <input
+            type="text"
+            placeholder="Search PO#, Invoice, or Supplier..."
+            className="w-full bg-slate-900/80 border border-white/10 rounded-xl py-2.5 pl-9 pr-4 text-xs focus:border-blue-500/50 outline-none transition-all font-mono placeholder:text-slate-700"
+            value={searchTerm}
+            onChange={(e) => {
+              setSearchTerm(e.target.value);
+              setCurrentPage(0);
+            }}
+          />
+        </div>
+        <div className="lg:col-span-3 flex items-center bg-slate-900/80 border border-white/10 rounded-xl px-3 gap-3">
+          <Calendar size={14} className="text-slate-600 shrink-0" />
+          <input
+            type="date"
+            className="bg-transparent text-[10px] font-bold uppercase outline-none w-full text-slate-400 py-2.5"
+            value={startDate}
+            onChange={(e) => {
+              setStartDate(e.target.value);
+              setCurrentPage(0);
+            }}
+          />
+          <span className="text-slate-800 text-[10px] font-black tracking-widest">
+            —
+          </span>
+          <input
+            type="date"
+            className="bg-transparent text-[10px] font-bold uppercase outline-none w-full text-slate-400 py-2.5"
+            value={endDate}
+            onChange={(e) => {
+              setEndDate(e.target.value);
+              setCurrentPage(0);
+            }}
+          />
+        </div>
+        <button
+          onClick={() => {
+            setSearchTerm('');
+            setStartDate('');
+            setEndDate('');
+            setCurrentPage(0);
+          }}
+          className="bg-slate-800 hover:bg-slate-700 border border-white/5 rounded-xl text-[10px] font-black uppercase tracking-widest flex items-center justify-center gap-2 transition-all px-4"
+        >
+          <XCircle size={14} /> Reset
+        </button>
+      </div>
+
+      {/* MAIN DATA TABLE */}
+      <div className="bg-slate-900/30 border border-white/5 rounded-2xl overflow-hidden shadow-xl mb-4">
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse">
+            <thead>
+              <tr className="border-b border-white/5 bg-white/5 text-left text-[9px] font-black uppercase text-slate-500 tracking-[0.2em]">
+                <th className="p-4 w-12"></th>
+                <th className="p-4">PO Ref / Date</th>
+                <th className="p-4">Supplier & Operator</th>
+                <th className="p-4 text-right text-indigo-400/50 uppercase">
+                  Generic
+                </th>
+                <th className="p-4 text-right text-amber-400/50 uppercase">
+                  Branded
+                </th>
+                <th className="p-4 text-center">Verification</th>
+                <th className="p-4 text-right text-white">Grand Total</th>
+                <th className="p-4 w-12"></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5">
+              {orders.length === 0 && !loading && (
+                <tr>
+                  <td
+                    colSpan={8}
+                    className="p-16 text-center text-slate-600 font-mono text-xs tracking-widest"
+                  >
+                    NO_ARCHIVE_DATA_FOUND
+                  </td>
+                </tr>
+              )}
+              {orders.map((order) => (
+                <React.Fragment key={order.id}>
+                  <tr
+                    onClick={() =>
+                      setExpandedRow(expandedRow === order.id ? null : order.id)
+                    }
+                    className={`cursor-pointer transition-all duration-150 group ${
+                      expandedRow === order.id
+                        ? 'bg-blue-600/5'
+                        : 'hover:bg-white/[0.02]'
+                    }`}
+                  >
+                    <td className="p-4 text-center">
+                      <Layers
+                        size={12}
+                        className={
+                          expandedRow === order.id
+                            ? 'text-blue-400'
+                            : 'text-slate-700'
+                        }
+                      />
+                    </td>
+                    <td className="p-4">
+                      <div className="flex flex-col font-mono leading-tight">
+                        <span className="text-blue-400 font-black text-xs uppercase">
+                          {order.po_number}
+                        </span>
+                        <span className="text-[9px] text-slate-500 uppercase mt-0.5">
+                          {new Date(order.created_at).toLocaleDateString()}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="p-4">
+                      <div className="flex flex-col leading-tight">
+                        <span className="text-[10px] font-black uppercase text-slate-300 flex items-center gap-1">
+                          <Truck size={10} className="text-blue-500" />{' '}
+                          {order.supplier_name}
+                        </span>
+                        <span className="text-[9px] font-bold text-slate-500 uppercase flex items-center gap-1">
+                          <User size={10} /> {order.profiles?.full_name}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="p-4 text-right font-mono text-xs text-indigo-400/80">
+                      ₱{(order.generic_amt || 0).toLocaleString()}
+                    </td>
+                    <td className="p-4 text-right font-mono text-xs text-amber-400/80">
+                      ₱{(order.branded_amt || 0).toLocaleString()}
+                    </td>
+                    <td className="p-4 text-center">
+                      {order.is_checked ? (
+                        <div className="flex flex-col items-center">
+                          <div className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded text-[8px] font-black uppercase flex items-center gap-1">
+                            <CheckCircle2 size={10} /> Checked
+                          </div>
+                          <span className="text-[7px] text-slate-600 uppercase mt-1 italic">
+                            {order.checked_by_name}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="bg-slate-800 text-slate-500 px-2 py-0.5 rounded text-[8px] font-black uppercase inline-flex items-center gap-1">
+                          <Clock size={10} /> Pending
+                        </div>
+                      )}
+                    </td>
+                    <td className="p-4 text-right font-black text-emerald-400 font-mono text-sm tracking-tighter">
+                      ₱
+                      {order.total_amount?.toLocaleString(undefined, {
+                        minimumFractionDigits: 2,
+                      })}
+                    </td>
+                    <td className="p-4 text-slate-700 group-hover:text-blue-500 transition-colors">
+                      {expandedRow === order.id ? (
+                        <ChevronUp size={16} />
+                      ) : (
+                        <ChevronDown size={16} />
+                      )}
+                    </td>
+                  </tr>
+
+                  {/* EXPANDED SECTION: ITEM LIST */}
+                  {expandedRow === order.id && (
+                    <tr>
+                      <td
+                        colSpan={8}
+                        className="bg-black/40 border-y border-blue-500/10 p-5"
+                      >
+                        <div className="flex flex-col gap-4">
+                          <div className="flex justify-between items-center border-b border-white/5 pb-2">
+                            <div>
+                              <h3 className="text-[9px] font-black text-blue-500 uppercase tracking-widest flex items-center gap-2">
+                                <Layers size={12} /> Itemized Procurement
+                              </h3>
+                              <p className="text-[8px] text-slate-600 font-bold uppercase mt-1">
+                                Invoice: {order.invoice_id || 'N/A'}
+                              </p>
+                            </div>
+                            {canVerify && !order.is_checked && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleVerifyOrder(order.id);
+                                }}
+                                disabled={isVerifying === order.id}
+                                className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest flex items-center gap-2 transition-all shadow-lg"
+                              >
+                                {isVerifying === order.id ? (
+                                  'Processing...'
+                                ) : (
+                                  <>
+                                    <ShieldCheck size={12} /> Tag as Verified
+                                  </>
+                                )}
+                              </button>
+                            )}
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                            {order.purchase_order_items &&
+                            order.purchase_order_items.length > 0 ? (
+                              order.purchase_order_items.map((item: any) => (
+                                <div
+                                  key={item.id}
+                                  className="flex justify-between items-center bg-white/[0.02] p-3 rounded-lg border border-white/5"
+                                >
+                                  <div className="flex flex-col">
+                                    <span className="text-[10px] font-black text-slate-300 uppercase">
+                                      {item.item_name}
+                                    </span>
+                                    <span className="text-[8px] font-black text-slate-600 uppercase tracking-tighter">
+                                      {item.item_type || 'GENERIC'}
+                                    </span>
+                                  </div>
+                                  <div className="text-right">
+                                    <span className="text-[9px] text-slate-600 font-mono block">
+                                      QTY: {item.quantity} @ ₱
+                                      {Number(item.buy_cost).toFixed(2)}
+                                    </span>
+                                    <span className="text-xs font-black text-emerald-500/80 font-mono">
+                                      ₱
+                                      {(item.quantity * item.buy_cost).toFixed(
+                                        2
+                                      )}
+                                    </span>
+                                  </div>
+                                </div>
+                              ))
+                            ) : (
+                              <div className="col-span-full py-8 text-center border border-dashed border-white/10 rounded-xl">
+                                <p className="text-[9px] text-slate-600 uppercase font-mono tracking-widest">
+                                  No_Products_Found_For_PO: {order.po_number}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* FOOTER PAGINATION */}
+      <div className="flex flex-col sm:flex-row justify-between items-center px-2 gap-4">
+        <p className="text-[9px] font-black text-slate-700 uppercase tracking-widest">
+          {loading
+            ? 'SYNCING_ARCHIVE...'
+            : `SHOWING ${orders.length} OF ${totalCount} MATCHES`}
+        </p>
+        <div className="flex items-center gap-2">
+          <button
+            disabled={currentPage === 0 || loading}
+            onClick={() => setCurrentPage((prev) => prev - 1)}
+            className="p-2 bg-slate-900/50 border border-white/5 rounded-lg disabled:opacity-20 hover:bg-blue-600/20 text-blue-500 transition-all"
+          >
+            <ChevronLeft size={16} />
+          </button>
+          <div className="bg-slate-900/50 border border-white/5 px-4 py-1.5 rounded-lg font-mono text-[10px] font-black uppercase text-slate-400">
+            PAGE {currentPage + 1}
+          </div>
+          <button
+            disabled={(currentPage + 1) * pageSize >= totalCount || loading}
+            onClick={() => setCurrentPage((prev) => prev + 1)}
+            className="p-2 bg-slate-900/50 border border-white/5 rounded-lg disabled:opacity-20 hover:bg-blue-600/20 text-blue-500 transition-all"
+          >
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

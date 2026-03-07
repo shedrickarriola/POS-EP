@@ -1,0 +1,18 @@
+/* app/globals.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* These values can be updated by your users later */
+  --primary: 16 185 129; /* Emerald RGB */
+  --bg: 2 6 23; /* Navy RGB */
+  --surface: 15 23 42; /* Slate RGB */
+  --radius: 1.5rem;
+}
+
+/* Now you can use these anywhere */
+.btn-custom {
+  background-color: rgb(var(--primary));
+  border-radius: var(--radius);
+}
