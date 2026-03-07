@@ -436,7 +436,7 @@ export default function StaffDashboard() {
         <div className="max-w-6xl mx-auto flex justify-between items-center">
           <div>
             <h1 className="text-lg font-black italic tracking-tighter text-white uppercase leading-none">
-              PHARMA_<span className="text-emerald-500">OPS</span>
+              ECONO_<span className="text-emerald-500">DRUGSTORE</span>
             </h1>
             <p className="text-[9px] font-bold text-slate-500 uppercase mt-1 tracking-widest">
               {selectedBranch.branch_name} | {profile?.role}
@@ -519,6 +519,15 @@ export default function StaffDashboard() {
                 </span>
                 <ClipboardList size={18} className="text-slate-500" />
               </button>
+              <button
+                onClick={() => router.push('/staff/inventory/view')}
+                className="flex items-center justify-between p-6 bg-slate-900 border border-white/5 rounded-2xl hover:bg-slate-800 transition-all"
+              >
+                <span className="text-sm font-black uppercase italic text-slate-300">
+                  Inventory
+                </span>
+                <ClipboardList size={18} className="text-slate-500" />
+              </button>
             </div>
           </div>
 
@@ -552,15 +561,15 @@ export default function StaffDashboard() {
               <button
                 onClick={() =>
                   router.push(
-                    `/staff/purchase/update?branchName=${selectedBranch.branch_name}`
+                    '/staff/purchase/update?branchName=${selectedBranch.branch_name}'
                   )
                 }
-                className="flex items-center justify-between p-6 bg-blue-600 hover:bg-blue-500 rounded-2xl transition-all shadow-xl shadow-blue-950/20"
+                className="flex items-center justify-between p-6 bg-slate-900 border border-white/5 rounded-2xl hover:bg-slate-800 transition-all"
               >
-                <span className="text-sm font-black uppercase italic text-white">
-                  Update Purchase Order
+                <span className="text-sm font-black uppercase italic text-slate-300">
+                  Update PO
                 </span>
-                <Package size={18} />
+                <Activity size={18} className="text-slate-500" />
               </button>
             </div>
           </div>

@@ -56,7 +56,7 @@ export default function LoginPage() {
       <div className="max-w-md w-full bg-slate-900 p-10 rounded-[2rem] shadow-2xl border border-white/5">
         <div className="text-center mb-10">
           <h1 className="text-3xl font-black text-white italic tracking-tighter">
-            PHARMA<span className="text-emerald-500">_CORE</span>
+            ECONO<span className="text-emerald-500">_DRUGSTORE</span>
           </h1>
           <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mt-2">
             Secure Terminal Login
