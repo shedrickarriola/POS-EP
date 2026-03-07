@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = 'https://euiplkmilfhujuprzifd.supabase.co';
-const supabaseAnonKey = 'sb_publishable_DnFrjA2Nb8WcJIFg1irhqQ_DRQqv0Vc';
+// This pulls from the Vercel Environment Variables you already set up
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
-// This is a singleton client to prevent memory leaks on mobile browsers
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
