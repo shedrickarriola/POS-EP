@@ -719,7 +719,12 @@ export default function StaffDashboard() {
                 <UserIcon size={16} />
               </div>
             </div>
-
+            <button
+              onClick={() => router.push('/staff/reports')}
+              className="flex-1 md:flex-none px-6 py-4 bg-slate-900 border border-white/10 hover:border-emerald-500/50 rounded-2xl text-sm font-black uppercase tracking-widest text-white flex items-center justify-center gap-3 transition-all"
+            >
+              <Calendar size={18} /> Reports_Audit
+            </button>
             <div className="flex gap-2">
               <button
                 onClick={() => setShowReportModal(true)}
