@@ -23,6 +23,11 @@ import {
   FileDown,
   FileUp,
   RefreshCw,
+  History,
+  User as UserIcon,
+  Calendar,
+  File,
+  TrendingUp,
 } from 'lucide-react';
 
 export default function StaffDashboard() {
@@ -32,7 +37,26 @@ export default function StaffDashboard() {
   const [selectedBranch, setSelectedBranch] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [logStatus, setLogStatus] = useState<string>('');
-  const [stats, setStats] = useState({ poCount: 0, salesCount: 0 });
+  const [stats, setStats] = useState({
+    poCount: 0,
+    salesCount: 0,
+    daily_generic_quota: 0,
+    daily_total_quota: 0,
+    weekly_quota: 0,
+    monthly_quota: 0,
+  });
+  const [canReportingProceed, setCanReportingProceed] = useState(true);
+  const [missingDate, setMissingDate] = useState<string | null>(null);
+
+  // Daily Reports State
+  const [dailyReports, setDailyReports] = useState<any[]>([]);
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [remittance, setRemittance] = useState({
+    actual_cash: 0,
+    expenses: 0,
+    notes: '',
+    report_date: new Date().toISOString().split('T')[0],
+  });
 
   const [toast, setToast] = useState<{
     show: boolean;
@@ -69,6 +93,28 @@ export default function StaffDashboard() {
     setSearchResults([]);
     setSelectedProduct(null);
   };
+  // Helper to get days in the current month
+  const getDaysInCurrentMonth = () => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  };
+
+  const updateQuotas = (branch: any) => {
+    if (!branch) return;
+
+    const dailyGen = parseFloat(branch.daily_generic_quota) || 0;
+    const dailyTotal = parseFloat(branch.daily_total_quota) || 0;
+    const daysInMonth = getDaysInCurrentMonth();
+
+    setStats({
+      ...stats,
+      // We update the stats object with the calculated quotas
+      daily_generic_quota: dailyGen,
+      daily_total_quota: dailyTotal,
+      weekly_quota: dailyTotal * 7,
+      monthly_quota: dailyTotal * daysInMonth,
+    });
+  };
 
   useEffect(() => {
     async function getInitialData() {
@@ -99,6 +145,9 @@ export default function StaffDashboard() {
             const parsedBranch = JSON.parse(savedBranch);
             setSelectedBranch(parsedBranch);
             fetchStats(parsedBranch.id);
+            updateQuotas(parsedBranch.id);
+            fetchDailyReports(parsedBranch.id);
+            syncDailyReportRealtime(parsedBranch.id);
           }
         }
       } catch (err) {
@@ -119,7 +168,6 @@ export default function StaffDashboard() {
           .eq('branch_id', selectedBranch.id)
           .ilike('item_name', `%${searchTerm}%`)
           .limit(5);
-
         setSearchResults(data || []);
       }, 300);
       return () => clearTimeout(delayDebounceFn);
@@ -142,10 +190,23 @@ export default function StaffDashboard() {
     setStats({ poCount: poRes.count || 0, salesCount: orderRes.count || 0 });
   }
 
+  async function fetchDailyReports(branchId: string) {
+    const { data } = await supabase
+      .from('daily_reports')
+      .select('*')
+      .eq('branch_id', branchId)
+      .order('report_date', { ascending: false })
+      .limit(31); // Increase to 31 to cover a full month of backfills
+
+    setDailyReports(data || []);
+  }
+
   const handleBranchSelect = (branch: any) => {
     setSelectedBranch(branch);
     localStorage.setItem('active_branch', JSON.stringify(branch));
     fetchStats(branch.id);
+    fetchDailyReports(branch.id);
+    syncDailyReportRealtime(branch.id);
   };
 
   const handleLogout = async () => {
@@ -174,7 +235,7 @@ export default function StaffDashboard() {
     }
   };
 
-  const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImportExcel = async (e: any) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setLogStatus('PARSING_EXCEL_DATA...');
@@ -212,100 +273,61 @@ export default function StaffDashboard() {
     if (!selectedBranch) return;
     setIsWiping(true);
     setLogStatus('VERIFYING_MANAGEMENT_IDENTITY...');
-
     try {
       const ghostSupabase = createClient(
         (supabase as any).supabaseUrl,
         (supabase as any).supabaseKey,
         { auth: { persistSession: false } }
       );
-
       const { data: authData, error: authError } =
         await ghostSupabase.auth.signInWithPassword({
           email: authDetails.email,
           password: authDetails.password,
         });
-
       if (authError || !authData.user) throw new Error('AUTH_FAILED');
-
       const { data: mProf } = await ghostSupabase
         .from('profiles')
         .select('role')
         .eq('id', authData.user.id)
         .single();
-
       if (mProf?.role !== 'org_manager') throw new Error('NOT_A_MANAGER');
 
       setLogStatus(
         `IDENTITY_CONFIRMED: WIPING_${selectedBranch.branch_name.toUpperCase()}...`
       );
       const targetId = selectedBranch.id;
-
-      // --- 1. PREPARE IDs FOR NESTED TABLES ---
-
-      // Get PO IDs
       const { data: poRows } = await ghostSupabase
         .from('purchase_orders')
         .select('id')
         .eq('branch_id', targetId);
       const poIds = poRows?.map((r) => r.id) || [];
-
-      // Get Sales Order IDs
       const { data: saleRows } = await ghostSupabase
         .from('orders')
         .select('id')
         .eq('branch_id', targetId);
       const saleIds = saleRows?.map((r) => r.id) || [];
 
-      // --- 2. DELETE LEAF NODES (ITEMS) ---
-
-      // Delete Purchase Items
-      if (poIds.length > 0) {
-        const { error: err } = await ghostSupabase
+      if (poIds.length > 0)
+        await ghostSupabase
           .from('purchase_order_items')
           .delete()
           .in('purchase_order_id', poIds);
-        if (err) throw new Error(`PO_Items: ${err.message}`);
-      }
-
-      // Delete Sales Items
-      if (saleIds.length > 0) {
-        const { error: err } = await ghostSupabase
+      if (saleIds.length > 0)
+        await ghostSupabase
           .from('order_items')
           .delete()
           .in('order_id', saleIds);
-        if (err) throw new Error(`Sale_Items: ${err.message}`);
-      }
-
-      // --- 3. DELETE HEADERS ---
-
-      // Delete Purchase Orders
-      const { error: poErr } = await ghostSupabase
+      await ghostSupabase
         .from('purchase_orders')
         .delete()
         .eq('branch_id', targetId);
-      if (poErr) throw new Error(`POs: ${poErr.message}`);
-
-      // Delete Sales Orders
-      const { error: saleErr } = await ghostSupabase
-        .from('orders')
-        .delete()
-        .eq('branch_id', targetId);
-      if (saleErr) throw new Error(`Sales: ${saleErr.message}`);
-
-      // --- 4. DELETE ROOT DATA (INVENTORY) ---
-
-      const { error: invErr } = await ghostSupabase
-        .from('inventory')
-        .delete()
-        .eq('branch_id', targetId);
-      if (invErr) throw new Error(`Inventory: ${invErr.message}`);
+      await ghostSupabase.from('orders').delete().eq('branch_id', targetId);
+      await ghostSupabase.from('inventory').delete().eq('branch_id', targetId);
 
       setLogStatus('WIPE_COMPLETE: NODE_PURGED');
       triggerToast('Branch Data Reset Successful');
       setShowResetAuth(false);
       setAuthDetails({ email: '', password: '' });
-
       window.location.reload();
     } catch (err: any) {
       setLogStatus(`ERROR: ${err.message}`);
@@ -333,11 +355,9 @@ export default function StaffDashboard() {
       ]);
       if (error) throw error;
       triggerToast(`${newProduct.name} Registered!`, 'success');
-      setLogStatus(`ID_NEW_ITEM_CREATED: ${newProduct.name}`);
       setNewProduct({ name: '', cost: 0, selling: 0 });
       setShowAddModal(false);
     } catch (err: any) {
-      setLogStatus(`ERR: ${err.message}`);
       triggerToast(err.message, 'error');
     }
   };
@@ -354,10 +374,233 @@ export default function StaffDashboard() {
       triggerToast('Price Calibration Complete', 'success');
       refreshInventoryState();
       setShowPriceModal(false);
-      setLogStatus('PRICES_SYNCHRONIZED');
     } catch (err: any) {
-      setLogStatus(`ERR: ${err.message}`);
       triggerToast(err.message, 'error');
+    }
+  };
+
+  const calculateQuotas = (branch: any) => {
+    if (!branch) return { weekly: 0, monthly: 0 };
+
+    const now = new Date();
+    // Get total days in the current month
+    const daysInMonth = new Date(
+      now.getFullYear(),
+      now.getMonth() + 1,
+      0
+    ).getDate();
+
+    const dailyGeneric = parseFloat(branch.daily_generic_quota) || 0;
+    const dailyTotal = parseFloat(branch.daily_total_quota) || 0;
+
+    return {
+      dailyGeneric,
+      dailyTotal,
+      weeklyTotal: dailyTotal * 7,
+      monthlyTotal: dailyTotal * daysInMonth,
+    };
+  };
+  const handleOpenReport = async () => {
+    const now = new Date();
+    // Ensure we use local date string for querying
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const localDateStr = `${year}-${month}-${day}`;
+
+    setLogStatus('CALCULATING_REALTIME_SALES...');
+
+    // 1. Fetch orders for the current branch and today's date
+    const { data: orders, error: orderError } = await supabase
+      .from('orders')
+      .select('total_price, type')
+      .eq('branch_id', selectedBranch.id)
+      .eq('order_date', localDateStr);
+
+    let genTotal = 0;
+    let brdTotal = 0;
+
+    if (!orderError && orders) {
+      // Aggregating by 'type' column
+      genTotal = orders
+        .filter((o) => o.type === 'Generic')
+        .reduce((sum, o) => sum + (Number(o.total_price) || 0), 0);
+
+      brdTotal = orders
+        .filter((o) => o.type === 'Branded')
+        .reduce((sum, o) => sum + (Number(o.total_price) || 0), 0);
+    }
+
+    // 2. Weekly Validation (Sun-Sat Logic)
+    const lastSun = new Date();
+    lastSun.setDate(now.getDate() - now.getDay() - 7);
+    lastSun.setHours(0, 0, 0, 0);
+    const lastSat = new Date(lastSun);
+    lastSat.setDate(lastSun.getDate() + 6);
+
+    const missingDates = [];
+    const tempDate = new Date(lastSun);
+    while (tempDate <= lastSat) {
+      const dStr = tempDate.toLocaleDateString('en-CA');
+      if (!dailyReports.find((r) => r.report_date === dStr)) {
+        missingDates.push(dStr);
+      }
+      tempDate.setDate(tempDate.getDate() + 1);
+    }
+
+    const hasHistory = dailyReports.some(
+      (r) => new Date(r.report_date) < lastSun
+    );
+
+    if (missingDates.length > 0 && hasHistory) {
+      setCanReportingProceed(false);
+      setMissingDate(missingDates[0]);
+      triggerToast(`Backfill required: ${missingDates[0]}`, 'error');
+    } else {
+      setCanReportingProceed(true);
+      setMissingDate(null);
+    }
+
+    // 3. Populate Remittance State with Real-Time Totals
+    setRemittance({
+      ...remittance,
+      report_date: localDateStr,
+      actual_cash: 0,
+      expenses: 0,
+      generic_sales: genTotal,
+      branded_sales: brdTotal,
+      total_sales: genTotal + brdTotal,
+    });
+
+    setLogStatus('SYNC_COMPLETE: READY_FOR_SUBMISSION');
+    setShowReportModal(true);
+  };
+  const handleSaveReport = async () => {
+    if (!remittance.actual_cash)
+      return triggerToast('Actual Cash Required', 'error');
+
+    // Helper to ensure 2 decimal precision
+    const formatMoney = (val: any) => Number(Number(val || 0).toFixed(2));
+
+    const { error } = await supabase.from('daily_reports').upsert(
+      [
+        {
+          branch_id: selectedBranch.id,
+          branch_name: selectedBranch.branch_name,
+          report_date: remittance.report_date,
+          // Formatting inputs to 2 decimal places
+          actual_cash: formatMoney(remittance.actual_cash),
+          expenses: formatMoney(remittance.expenses),
+          // Saving real-time calculated sales with 2 decimal precision
+          generic_sales: formatMoney(remittance.generic_sales),
+          branded_sales: formatMoney(remittance.branded_sales),
+          total_sales: formatMoney(remittance.total_sales),
+          reported_by: profile?.full_name,
+          is_checked: false,
+        },
+      ],
+      {
+        onConflict: 'branch_id,report_date',
+      }
+    );
+
+    if (!error) {
+      triggerToast('Audit Synchronized');
+      setShowReportModal(false);
+      fetchDailyReports(selectedBranch.id);
+      syncDailyReportRealtime(selectedBranch.id);
+    } else {
+      console.error('Save Error:', error.message);
+      triggerToast(error.message, 'error');
+    }
+  };
+  const syncDailyReportRealtime = async (branchId: string) => {
+    const now = new Date();
+
+    // 1. Define the Time Range for Today (UTC/Local Range)
+    const startOfDay = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
+    const endOfDay = new Date(
+      new Date().setHours(23, 59, 59, 999)
+    ).toISOString();
+
+    setLogStatus('REALTIME_SYNC_INITIATED...');
+
+    // 2. Fetch Orders for Today
+    const { data: orders, error: orderError } = await supabase
+      .from('orders')
+      .select('generic_amt, branded_amt, total_amount, created_at')
+      .eq('branch_id', branchId)
+      .gte('created_at', startOfDay)
+      .lte('created_at', endOfDay);
+
+    if (orderError || !orders || orders.length === 0) {
+      setLogStatus('IDLE: NO_ORDERS_TODAY');
+      return;
+    }
+
+    // 3. Extract the Date String from the first order's timestamp
+    // This turns "2026-03-10T14:30:00Z" into "2026-03-10"
+    const orderDateOnly = orders[0].created_at.split('T')[0];
+
+    // 4. Null-Safe Aggregation
+    const genTotal = Number(
+      orders
+        .reduce((sum, o) => sum + (parseFloat(o.generic_amt) || 0), 0)
+        .toFixed(2)
+    );
+
+    const brdTotal = Number(
+      orders
+        .reduce((sum, o) => sum + (parseFloat(o.branded_amt) || 0), 0)
+        .toFixed(2)
+    );
+
+    const ttlTotal = Number(
+      orders
+        .reduce((sum, o) => sum + (parseFloat(o.total_amount) || 0), 0)
+        .toFixed(2)
+    );
+
+    // 5. UPSERT using the date from the order timestamp
+    const { error: upsertError } = await supabase.from('daily_reports').upsert(
+      {
+        branch_id: branchId,
+        report_date: orderDateOnly, // Using the order's own date
+        generic_sales: genTotal,
+        branded_sales: brdTotal,
+        total_sales: ttlTotal,
+        branch_name: selectedBranch?.branch_name,
+      },
+      {
+        onConflict: 'branch_id,report_date',
+      }
+    );
+
+    if (!upsertError) {
+      setLogStatus(
+        `SYNC_SUCCESS: ${orderDateOnly} ₱${ttlTotal.toLocaleString()}`
+      );
+      fetchDailyReports(branchId);
+    } else {
+      console.error('Upsert Error:', upsertError);
+      setLogStatus('SYNC_ERROR_DATABASE');
+    }
+  };
+
+  const handleVerifyReport = async (reportId: string) => {
+    if (profile?.role !== 'branch_admin' && profile?.role !== 'org_manager') {
+      return triggerToast('Admin Privileges Required', 'error');
+    }
+    setLogStatus('VERIFYING_REMITTANCE_NODE...');
+    const { error } = await supabase
+      .from('daily_reports')
+      .update({ is_checked: true, checked_by: profile.full_name })
+      .eq('id', reportId);
+
+    if (!error) {
+      triggerToast('Report Verified');
+      fetchDailyReports(selectedBranch.id);
+      syncDailyReportRealtime(selectedBranch.id);
     }
   };
 
@@ -411,7 +654,6 @@ export default function StaffDashboard() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200">
-      {/* Toast Notification */}
       {toast.show && (
         <div
           className={`fixed top-10 left-1/2 -translate-x-1/2 z-[200] flex items-center gap-3 px-6 py-4 rounded-2xl border backdrop-blur-xl shadow-2xl transition-all animate-in fade-in zoom-in slide-in-from-top-4 ${
@@ -431,68 +673,310 @@ export default function StaffDashboard() {
         </div>
       )}
 
-      {/* Navigation */}
       <nav className="border-b border-white/5 bg-slate-900/40 backdrop-blur-md px-6 py-4 sticky top-0 z-50">
         <div className="max-w-6xl mx-auto flex justify-between items-center">
-          <div>
-            <h1 className="text-lg font-black italic tracking-tighter text-white uppercase leading-none">
-              ECONO_<span className="text-emerald-500">DRUGSTORE</span>
-            </h1>
-            <p className="text-[9px] font-bold text-slate-500 uppercase mt-1 tracking-widest">
-              {selectedBranch.branch_name} | {profile?.role}
-            </p>
+          <div className="flex items-center gap-6">
+            <div>
+              <h1 className="text-lg font-black italic tracking-tighter text-white uppercase leading-none">
+                ECONO_<span className="text-emerald-500">DRUGSTORE</span>
+              </h1>
+              <p className="text-[9px] font-bold text-slate-500 uppercase mt-1 tracking-widest">
+                {selectedBranch.branch_name} | {profile?.role}
+              </p>
+            </div>
+            <div className="hidden md:flex gap-4 border-l border-white/10 pl-6">
+              <div>
+                <span className="block text-[8px] font-black text-slate-500 uppercase">
+                  Orders
+                </span>
+                <span className="text-xs font-black text-emerald-500">
+                  {stats.salesCount}
+                </span>
+              </div>
+              <div>
+                <span className="block text-[8px] font-black text-slate-500 uppercase">
+                  PO
+                </span>
+                <span className="text-xs font-black text-blue-400">
+                  {stats.poCount}
+                </span>
+              </div>
+            </div>
           </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => {
-                localStorage.removeItem('active_branch');
-                setSelectedBranch(null);
-              }}
-              className="p-2 hover:bg-white/5 rounded-lg text-slate-500 transition-colors"
-            >
-              <LayoutGrid size={18} />
-            </button>
-            <button
-              onClick={handleLogout}
-              className="p-2 hover:bg-red-500/10 rounded-lg text-slate-500 hover:text-red-500 transition-colors"
-            >
-              <LogOut size={18} />
-            </button>
+
+          <div className="flex items-center gap-3">
+            {/* USER DETAILS - MOVED TO THE RIGHT SIDE */}
+            <div className="hidden sm:flex items-center gap-3 px-4 border-r border-white/10">
+              <div className="text-right">
+                <span className="block text-[8px] font-black text-slate-500 uppercase leading-none tracking-widest">
+                  Operator_Active
+                </span>
+                <span className="text-[10px] font-bold text-white uppercase">
+                  {profile?.full_name || 'System User'}
+                </span>
+              </div>
+              <div className="bg-emerald-500/10 p-2 rounded-lg text-emerald-500">
+                <UserIcon size={16} />
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowReportModal(true)}
+                className="p-2 bg-emerald-500/10 hover:bg-emerald-500/20 rounded-lg text-emerald-500 transition-colors"
+                title="Daily Report"
+              >
+                <ClipboardList size={18} />
+              </button>
+              <button
+                onClick={() => {
+                  localStorage.removeItem('active_branch');
+                  setSelectedBranch(null);
+                }}
+                className="p-2 hover:bg-white/5 rounded-lg text-slate-500 transition-colors"
+                title="Change Branch"
+              >
+                <LayoutGrid size={18} />
+              </button>
+              <button
+                onClick={handleLogout}
+                className="p-2 hover:bg-red-500/10 rounded-lg text-slate-500 hover:text-red-500 transition-colors"
+                title="Logout"
+              >
+                <LogOut size={18} />
+              </button>
+            </div>
           </div>
         </div>
       </nav>
 
       <main className="max-w-6xl mx-auto p-6 lg:p-10 pb-24">
-        {/* Stats Grid */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-10">
-          {[
-            {
-              label: 'Orders',
-              val: stats.salesCount,
-              color: 'text-emerald-400',
-            },
-            { label: 'Purchase', val: stats.poCount, color: 'text-blue-400' },
-            { label: 'Status', val: 'ONLINE', color: 'text-slate-400' },
-            {
-              label: 'Branch',
-              val: selectedBranch.branch_name,
-              color: 'text-orange-400',
-            },
-          ].map((s, i) => (
-            <div
-              key={i}
-              className="bg-slate-900/40 border border-white/5 p-5 rounded-2xl"
-            >
-              <span className="text-[9px] font-black uppercase tracking-widest text-slate-500 block mb-1">
-                {s.label}
-              </span>
-              <p
-                className={`text-xl font-black uppercase tracking-tight ${s.color}`}
-              >
-                {s.val}
-              </p>
-            </div>
-          ))}
+        {/* Previous 7 Day Report Audit */}
+        <div className="mb-10">
+          <h3 className="text-[10px] font-black text-slate-600 uppercase tracking-[0.3em] px-1 italic mb-4 flex items-center gap-2">
+            <History size={12} /> 7_Day_Report_Audit
+          </h3>
+
+          {(() => {
+            const now = new Date();
+
+            // Date Bounds
+            const sun = new Date(now);
+            sun.setDate(now.getDate() - now.getDay());
+            sun.setHours(0, 0, 0, 0);
+            const sat = new Date(sun);
+            sat.setDate(sun.getDate() + 6);
+
+            const firstDayMonth = new Date(
+              now.getFullYear(),
+              now.getMonth(),
+              1
+            );
+            const daysInMonth = new Date(
+              now.getFullYear(),
+              now.getMonth() + 1,
+              0
+            ).getDate();
+
+            // Quotas & Actuals
+            const dailyGen = Number(selectedBranch?.daily_generic_quota || 0);
+            const weeklyQuo = dailyGen * 7;
+            const monthlyQuo = dailyGen * daysInMonth;
+
+            const totals = dailyReports.reduce(
+              (acc, r) => {
+                const rDate = new Date(r.report_date);
+                const gen = Number(r.generic_sales || 0);
+                if (rDate >= sun && rDate <= sat) acc.w += gen;
+                if (rDate >= firstDayMonth && rDate <= now) acc.m += gen;
+                return acc;
+              },
+              { w: 0, m: 0 }
+            );
+
+            const getProg = (a: number, q: number) =>
+              q > 0 ? Math.min((a / q) * 100, 100) : 0;
+
+            return (
+              <div className="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Weekly Generic */}
+                <div className="bg-slate-900/40 border border-white/5 p-4 rounded-2xl">
+                  <div className="flex justify-between items-start mb-2">
+                    <div>
+                      <p className="text-[9px] font-black text-emerald-500 uppercase tracking-widest">
+                        Weekly_Generic
+                      </p>
+                      <p className="text-xl font-black text-white">
+                        ₱{totals.w.toLocaleString()}
+                      </p>
+                    </div>
+                    <p className="text-xs font-black text-emerald-500 bg-emerald-500/10 px-2 py-1 rounded-lg">
+                      {getProg(totals.w, weeklyQuo).toFixed(0)}%
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 h-1.5 bg-black rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-emerald-500"
+                        style={{ width: `${getProg(totals.w, weeklyQuo)}%` }}
+                      />
+                    </div>
+                    <span className="text-[9px] font-bold text-slate-500 whitespace-nowrap">
+                      Target: ₱{weeklyQuo.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Monthly Generic */}
+                <div className="bg-slate-900/40 border border-white/5 p-4 rounded-2xl">
+                  <div className="flex justify-between items-start mb-2">
+                    <div>
+                      <p className="text-[9px] font-black text-blue-500 uppercase tracking-widest">
+                        Monthly_Generic
+                      </p>
+                      <p className="text-xl font-black text-white">
+                        ₱{totals.m.toLocaleString()}
+                      </p>
+                    </div>
+                    <p className="text-xs font-black text-blue-500 bg-blue-500/10 px-2 py-1 rounded-lg">
+                      {getProg(totals.m, monthlyQuo).toFixed(0)}%
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 h-1.5 bg-black rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-blue-500"
+                        style={{ width: `${getProg(totals.m, monthlyQuo)}%` }}
+                      />
+                    </div>
+                    <span className="text-[9px] font-bold text-slate-500 whitespace-nowrap">
+                      Target: ₱{monthlyQuo.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* 7-Day Grid */}
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+            {(() => {
+              const now = new Date();
+              const sun = new Date(now);
+              sun.setDate(now.getDate() - now.getDay());
+              sun.setHours(0, 0, 0, 0);
+
+              return Array.from({ length: 7 }).map((_, i) => {
+                const date = new Date(sun);
+                date.setDate(sun.getDate() + i);
+
+                const year = date.getFullYear();
+                const month = String(date.getMonth() + 1).padStart(2, '0');
+                const day = String(date.getDate()).padStart(2, '0');
+                const dateStr = `${year}-${month}-${day}`;
+
+                const report = dailyReports.find(
+                  (r) => r.report_date === dateStr
+                );
+                const isFuture = date > now;
+                const isToday = dateStr === now.toLocaleDateString('en-CA');
+
+                return (
+                  <div
+                    key={i}
+                    className={`p-4 rounded-2xl border transition-all ${
+                      isFuture
+                        ? 'opacity-40 bg-slate-900/20 border-white/5'
+                        : !report
+                        ? 'bg-red-500/5 border-red-500/20'
+                        : 'bg-slate-900/40 border-white/5'
+                    }`}
+                  >
+                    <span className="text-[8px] font-black text-slate-500 uppercase block mb-1">
+                      {isToday
+                        ? 'TODAY'
+                        : date
+                            .toLocaleDateString('en-US', {
+                              weekday: 'short',
+                              day: 'numeric',
+                            })
+                            .toUpperCase()}
+                    </span>
+
+                    <div className="space-y-1 mb-3 border-b border-white/5 pb-2">
+                      <div className="flex justify-between text-[9px] font-bold">
+                        <span className="text-slate-500">GEN</span>
+                        <span className="text-white">
+                          ₱
+                          {Number(report?.generic_sales || 0).toLocaleString(
+                            undefined,
+                            { minimumFractionDigits: 2 }
+                          )}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-[9px] font-bold">
+                        <span className="text-slate-500">BRD</span>
+                        <span className="text-white">
+                          ₱
+                          {Number(report?.branded_sales || 0).toLocaleString(
+                            undefined,
+                            { minimumFractionDigits: 2 }
+                          )}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-[10px] font-black pt-1">
+                        <span className="text-emerald-500">TTL</span>
+                        <span className="text-emerald-500">
+                          ₱
+                          {Number(report?.total_sales || 0).toLocaleString(
+                            undefined,
+                            { minimumFractionDigits: 2 }
+                          )}
+                        </span>
+                      </div>
+                    </div>
+
+                    {report ? (
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-[8px] text-slate-500 uppercase font-bold">
+                            Cash
+                          </p>
+                          <p className="text-[10px] font-black text-white">
+                            ₱
+                            {Number(report.actual_cash || 0).toLocaleString(
+                              undefined,
+                              { minimumFractionDigits: 2 }
+                            )}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() =>
+                            !report.is_checked && handleVerifyReport(report.id)
+                          }
+                          className={
+                            report.is_checked
+                              ? 'text-emerald-500'
+                              : 'text-orange-500 hover:scale-110'
+                          }
+                        >
+                          {report.is_checked ? (
+                            <CheckCircle2 size={14} />
+                          ) : (
+                            <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
+                          )}
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="text-[10px] font-black text-red-500 italic">
+                        {isFuture ? 'FUTURE' : 'MISSING'}
+                      </p>
+                    )}
+                  </div>
+                );
+              });
+            })()}
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
@@ -561,7 +1045,7 @@ export default function StaffDashboard() {
               <button
                 onClick={() =>
                   router.push(
-                    '/staff/purchase/update?branchName=${selectedBranch.branch_name}'
+                    `/staff/purchase/update?branchName=${selectedBranch.branch_name}`
                   )
                 }
                 className="flex items-center justify-between p-6 bg-slate-900 border border-white/5 rounded-2xl hover:bg-slate-800 transition-all"
@@ -578,7 +1062,7 @@ export default function StaffDashboard() {
             <>
               <div className="space-y-4 md:col-span-2 pt-6 border-t border-white/5 mt-6">
                 <h3 className="text-[10px] font-black text-emerald-500 uppercase tracking-[0.3em] px-1 italic">
-                  Catalog_Authority (Admin)
+                  Catalog_Authority
                 </h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <button
@@ -592,7 +1076,7 @@ export default function StaffDashboard() {
                           Register Product
                         </span>
                         <span className="text-[9px] text-slate-500 uppercase mt-1 block tracking-widest font-bold">
-                          Add to {selectedBranch.branch_name} node
+                          New Inventory Entry
                         </span>
                       </div>
                     </div>
@@ -612,7 +1096,7 @@ export default function StaffDashboard() {
                           Update Stock Price
                         </span>
                         <span className="text-[9px] text-slate-500 uppercase mt-1 block tracking-widest font-bold">
-                          Branch Calibration
+                          Price Calibration
                         </span>
                       </div>
                     </div>
@@ -641,26 +1125,31 @@ export default function StaffDashboard() {
                         Export Excel
                       </span>
                       <span className="text-[9px] text-slate-500 uppercase mt-1 block">
-                        Inventory Report
+                        Inventory Data
                       </span>
                     </div>
                   </button>
-                  <button
-                    onClick={() => router.push('/staff/data-management')}
-                    className="flex items-center gap-4 p-4 bg-slate-900 border border-white/5 rounded-2xl hover:border-emerald-500/50 transition-all text-left group"
-                  >
-                    <div className="p-2 bg-emerald-500/10 rounded-lg text-emerald-400 group-hover:bg-emerald-500 group-hover:text-black transition-all">
-                      <FileUp size={18} />
+                  <div className="relative">
+                    <input
+                      type="file"
+                      accept=".xlsx, .xls"
+                      onChange={handleImportExcel}
+                      className="absolute inset-0 opacity-0 cursor-pointer"
+                    />
+                    <div className="flex items-center gap-4 p-4 bg-slate-900 border border-white/5 rounded-2xl hover:border-emerald-500/50 transition-all text-left group">
+                      <div className="p-2 bg-emerald-500/10 rounded-lg text-emerald-400 group-hover:bg-emerald-500 group-hover:text-black transition-all">
+                        <FileUp size={18} />
+                      </div>
+                      <div>
+                        <span className="block text-xs font-black uppercase text-white leading-none">
+                          Import Excel
+                        </span>
+                        <span className="text-[9px] text-slate-500 uppercase mt-1 block">
+                          Bulk Injection
+                        </span>
+                      </div>
                     </div>
-                    <div>
-                      <span className="block text-xs font-black uppercase text-white leading-none">
-                        Import Excel
-                      </span>
-                      <span className="text-[9px] text-slate-500 uppercase mt-1 block">
-                        Bulk Stock Inject
-                      </span>
-                    </div>
-                  </button>
+                  </div>
                   <button
                     onClick={() => setShowResetAuth(true)}
                     className="flex items-center gap-4 p-4 bg-slate-900 border border-red-500/20 rounded-2xl hover:bg-red-500/10 hover:border-red-500 transition-all text-left group"
@@ -676,7 +1165,7 @@ export default function StaffDashboard() {
                         Reset Node
                       </span>
                       <span className="text-[9px] text-slate-500 uppercase mt-1 block">
-                        Wipe {selectedBranch.branch_name} Items
+                        Wipe Current Node
                       </span>
                     </div>
                   </button>
@@ -686,7 +1175,101 @@ export default function StaffDashboard() {
           )}
         </div>
 
-        {/* REGISTER PRODUCT MODAL */}
+        {/* DAILY REPORT MODAL */}
+        {showReportModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+            <div
+              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+              onClick={() => setShowReportModal(false)}
+            />
+            <div className="relative bg-slate-900 border border-emerald-500/30 w-full max-w-md rounded-3xl p-8 shadow-2xl">
+              <div className="flex justify-between items-center mb-6">
+                <h2 className="text-xl font-black italic text-white uppercase tracking-tighter">
+                  Daily_Remittance
+                </h2>
+                <button
+                  onClick={() => setShowReportModal(false)}
+                  className="text-slate-500 hover:text-white"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest block mb-2 flex items-center gap-2">
+                    <Calendar size={10} /> Report Date (For Missing Entries)
+                  </label>
+                  <input
+                    type="date"
+                    value={remittance.report_date}
+                    onChange={(e) =>
+                      setRemittance({
+                        ...remittance,
+                        report_date: e.target.value,
+                      })
+                    }
+                    className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-emerald-500/50"
+                  />
+                </div>
+                <div>
+                  <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest block mb-2">
+                    Actual Cash On Hand
+                  </label>
+                  <input
+                    type="number"
+                    value={remittance.actual_cash}
+                    onChange={(e) =>
+                      setRemittance({
+                        ...remittance,
+                        actual_cash: parseFloat(e.target.value) || 0,
+                      })
+                    }
+                    className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-emerald-500/50"
+                    placeholder="0.00"
+                  />
+                </div>
+                <div>
+                  <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest block mb-2">
+                    Total Expenses
+                  </label>
+                  <input
+                    type="number"
+                    value={remittance.expenses}
+                    onChange={(e) =>
+                      setRemittance({
+                        ...remittance,
+                        expenses: parseFloat(e.target.value) || 0,
+                      })
+                    }
+                    className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-emerald-500/50"
+                    placeholder="0.00"
+                  />
+                </div>
+                <div>
+                  <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest block mb-2">
+                    Notes / Discrepancies
+                  </label>
+                  <textarea
+                    value={remittance.notes}
+                    onChange={(e) =>
+                      setRemittance({ ...remittance, notes: e.target.value })
+                    }
+                    className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-emerald-500/50 h-24 resize-none"
+                    placeholder="Enter details..."
+                  />
+                </div>
+                <button
+                  onClick={handleSaveReport}
+                  className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-sm font-black uppercase tracking-widest text-white mt-4 transition-all"
+                >
+                  Submit Final Report
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Add Product Modal */}
         {showAddModal && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
             <div
@@ -752,7 +1335,7 @@ export default function StaffDashboard() {
           </div>
         )}
 
-        {/* UPDATE PRICE MODAL */}
+        {/* Update Price Modal */}
         {showPriceModal && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
             <div
@@ -869,7 +1452,7 @@ export default function StaffDashboard() {
           </div>
         )}
 
-        {/* SECURE RESET AUTH MODAL */}
+        {/* Secure Reset Modal */}
         {showResetAuth && (
           <div className="fixed inset-0 z-[150] flex items-center justify-center p-6">
             <div
@@ -900,7 +1483,7 @@ export default function StaffDashboard() {
                   onChange={(e) =>
                     setAuthDetails({ ...authDetails, email: e.target.value })
                   }
-                  className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-red-500/50"
+                  className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3 text-sm text-white outline-none"
                 />
                 <input
                   type="password"
@@ -909,7 +1492,7 @@ export default function StaffDashboard() {
                   onChange={(e) =>
                     setAuthDetails({ ...authDetails, password: e.target.value })
                   }
-                  className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-red-500/50"
+                  className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3 text-sm text-white outline-none"
                 />
                 <button
                   onClick={handleSecureReset}
@@ -923,6 +1506,7 @@ export default function StaffDashboard() {
           </div>
         )}
 
+        {/* Footer Terminal Log */}
         <div className="fixed bottom-6 left-6 right-6 max-w-6xl mx-auto">
           <div className="bg-black/80 backdrop-blur-xl border border-emerald-500/20 p-4 rounded-2xl flex items-center gap-4 shadow-2xl">
             <div className="bg-emerald-500/20 p-2 rounded-lg text-emerald-500">
