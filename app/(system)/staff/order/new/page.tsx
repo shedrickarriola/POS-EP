@@ -210,25 +210,31 @@ export default function NewOrderPOS() {
   };
 
   // --- FETCH INVENTORY (FILTERED BY BRANCH) ---
-  const fetchInventory = async () => {
+  // Inside NewOrderPOS component
+  const fetchInventory = async (searchTerm: string = '') => {
     try {
       setRefreshing(true);
+      const savedBranch = localStorage.getItem('active_branch') ?? '';
+      if (!savedBranch) return;
 
-      const savedBranch = localStorage.getItem('active_branch');
-      if (!savedBranch) {
-        console.warn('No active branch found in localStorage');
-        return;
-      }
       const parsedBranch = JSON.parse(savedBranch);
       const branchId = parsedBranch.id;
       setCurrentBranchId(branchId);
 
-      const { data: invData, error } = await supabase
+      // Build the query
+      let query = supabase
         .from('inventory')
         .select('*')
-        .eq('branch_id', branchId) // Only load products for current branch
-        .order('item_name', { ascending: true });
+        .eq('branch_id', branchId)
+        .order('item_name', { ascending: true })
+        .limit(50); // Fetch a manageable number of matches
 
+      // If the user has typed something, filter at the database level
+      if (searchTerm) {
+        query = query.ilike('item_name', `%${searchTerm}%`);
+      }
+
+      const { data: invData, error } = await query;
       if (error) throw error;
 
       if (invData) {
@@ -680,14 +686,23 @@ export default function NewOrderPOS() {
                               }
                               onFocus={() => setActiveSearchIndex(idx)}
                               onChange={(e) => {
+                                const newVal = e.target.value;
+
+                                // Update local search state
                                 const newTerms = [...searchTerms];
-                                newTerms[idx] = e.target.value;
+                                newTerms[idx] = newVal;
                                 setSearchTerms(newTerms);
+
+                                // Reset item status
                                 const newItems = [...items];
                                 newItems[idx].match_status = 'none';
                                 newItems[idx].product_id = '';
                                 setItems(newItems);
+
                                 setActiveSearchIndex(idx);
+
+                                // RE-FETCH filtered products from Supabase
+                                fetchInventory(newVal);
                               }}
                             />
                             {/* DROPDOWN MENU */}

@@ -101,12 +101,26 @@ export default function NewPurchaseOrder() {
     return `PO${nextCount}`;
   }, []);
 
-  const fetchInventory = async (branchId: string) => {
-    const { data: invData } = await supabase
+  const fetchInventory = async (branchId: string, searchTerm: string = '') => {
+    let query = supabase
       .from('inventory')
       .select('*')
       .eq('branch_id', branchId)
-      .order('item_name', { ascending: true });
+      .order('item_name', { ascending: true })
+      .limit(50); // Fetch a reasonable amount for the dropdown
+
+    // If the user has typed something, filter by name
+    if (searchTerm) {
+      query = query.ilike('item_name', `%${searchTerm}%`);
+    }
+
+    const { data: invData, error } = await query;
+
+    if (error) {
+      console.error('Fetch error:', error.message);
+      return;
+    }
+
     if (invData) setInventoryList(invData);
   };
 
@@ -126,29 +140,44 @@ export default function NewPurchaseOrder() {
       } = await supabase.auth.getSession();
       if (!session) return router.push('/login');
 
-      const savedBranch = localStorage.getItem('active_branch');
-      if (!savedBranch) return setLoading(false);
+      // 1. Handle potential null from localStorage
+      const savedBranch = localStorage.getItem('active_branch') ?? '';
 
-      const parsedBranch = JSON.parse(savedBranch);
-      const branchId = parsedBranch.id;
-      setCurrentBranchId(branchId);
-
-      const { data: prof } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', session.user.id)
-        .single();
-      setProfile(prof);
-
-      if (branchId) {
-        const nextPo = await getNextPoNumber();
-        setPoNumber(nextPo);
-        await Promise.all([
-          fetchInventory(branchId),
-          refreshSuppliers(branchId),
-        ]);
+      // 2. Only proceed if we actually have data
+      if (!savedBranch) {
+        setLoading(false);
+        return;
       }
-      setLoading(false);
+
+      try {
+        const parsedBranch = JSON.parse(savedBranch);
+        const branchId = parsedBranch.id;
+
+        // Ensure branchId itself isn't null/undefined before state update
+        if (branchId) {
+          setCurrentBranchId(branchId);
+
+          const { data: prof } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', session.user.id)
+            .single();
+          setProfile(prof);
+
+          const nextPo = await getNextPoNumber();
+          setPoNumber(nextPo);
+
+          // Use the local branchId variable to ensure stability
+          await Promise.all([
+            fetchInventory(branchId),
+            refreshSuppliers(branchId),
+          ]);
+        }
+      } catch (e) {
+        console.error('Error parsing branch data:', e);
+      } finally {
+        setLoading(false);
+      }
     }
     loadData();
   }, [router, getNextPoNumber]);
@@ -669,9 +698,13 @@ export default function NewPurchaseOrder() {
                             setTimeout(() => setActiveSearchIndex(null), 250)
                           }
                           onChange={(e) => {
+                            const newVal = e.target.value;
                             const t = [...searchTerms];
-                            t[idx] = e.target.value;
+                            t[idx] = newVal;
                             setSearchTerms(t);
+
+                            // Re-fetch filtered results from the database
+                            fetchInventory(currentBranchId, newVal);
                           }}
                         />
 
