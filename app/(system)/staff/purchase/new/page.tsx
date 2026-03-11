@@ -330,7 +330,7 @@ export default function NewPurchaseOrder() {
         { generic: 0, branded: 0 }
       );
 
-      // 1. INSERT THE MAIN PURCHASE ORDER HEADER
+      // 1. Insert the Purchase Order Header
       const { data: newOrder, error: poError } = await supabase
         .from('purchase_orders')
         .insert([
@@ -346,31 +346,28 @@ export default function NewPurchaseOrder() {
             status: 'completed',
           },
         ])
-        .select() // Use .select() to get the generated 'id' back
+        .select()
         .single();
 
-      if (poError) {
-        if (poError.code === '23505') {
-          const retryPo = await getNextPoNumber();
-          setPoNumber(retryPo);
-          throw new Error(
-            'PO number taken. Number refreshed—please try again.'
-          );
-        }
-        throw poError;
-      }
+      if (poError) throw poError;
 
-      // 2. PREPARE AND INSERT THE PURCHASE ORDER ITEMS
-      const itemsData = items.map((item) => ({
-        purchase_order_id: newOrder.id, // THE CRITICAL LINK
-        inventory_id: item.inventory_id,
-        item_name: item.item_name,
-        item_type: item.item_type,
-        quantity: Number(item.qty),
-        packaging_type: Number(item.packaging_type),
-        unit_cost: Number(item.invoice_price),
-        buy_cost: Number(item.buy_cost),
-      }));
+      // 2. Insert the Purchase Order Items (UPDATED WITH MULTIPLIER)
+      const itemsData = items.map((item) => {
+        // Calculate total pieces for the history record
+        const totalPieces =
+          Number(item.qty) * (Number(item.packaging_type) || 1);
+
+        return {
+          purchase_order_id: newOrder.id,
+          inventory_id: item.inventory_id,
+          item_name: item.item_name,
+          item_type: item.item_type,
+          quantity: totalPieces, // Updated to save total pieces, not just number of packs
+          packaging_type: Number(item.packaging_type),
+          unit_cost: Number(item.invoice_price),
+          buy_cost: Number(item.buy_cost),
+        };
+      });
 
       const { error: itemsError } = await supabase
         .from('purchase_order_items')
@@ -378,45 +375,26 @@ export default function NewPurchaseOrder() {
 
       if (itemsError) throw itemsError;
 
-      // 3. UPDATE INVENTORY STOCK & PRICES
-      // 3. UPDATE INVENTORY STOCK & PRICES
+      // 3. Update Inventory Stock (Keep as is, already uses multiplier)
       for (const item of items) {
-        // Ensure all values are treated as numbers and default to 0 if missing
+        const quantityInPieces =
+          Number(item.qty) * (Number(item.packaging_type) || 1);
         const currentStock = Number(item.remaining_stock) || 0;
-        const quantityOrdered = Number(item.qty) || 0;
-        const multiplier = Number(item.packaging_type) || 1; // Default to 1 if not specified
+        const newStockTotal = currentStock + quantityInPieces;
 
-        const newStockTotal = currentStock + quantityOrdered * multiplier;
-
-        // Debugging: Check your console if the update doesn't reflect
-        console.log(
-          `Updating ${item.item_name}: ID ${item.inventory_id}, New Stock ${newStockTotal}`
-        );
-
-        if (isNaN(newStockTotal)) {
-          console.error(
-            `Math Error for ${item.item_name}: remaining_stock or qty is invalid.`
-          );
-          continue;
-        }
-
-        const { data, error: invError } = await supabase
+        const { error: invError } = await supabase
           .from('inventory')
           .update({
             stock: newStockTotal,
             price: Number(item.new_price),
           })
           .eq('id', item.inventory_id)
-          .select(); // Adding select lets you see if a row was actually found
+          .eq('branch_id', currentBranchId);
 
         if (invError) {
           console.error(
             `Inventory Update Error [${item.item_name}]:`,
             invError.message
-          );
-        } else if (data?.length === 0) {
-          console.warn(
-            `No inventory row found for ID: ${item.inventory_id}. Check if the ID is correct.`
           );
         }
       }
