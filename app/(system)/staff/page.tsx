@@ -1143,27 +1143,22 @@ export default function StaffDashboard() {
                       </span>
                     </div>
                   </button>
-                  <div className="relative">
-                    <input
-                      type="file"
-                      accept=".xlsx, .xls"
-                      onChange={handleImportExcel}
-                      className="absolute inset-0 opacity-0 cursor-pointer"
-                    />
-                    <div className="flex items-center gap-4 p-4 bg-slate-900 border border-white/5 rounded-2xl hover:border-emerald-500/50 transition-all text-left group">
-                      <div className="p-2 bg-emerald-500/10 rounded-lg text-emerald-400 group-hover:bg-emerald-500 group-hover:text-black transition-all">
-                        <FileUp size={18} />
-                      </div>
-                      <div>
-                        <span className="block text-xs font-black uppercase text-white leading-none">
-                          Import Excel
-                        </span>
-                        <span className="text-[9px] text-slate-500 uppercase mt-1 block">
-                          Bulk Injection
-                        </span>
-                      </div>
+                  <button
+                    onClick={() => router.push('/staff/data-management')}
+                    className="flex items-center gap-4 p-4 bg-slate-900 border border-white/5 rounded-2xl hover:border-emerald-500/50 transition-all text-left group"
+                  >
+                    <div className="p-2 bg-emerald-500/10 rounded-lg text-emerald-400 group-hover:bg-emerald-500 group-hover:text-black transition-all">
+                      <FileUp size={18} />
                     </div>
-                  </div>
+                    <div>
+                      <span className="block text-xs font-black uppercase text-white leading-none">
+                        Import Excel
+                      </span>
+                      <span className="text-[9px] text-slate-500 uppercase mt-1 block">
+                        Bulk Injection
+                      </span>
+                    </div>
+                  </button>
                   <button
                     onClick={() => setShowResetAuth(true)}
                     className="flex items-center gap-4 p-4 bg-slate-900 border border-red-500/20 rounded-2xl hover:bg-red-500/10 hover:border-red-500 transition-all text-left group"
