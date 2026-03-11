@@ -39,18 +39,18 @@ const TableSkeleton = () => (
   <>
     {[...Array(5)].map((_, i) => (
       <tr key={i} className="animate-pulse border-b border-white/5">
-        <td className="p-4">
+        <td className="px-1">
           <div className="h-10 bg-white/5 rounded-lg w-full" />
         </td>
-        <td className="p-4">
+        <td className="px-1">
           <div className="h-10 bg-white/5 rounded-lg w-full" />
         </td>
         {[...Array(8)].map((_, j) => (
-          <td key={j} className="p-4">
+          <td key={j} className="px-1">
             <div className="h-8 bg-white/5 rounded-lg w-full mx-auto" />
           </td>
         ))}
-        <td className="p-4 sticky right-0 bg-slate-900 border-l border-white/10">
+        <td className="px-1 sticky right-0 bg-slate-900 border-l border-white/10">
           <div className="h-6 bg-white/5 rounded w-6 mx-auto" />
         </td>
       </tr>
@@ -379,15 +379,46 @@ export default function NewPurchaseOrder() {
       if (itemsError) throw itemsError;
 
       // 3. UPDATE INVENTORY STOCK & PRICES
+      // 3. UPDATE INVENTORY STOCK & PRICES
       for (const item of items) {
-        const newStock =
-          Number(item.remaining_stock) +
-          Number(item.qty) * Number(item.packaging_type);
+        // Ensure all values are treated as numbers and default to 0 if missing
+        const currentStock = Number(item.remaining_stock) || 0;
+        const quantityOrdered = Number(item.qty) || 0;
+        const multiplier = Number(item.packaging_type) || 1; // Default to 1 if not specified
 
-        await supabase
+        const newStockTotal = currentStock + quantityOrdered * multiplier;
+
+        // Debugging: Check your console if the update doesn't reflect
+        console.log(
+          `Updating ${item.item_name}: ID ${item.inventory_id}, New Stock ${newStockTotal}`
+        );
+
+        if (isNaN(newStockTotal)) {
+          console.error(
+            `Math Error for ${item.item_name}: remaining_stock or qty is invalid.`
+          );
+          continue;
+        }
+
+        const { data, error: invError } = await supabase
           .from('inventory')
-          .update({ stock: newStock, price: item.new_price })
-          .eq('id', item.inventory_id);
+          .update({
+            stock: newStockTotal,
+            price: Number(item.new_price),
+          })
+          .eq('id', item.inventory_id)
+          .select(); // Adding select lets you see if a row was actually found
+
+        if (invError) {
+          console.error(
+            `Inventory Update Error [${item.item_name}]:`,
+            invError.message
+          );
+        } else if (data?.length === 0) {
+          console.warn(
+            `No inventory row found for ID: ${item.inventory_id}. Check if the ID is correct.`
+          );
+        }
       }
 
       setFinalGenericAmt(splitTotals.generic);
@@ -566,7 +597,7 @@ export default function NewPurchaseOrder() {
                   {filteredSuppliers.map((s) => (
                     <div
                       key={s.id}
-                      className="p-4 hover:bg-indigo-600 rounded-xl cursor-pointer font-black text-[11px] uppercase tracking-wider transition-colors border-b border-white/5 last:border-0"
+                      className="px-1 hover:bg-indigo-600 rounded-xl cursor-pointer font-black text-[11px] uppercase tracking-wider transition-colors border-b border-white/5 last:border-0"
                       onClick={() => setSupplierSearch(s.name)}
                     >
                       {s.name}
@@ -579,7 +610,7 @@ export default function NewPurchaseOrder() {
                     ) && (
                       <button
                         onClick={handleQuickAddSupplier}
-                        className="w-full p-4 mt-2 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-400 text-[10px] font-black uppercase tracking-widest hover:bg-emerald-500 transition-all"
+                        className="w-full px-1 mt-2 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-400 text-[10px] font-black uppercase tracking-widest hover:bg-emerald-500 transition-all"
                       >
                         + Create Entity: "{supplierSearch}"
                       </button>
@@ -646,7 +677,7 @@ export default function NewPurchaseOrder() {
                         activeSearchIndex === idx ? 'z-[50]' : 'z-0'
                       }`}
                     >
-                      <td className="p-4 relative">
+                      <td className="px-1 relative">
                         <input
                           className={`w-full bg-slate-950 border rounded-xl p-3 text-[12px] font-bold outline-none transition-all ${
                             !item.inventory_id && searchTerms[idx] !== ''
@@ -681,7 +712,7 @@ export default function NewPurchaseOrder() {
                               .map((inv) => (
                                 <div
                                   key={inv.id}
-                                  className="p-4 hover:bg-indigo-600 rounded-xl cursor-pointer text-[11px] font-black uppercase border-b border-white/5 last:border-0 transition-colors"
+                                  className="px-1 hover:bg-indigo-600 rounded-xl cursor-pointer text-[11px] font-black uppercase border-b border-white/5 last:border-0 transition-colors"
                                   onMouseDown={() =>
                                     updateItem(idx, 'inventory_id', inv.id)
                                   }
@@ -706,7 +737,7 @@ export default function NewPurchaseOrder() {
                           </button>
                         )}
                       </td>
-                      <td className="p-4 text-center">
+                      <td className="px-1 text-center">
                         <button
                           onClick={() =>
                             updateItem(
@@ -726,7 +757,7 @@ export default function NewPurchaseOrder() {
                           {item.item_type}
                         </button>
                       </td>
-                      <td className="p-4">
+                      <td className="px-1">
                         <input
                           type="number"
                           className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
@@ -736,7 +767,7 @@ export default function NewPurchaseOrder() {
                           }
                         />
                       </td>
-                      <td className="p-4">
+                      <td className="px-1">
                         <input
                           type="number"
                           className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
@@ -746,7 +777,7 @@ export default function NewPurchaseOrder() {
                           }
                         />
                       </td>
-                      <td className="p-4">
+                      <td className="px-1">
                         <input
                           type="number"
                           className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-right text-[12px] font-bold outline-none"
@@ -756,7 +787,7 @@ export default function NewPurchaseOrder() {
                           }
                         />
                       </td>
-                      <td className="p-4">
+                      <td className="px-1">
                         <input
                           type="number"
                           className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-right text-[12px] font-bold outline-none"
@@ -766,13 +797,13 @@ export default function NewPurchaseOrder() {
                           }
                         />
                       </td>
-                      <td className="p-4 text-right font-black text-indigo-300 text-[12px]">
+                      <td className="px-1 text-right font-black text-indigo-300 text-[12px]">
                         ₱{item.buy_cost.toFixed(2)}
                       </td>
-                      <td className="p-4 text-right font-bold text-indigo-400/60 text-[12px]">
+                      <td className="px-1 text-right font-bold text-indigo-400/60 text-[12px]">
                         ₱{item.current_price.toFixed(2)}
                       </td>
-                      <td className="p-4">
+                      <td className="px-1">
                         <input
                           type="number"
                           className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
@@ -782,13 +813,13 @@ export default function NewPurchaseOrder() {
                           }
                         />
                       </td>
-                      <td className="p-4 text-right font-black text-emerald-400 text-[12px]">
+                      <td className="px-1 text-right font-black text-emerald-400 text-[12px]">
                         ₱{item.new_price.toFixed(2)}
                       </td>
-                      <td className="p-4 text-center text-slate-500 text-[11px] font-black">
+                      <td className="px-1 text-center text-slate-500 text-[11px] font-black">
                         {item.remaining_stock}
                       </td>
-                      <td className="p-4 text-center sticky right-0 bg-slate-900 border-l border-white/10 group-hover:bg-slate-800 transition-colors">
+                      <td className="px-1 text-center sticky right-0 bg-slate-900 border-l border-white/10 group-hover:bg-slate-800 transition-colors">
                         <button
                           onClick={() => {
                             setItems(items.filter((_, i) => i !== idx));
