@@ -323,7 +323,18 @@ export default function NewOrderPOS() {
   const handleSubmit = async () => {
     if (!metrics.isValid || loading) return;
     setLoading(true);
+
     try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (!session) throw new Error('No active session');
+
+      const branchData = localStorage.getItem('active_branch');
+      if (!branchData) throw new Error('No active branch selected');
+      const branch = JSON.parse(branchData);
+
+      // 1. Create the Sale Record
       const { data: order, error: orderErr } = await supabase
         .from('orders')
         .insert([
@@ -334,7 +345,7 @@ export default function NewOrderPOS() {
             generic_amt: metrics.generic_amt,
             branded_amt: metrics.branded_amt,
             payment_method: paymentMethod,
-            created_by: user?.email,
+            created_by: session.user.email,
             status: 'completed',
             branch_id: currentBranchId,
           },
@@ -344,11 +355,12 @@ export default function NewOrderPOS() {
 
       if (orderErr) throw orderErr;
 
+      // 2. Create Sale Items
       const payload = items.map((i) => ({
         order_id: order.id,
         product_id: i.product_id,
-        quantity: i.qty,
-        unit_price: i.price_piece,
+        quantity: Number(i.qty),
+        unit_price: Number(i.price_piece),
         type: i.type,
         subtotal: i.qty * (i.price_piece * (1 - i.discount_percent / 100)),
       }));
@@ -356,10 +368,49 @@ export default function NewOrderPOS() {
       const { error: itemsErr } = await supabase
         .from('order_items')
         .insert(payload);
+
       if (itemsErr) throw itemsErr;
+
+      // 3. DEDUCT STOCK & UPDATE SALES METRICS
+      for (const item of items) {
+        const soldQty = Number(item.qty) || 0;
+
+        // We use rpc or manual increment logic here
+        // To ensure accuracy, we fetch the latest numbers or use the current state
+        const { data: currentInv } = await supabase
+          .from('inventory')
+          .select('stock, sold_weekly, sold_monthly, sold_yearly')
+          .eq('id', item.product_id)
+          .single();
+
+        if (currentInv) {
+          const newStock = (Number(currentInv.stock) || 0) - soldQty;
+          const newWeekly = (Number(currentInv.sold_weekly) || 0) + soldQty;
+          const newMonthly = (Number(currentInv.sold_monthly) || 0) + soldQty;
+          const newYearly = (Number(currentInv.sold_yearly) || 0) + soldQty;
+
+          const { error: invErr } = await supabase
+            .from('inventory')
+            .update({
+              stock: newStock,
+              sold_weekly: newWeekly,
+              sold_monthly: newMonthly,
+              sold_yearly: newYearly,
+            })
+            .eq('id', item.product_id)
+            .eq('branch_id', branch.id);
+
+          if (invErr)
+            console.error(
+              `Metrics update failed for ${item.item_name}:`,
+              invErr.message
+            );
+        }
+      }
 
       setShowSuccess(true);
     } catch (err: any) {
+      console.error('Submit Error:', err);
       alert(`Submission Failed: ${err.message}`);
     } finally {
       setLoading(false);
