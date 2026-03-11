@@ -13,6 +13,7 @@ import {
   CheckCircle2,
   RefreshCw,
   Search,
+  Home,
   FileText,
   AlertCircle,
 } from 'lucide-react';
@@ -447,6 +448,12 @@ export default function NewPurchaseOrder() {
               </span>
             </div>
           </div>
+          <button
+            onClick={() => router.push('/staff')}
+            className="w-full bg-slate-800 text-slate-950 p-5 rounded-2xl font-black uppercase text-xs tracking-widest hover:bg-indigo-400 transition-colors shadow-lg"
+          >
+            <Home size={16} /> Hub
+          </button>
           <button
             onClick={() => window.location.reload()}
             className="w-full bg-white text-slate-950 p-5 rounded-2xl font-black uppercase text-xs tracking-widest hover:bg-indigo-400 transition-colors shadow-lg"
