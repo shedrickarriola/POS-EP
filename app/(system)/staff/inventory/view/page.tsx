@@ -1,19 +1,20 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import * as XLSX from 'xlsx';
 import {
   Database,
-  Sparkles,
-  LayoutDashboard,
   Loader2,
-  TrendingUp,
   AlertTriangle,
   FileDown,
   ArrowLeft,
   Search,
+  Package,
+  Sparkles,
+  TrendingUp,
+  ArrowUpRight,
 } from 'lucide-react';
 
 export default function InventoryProtocol() {
@@ -22,6 +23,7 @@ export default function InventoryProtocol() {
   const [inventory, setInventory] = useState<any[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [branchName, setBranchName] = useState<string>('Branch');
+  const [viewMode, setViewMode] = useState<'ALL' | 'AI'>('ALL');
 
   useEffect(() => {
     const savedBranch = localStorage.getItem('active_branch') ?? '';
@@ -36,7 +38,6 @@ export default function InventoryProtocol() {
     }
   }, []);
 
-  // BYPASSES THE 1000 LIMIT BY FETCHING IN CHUNKS
   const fetchAllInventory = async (id: string) => {
     setLoading(true);
     try {
@@ -44,7 +45,6 @@ export default function InventoryProtocol() {
       let from = 0;
       let to = 999;
       let hasMore = true;
-
       while (hasMore) {
         const { data, error } = await supabase
           .from('inventory')
@@ -52,9 +52,7 @@ export default function InventoryProtocol() {
           .eq('branch_id', id)
           .order('item_name', { ascending: true })
           .range(from, to);
-
         if (error) throw error;
-
         if (data && data.length > 0) {
           allData = [...allData, ...data];
           from += 1000;
@@ -71,135 +69,179 @@ export default function InventoryProtocol() {
     }
   };
 
-  const filteredInventory = inventory.filter((item) =>
-    item.item_name?.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  // AI Logic: Prioritizes high velocity items with low stock
+  const aiRecommendations = useMemo(() => {
+    return inventory
+      .map((item) => {
+        const weekly = Number(item.sold_weekly || 0);
+        const yearly = Number(item.sold_yearly || 0);
+        const stock = Number(item.stock || 0);
 
-  const exportToExcel = () => {
-    const worksheet = XLSX.utils.json_to_sheet(inventory);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Inventory');
-    XLSX.writeFile(workbook, `Inventory_${branchName}.xlsx`);
-  };
+        // Calculate a priority score (Higher = more urgent)
+        // We weigh weekly sales heavily (x10) and yearly sales (x1)
+        // Then divide by stock (if stock is 0, we treat it as 0.5 to avoid infinity)
+        const salesVelocity = weekly * 10 + yearly * 0.1;
+        const priorityScore = salesVelocity / (stock <= 0 ? 0.5 : stock);
+
+        return { ...item, priorityScore, isCritical: stock <= weekly };
+      })
+      .filter((item) => item.priorityScore > 2 || item.isCritical) // Only show items needing attention
+      .sort((a, b) => b.priorityScore - a.priorityScore); // Highest priority first
+  }, [inventory]);
+
+  const displayData = useMemo(() => {
+    const source = viewMode === 'AI' ? aiRecommendations : inventory;
+    return source.filter((item) =>
+      item.item_name?.toLowerCase().includes(searchTerm.toLowerCase())
+    );
+  }, [viewMode, inventory, aiRecommendations, searchTerm]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-indigo-500/30">
-      {/* Header Section */}
-      <div className="max-w-[1600px] mx-auto p-4 space-y-4">
-        <div className="flex items-center justify-between">
+      <div className="max-w-[1600px] mx-auto p-4 space-y-3">
+        {/* Header Section */}
+        <div className="flex items-center justify-between bg-slate-900/40 p-3 rounded-lg border border-white/5">
           <div className="flex items-center gap-4">
             <button
               onClick={() => router.back()}
-              className="p-2 hover:bg-white/5 rounded-lg transition-colors text-slate-400"
+              className="p-2 hover:bg-white/5 rounded-lg text-slate-400"
             >
-              <ArrowLeft size={20} />
+              <ArrowLeft size={18} />
             </button>
             <div>
-              <h1 className="text-xl font-black tracking-tighter uppercase flex items-center gap-2 italic">
-                <Database className="text-indigo-500" size={20} />
-                {branchName}{' '}
-                <span className="text-slate-600">Inventory Management</span>
+              <h1 className="text-lg font-black tracking-tighter uppercase flex items-center gap-2 italic">
+                <Package className="text-indigo-500" size={18} />
+                {branchName} <span className="text-slate-600">Inventory</span>
               </h1>
-              <p className="text-[10px] text-slate-500 font-bold uppercase tracking-[0.2em]">
-                Total Items Loaded: {inventory.length}
-              </p>
+              <div className="flex gap-3 mt-1">
+                <p className="text-[9px] text-slate-500 font-bold uppercase tracking-widest">
+                  Master Records: {inventory.length}
+                </p>
+                <p className="text-[9px] text-indigo-400 font-bold uppercase tracking-widest flex items-center gap-1">
+                  <Sparkles size={10} /> AI Recommendations:{' '}
+                  {aiRecommendations.length}
+                </p>
+              </div>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            <div className="flex bg-slate-950 p-1 rounded-md border border-white/10">
+              <button
+                onClick={() => setViewMode('ALL')}
+                className={`px-3 py-1 text-[9px] font-black rounded ${
+                  viewMode === 'ALL'
+                    ? 'bg-slate-800 text-white'
+                    : 'text-slate-600'
+                }`}
+              >
+                FULL INVENTORY
+              </button>
+              <button
+                onClick={() => setViewMode('AI')}
+                className={`px-3 py-1 text-[9px] font-black rounded flex items-center gap-1 ${
+                  viewMode === 'AI'
+                    ? 'bg-indigo-600 text-white shadow-lg'
+                    : 'text-slate-600'
+                }`}
+              >
+                <Sparkles size={10} /> AI REORDER LIST
+              </button>
+            </div>
             <div className="relative">
               <Search
                 className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600"
-                size={14}
+                size={12}
               />
               <input
                 type="text"
-                placeholder="QUICK SEARCH..."
+                placeholder="QUICK FIND..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="bg-slate-900 border border-white/5 rounded-md pl-9 pr-4 py-1.5 text-[10px] font-bold w-64 focus:border-indigo-500 outline-none transition-all uppercase tracking-wider"
+                className="bg-slate-950 border border-white/10 rounded-md pl-8 pr-4 py-1 text-[10px] font-bold w-48 focus:border-indigo-500 outline-none uppercase"
               />
             </div>
-            <button
-              onClick={exportToExcel}
-              className="flex items-center gap-2 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-md text-[10px] font-black uppercase transition-all shadow-lg shadow-emerald-900/20"
-            >
-              <FileDown size={14} /> Export Excel
-            </button>
           </div>
         </div>
 
         {loading ? (
-          <div className="h-[60vh] flex flex-col items-center justify-center gap-4">
-            <Loader2 className="animate-spin text-indigo-500" size={40} />
-            <span className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-500">
-              Synchronizing Database...
+          <div className="h-[70vh] flex flex-col items-center justify-center gap-3 italic">
+            <Loader2 className="animate-spin text-indigo-500" size={30} />
+            <span className="text-[9px] font-black uppercase tracking-[0.3em] text-slate-600">
+              Analyzing Sales Trends...
             </span>
           </div>
         ) : (
-          <div className="bg-slate-900/50 border border-white/5 rounded-xl overflow-hidden shadow-2xl">
-            <div className="overflow-x-auto">
+          <div className="bg-slate-900/50 border border-white/5 rounded-lg overflow-hidden shadow-2xl">
+            <div className="overflow-x-auto max-h-[80vh]">
               <table className="w-full text-left border-collapse">
-                <thead className="bg-slate-950 border-b border-white/10">
+                <thead className="bg-slate-950 sticky top-0 z-10 border-b border-white/10">
                   <tr className="text-[9px] font-black uppercase tracking-widest text-slate-500">
-                    <th className="px-3 py-2">#</th>
-                    <th className="px-3 py-2">Product Name</th>
-                    <th className="px-3 py-2">Type</th>
-                    <th className="px-3 py-2">Piece Price</th>
-                    <th className="px-3 py-2">Unit Cost</th>
-                    <th className="px-3 py-2 text-center">Weekly</th>
-                    <th className="px-3 py-2 text-center">Monthly</th>
+                    <th className="px-3 py-2 w-12 text-center">Rank</th>
+                    <th className="px-3 py-2">Item Description</th>
+                    <th className="px-3 py-2 text-right">Price</th>
+                    <th className="px-3 py-2 text-right">Cost</th>
+                    <th className="px-3 py-2 text-center bg-indigo-500/5">
+                      Sold Wkly
+                    </th>
+                    <th className="px-3 py-2 text-center">Sold Yrly</th>
                     <th className="px-3 py-2 text-right">Current Stock</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {filteredInventory.map((item, idx) => {
+                  {displayData.map((item, idx) => {
                     const isCritical = item.stock <= (item.sold_weekly || 0);
+                    const isHighYearly = (item.sold_yearly || 0) > 500;
+
                     return (
                       <tr
                         key={item.id}
-                        className="group hover:bg-white/[0.02] transition-colors"
+                        className="group hover:bg-indigo-500/[0.04] transition-colors"
                       >
-                        <td className="px-3 py-1 text-[10px] font-mono text-slate-600">
+                        <td className="px-3 py-0.5 text-[9px] font-mono text-slate-600 text-center">
                           {idx + 1}
                         </td>
-                        <td className="px-3 py-1 text-[11px] font-bold text-slate-200 uppercase truncate max-w-xs">
-                          {item.item_name}
+                        <td className="px-3 py-0.5">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] font-bold text-slate-300 uppercase truncate max-w-md">
+                              {item.item_name}
+                            </span>
+                            {isHighYearly && (
+                              <ArrowUpRight
+                                size={10}
+                                className="text-emerald-400"
+                                title="Yearly Best Seller"
+                              />
+                            )}
+                          </div>
                         </td>
-                        <td className="px-3 py-1">
-                          <span
-                            className={`text-[9px] font-black px-2 py-0.5 rounded ${
-                              item.item_type === 'GENERIC'
-                                ? 'bg-slate-800 text-slate-400'
-                                : 'bg-indigo-500/10 text-indigo-400'
-                            }`}
-                          >
-                            {item.item_type || 'N/A'}
-                          </span>
+                        <td className="px-3 py-0.5 text-right text-[10px] font-mono text-emerald-500 font-bold">
+                          ₱{Number(item.price || 0).toFixed(2)}
                         </td>
-                        <td className="px-3 py-1 text-[10px] font-mono text-emerald-400">
-                          ₱{Number(item.price_piece).toFixed(2)}
+                        <td className="px-3 py-0.5 text-right text-[10px] font-mono text-slate-500">
+                          ₱{Number(item.buy_cost || 0).toFixed(2)}
                         </td>
-                        <td className="px-3 py-1 text-[10px] font-mono text-slate-400">
-                          ₱{Number(item.buy_cost).toFixed(2)}
-                        </td>
-                        <td className="px-3 py-1 text-center text-[10px] font-bold text-slate-500">
+                        <td className="px-3 py-0.5 text-center text-[10px] font-black text-indigo-400 bg-indigo-500/[0.02]">
                           {item.sold_weekly || 0}
                         </td>
-                        <td className="px-3 py-1 text-center text-[10px] font-bold text-slate-500">
-                          {item.sold_monthly || 0}
+                        <td className="px-3 py-0.5 text-center text-[10px] font-bold text-slate-600">
+                          {item.sold_yearly || 0}
                         </td>
-                        <td className="px-3 py-1 text-right">
-                          <div className="flex items-center justify-end gap-2">
+                        <td className="px-3 py-0.5 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
                             {isCritical && (
                               <AlertTriangle
-                                size={12}
-                                className="text-red-500 animate-pulse"
+                                size={10}
+                                className="text-amber-500 animate-pulse"
                               />
                             )}
                             <span
-                              className={`text-[11px] font-black font-mono ${
-                                isCritical ? 'text-red-500' : 'text-slate-200'
+                              className={`text-[10px] font-black font-mono ${
+                                item.stock <= 0
+                                  ? 'text-red-600'
+                                  : isCritical
+                                  ? 'text-amber-500'
+                                  : 'text-indigo-400'
                               }`}
                             >
                               {item.stock}
@@ -212,14 +254,6 @@ export default function InventoryProtocol() {
                 </tbody>
               </table>
             </div>
-
-            {filteredInventory.length === 0 && (
-              <div className="p-20 text-center">
-                <p className="text-[10px] font-black uppercase tracking-widest text-slate-600">
-                  No matching items found in records
-                </p>
-              </div>
-            )}
           </div>
         )}
       </div>
