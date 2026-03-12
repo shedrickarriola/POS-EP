@@ -47,6 +47,7 @@ export default function StaffDashboard() {
   });
   const [canReportingProceed, setCanReportingProceed] = useState(true);
   const [missingDate, setMissingDate] = useState<string | null>(null);
+  const [branchModalOpen, setBranchModalOpen] = useState(false);
 
   // Daily Reports State
   const [dailyReports, setDailyReports] = useState<any[]>([]);
@@ -116,6 +117,51 @@ export default function StaffDashboard() {
     });
   };
 
+  const createSystemLog = async (
+    type: 'LOGIN' | 'BRANCH_CHANGE',
+    branchName: string
+  ) => {
+    if (!profile?.email) return;
+
+    await supabase.from('system_logs').insert([
+      {
+        event_type: type,
+        user_email: profile.email,
+        branch_name: branchName,
+        log_message:
+          type === 'LOGIN'
+            ? `User initiated session at ${branchName}`
+            : `User switched active branch to ${branchName}`,
+        created_at: new Date().toISOString(),
+      },
+    ]);
+  };
+
+  const logSystemActivity = async (
+    type: 'LOGIN' | 'BRANCH_CHANGE',
+    branchName: string | undefined,
+    email: string | undefined,
+    fullName: string | undefined // Add this parameter
+  ) => {
+    if (!email || !branchName) return;
+
+    await supabase.from('system_logs').insert([
+      {
+        event_type: type,
+        user_email: email,
+        user_name: fullName || email.split('@')[0].toUpperCase(), // Fallback to email prefix if name is missing
+        branch_name: branchName,
+        log_message:
+          type === 'LOGIN'
+            ? `System session initiated by ${
+                fullName || email
+              } at ${branchName}`
+            : `Branch changed to ${branchName} by ${fullName || email}`,
+        created_at: new Date().toISOString(),
+      },
+    ]);
+  };
+
   useEffect(() => {
     async function getInitialData() {
       try {
@@ -144,6 +190,15 @@ export default function StaffDashboard() {
           if (savedBranch) {
             const parsedBranch = JSON.parse(savedBranch);
             setSelectedBranch(parsedBranch);
+
+            // --- TRIGGER INITIAL LOGIN LOG ---
+            logSystemActivity(
+              'LOGIN',
+              parsedBranch.branch_name,
+              session.user.email,
+              profileData?.full_name
+            );
+
             fetchStats(parsedBranch.id);
             updateQuotas(parsedBranch.id);
             fetchDailyReports(parsedBranch.id);
@@ -201,10 +256,24 @@ export default function StaffDashboard() {
     setDailyReports(data || []);
   }
 
-  const handleBranchSelect = (branch: any) => {
+  const handleBranchSelect = async (branch: any) => {
     setSelectedBranch(branch);
     localStorage.setItem('active_branch', JSON.stringify(branch));
+
+    // --- TRIGGER BRANCH CHANGE LOG ---
+    await logSystemActivity(
+      'BRANCH_CHANGE',
+      branch.branch_name,
+      profile?.email,
+      profile?.full_name
+    );
+
+    // Use the correct setter from your file
+    setBranchModalOpen(false);
+
+    // Load the dashboard data for the new branch
     fetchStats(branch.id);
+    updateQuotas(branch.id);
     fetchDailyReports(branch.id);
     syncDailyReportRealtime(branch.id);
   };
