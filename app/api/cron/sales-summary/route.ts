@@ -10,6 +10,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
+  // Use Admin Client to ensure inventory and logs are always accessible
   const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -21,7 +22,7 @@ export async function GET(request: Request) {
     const midnightPHT = new Date(phtNow.getFullYear(), phtNow.getMonth(), phtNow.getDate(), 0, 0, 0);
     const startOfTodayISO = midnightPHT.toISOString();
 
-    // 1. DATA FETCHING
+    // 1. Fetch ALL necessary data including Products
     const [
       { data: allOrders }, { data: todaySales }, { data: branches }, 
       { data: orgs }, { data: todayLogs }, { data: allDRs }, 
@@ -34,10 +35,10 @@ export async function GET(request: Request) {
       supabaseAdmin.from('system_logs').select('*').in('event_type', ['LOGIN', 'BRANCH_CHANGE']).gte('created_at', startOfTodayISO).order('created_at', { ascending: true }),
       supabaseAdmin.from('daily_reports').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
       supabaseAdmin.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
-      supabaseAdmin.from('products').select('*').order('sold_weekly', { ascending: false })
+      supabaseAdmin.from('products').select('*').order('sold_weekly', { ascending: false }) // Fetch all products for stock check
     ]);
 
-    // 2. ORG MAPPING
+    // 2. Map Organizations and Branches
     const orgMap = Object.fromEntries(orgs?.map(o => [o.id, o]) || []);
     const orgGroups: Record<string, any> = {};
     branches?.forEach((b: any) => {
@@ -47,7 +48,7 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 3. STAFF & SALES MAPPING (For standard reports)
+    // 3. Map Staff and Sales Stats
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
       const bName = log.branch_name?.toString().trim().toUpperCase();
@@ -78,23 +79,33 @@ export async function GET(request: Request) {
       }
     });
 
-    // 4. MESSAGE LOOP
+    // 4. Send Messages based on type
     for (const group of Object.values(orgGroups) as any[]) {
       let message = "";
 
-      // BRANCH LOOP
       if (type === 'STOCK_ADVISORY') {
         message = `<b>📦 WEEKLY STOCK RECOMMENDATIONS</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
         group.branches.forEach((b: any) => {
-          const toOrder = products?.filter((p: any) => p.branch_id === b.id && p.current_stock <= (p.sold_weekly || 5)).slice(0, 10);
+          // STRICT FILTER: Show item if stock is less than or equal to weekly sales, or if stock is critically low (< 5)
+          const toOrder = products?.filter((p: any) => 
+            p.branch_id === b.id && 
+            (Number(p.current_stock) <= Number(p.sold_weekly || 0) || Number(p.current_stock) < 5) &&
+            (Number(p.sold_weekly) > 0 || Number(p.sold_monthly) > 0) // Ensure it's actually an active product
+          ).slice(0, 10);
+
           message += `<b>📍 ${b.branch_name.toUpperCase()}</b>\n`;
           if (toOrder && toOrder.length > 0) {
-            toOrder.forEach((p: any) => message += `${p.current_stock === 0 ? '🚨' : '⚠️'} ${p.name}: ${p.current_stock} left (Sold ${p.sold_weekly}/wk)\n`);
-          } else { message += `✅ <i>Stock levels healthy</i>\n`; }
+            toOrder.forEach((p: any) => {
+              const urgency = p.current_stock <= 0 ? '🚨' : '⚠️';
+              message += `${urgency} ${p.name}: ${p.current_stock} left (Sold ${p.sold_weekly}/wk)\n`;
+            });
+          } else {
+            message += `✅ <i>Stock levels healthy</i>\n`;
+          }
           message += `━━━━━━━━━━━━━━━━━━\n`;
         });
       } else {
-        // RETAIN PREVIOUS REPORTS (Checker, Login, Update, EOD)
+        // --- RETAIN ALL PREVIOUS REPORT LOGIC (Checker, Login, Update, EOD) ---
         let header = '';
         switch (type) {
           case 'REPORT_CHECKER': header = '🚨 ALL-TIME REPORT CHECKER (6AM)'; break;
@@ -106,10 +117,11 @@ export async function GET(request: Request) {
         
         group.branches.forEach((b: any) => {
           const stats = branchStats[b.id];
-          const bNameFull = b.branch_name?.toString().toUpperCase();
+          const bNameFull = b.branch_name?.toString().trim().toUpperCase();
           const staffList = activeStaffMap[bNameFull] || [];
           const hasPending = stats.pendingDRs > 0 || stats.uncheckedOrders > 0 || stats.pendingPOs > 0;
-          const statusIcon = (type === 'REPORT_CHECKER') ? (hasPending ? '🚨' : '✅') : (staffList.length > 0 ? '🛠️' : '💤');
+          
+          let statusIcon = (type === 'REPORT_CHECKER') ? (hasPending ? '🚨' : '✅') : (staffList.length > 0 ? '🛠️' : '💤');
 
           message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
           if (type === 'REPORT_CHECKER') {
@@ -118,7 +130,8 @@ export async function GET(request: Request) {
             if (stats.pendingPOs > 0) message += `• 📦 PO Verification: <b>${stats.pendingPOs}</b>\n`;
             if (!hasPending) message += `• <i>No pending tasks</i>\n`;
           } else {
-            message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n• Total: ₱${stats.total.toLocaleString()}\n`;
+            message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n`;
+            message += `• Total: ₱${stats.total.toLocaleString()}\n`;
             if (b.daily_generic_quota > 0) message += `• Progress: ${((stats.generic / b.daily_generic_quota) * 100).toFixed(1)}%\n`;
           }
           message += `━━━━━━━━━━━━━━━━━━\n`;
