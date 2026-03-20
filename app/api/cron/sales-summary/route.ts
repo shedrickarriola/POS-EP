@@ -13,15 +13,16 @@ export async function GET(request: Request) {
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
     
-    // --- PHT TIME CALCULATOR ---
-    // 1. Get current UTC time
-    const now = new Date();
-    // 2. Add 8 hours to get PHT
-    const phtTime = new Date(now.getTime() + (8 * 60 * 60 * 1000));
-    // 3. Set to 00:00:00 of the PHT day
-    const startOfTodayPHT = new Date(phtTime.getFullYear(), phtTime.getMonth(), phtTime.getDate(), 0, 0, 0);
-    // 4. Convert back to UTC ISO string for Supabase filtering
-    const startOfTodayUTC = new Date(startOfTodayPHT.getTime() - (8 * 60 * 60 * 1000)).toISOString();
+    // --- STRICT MIDNIGHT PHT CALCULATION ---
+    // 1. Get the current date/time in PHT
+    const phtNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Manila" }));
+    
+    // 2. Create a date object for 12:00:00 AM TODAY in PHT
+    const midnightPHT = new Date(phtNow.getFullYear(), phtNow.getMonth(), phtNow.getDate(), 0, 0, 0);
+    
+    // 3. Convert that PHT midnight to a UTC ISO string so Supabase understands it
+    // This correctly subtracts 8 hours from the PHT midnight to get the UTC equivalent
+    const startOfTodayISO = midnightPHT.toISOString();
 
     const [
       { data: allUncheckedOrders },
@@ -33,18 +34,18 @@ export async function GET(request: Request) {
       { data: allPendingPOs },
     ] = await Promise.all([
       supabase.from('orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
-      supabase.from('orders').select('*').gte('created_at', startOfTodayUTC),
+      supabase.from('orders').select('*').gte('created_at', startOfTodayISO),
       supabase.from('branches').select('*'),
       supabase.from('organizations').select('*'),
       supabase.from('system_logs').select('*')
         .in('event_type', ['LOGIN', 'BRANCH_CHANGE'])
-        .gte('created_at', startOfTodayUTC)
+        .gte('created_at', startOfTodayISO)
         .order('created_at', { ascending: true }),
       supabase.from('daily_reports').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
       supabase.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
     ]);
 
-    // 1. Map Staff Activity (First Login in PHT)
+    // 1. Staff Mapping
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
       const bName = log.branch_name?.toString().trim().toUpperCase();
@@ -55,7 +56,6 @@ export async function GET(request: Request) {
         const alreadyExists = activeStaffMap[bName].some(s => s.startsWith(staffName));
         
         if (!alreadyExists) {
-          // Format the login time specifically for PHT
           const loginTime = new Date(log.created_at).toLocaleTimeString('en-PH', {
             hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Manila'
           });
@@ -94,7 +94,7 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 3. Build & Send Message
+    // 2. Build & Send Message
     await Promise.all(
       Object.values(orgGroups).map(async (group: any) => {
         let header = '';
@@ -110,35 +110,28 @@ export async function GET(request: Request) {
 
         group.branches.forEach((b: any) => {
           const stats = branchStats[b.id];
-          const bNameFull = b.branch_name?.toString().toUpperCase().trim();
-          
-          // Staff Lookup Logic
-          let staff = activeStaffMap[bNameFull] || [];
-          if (staff.length === 0) {
-              const key = Object.keys(activeStaffMap).find(k => bNameFull.includes(k) || k.includes(bNameFull));
-              if (key) staff = activeStaffMap[key];
-          }
+          const bNameFull = b.branch_name?.toString().trim().toUpperCase();
+          const staffList = activeStaffMap[bNameFull] || [];
 
-          const hasBacklog = stats.pendingOrders > 0 || stats.pendingDRs > 0 || stats.pendingPOs > 0;
           const hasSales = stats.total > 0;
           const quotaReached = b.daily_generic_quota > 0 && stats.generic >= b.daily_generic_quota;
 
-          let statusIcon = (type === 'REPORT_CHECKER') 
-            ? (hasBacklog ? '❌' : '✅') 
-            : (!hasSales && staff.length === 0 ? '💤' : (!hasSales ? '🛠️' : (quotaReached ? '✅' : '🚨')));
+          let statusIcon = (type === 'REPORT_CHECKER') ? '🔍' : 
+                          (!hasSales && staffList.length === 0 ? '💤' : 
+                          (!hasSales ? '🛠️' : (quotaReached ? '✅' : '🚨')));
 
           message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
 
-          if (type === 'REPORT_CHECKER') {
-             // Checker logic remains the same...
-          } else {
-            message += `👤 ${staff.length > 0 ? staff.join(', ') : 'OFFLINE'}\n`;
+          if (type !== 'REPORT_CHECKER') {
+            message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n`;
             message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
             message += `• Branded: ₱${stats.branded.toLocaleString()}\n`;
             message += `• Total: ₱${stats.total.toLocaleString()}\n`;
             if (b.daily_generic_quota > 0) {
               message += `• Progress: ${((stats.generic / b.daily_generic_quota) * 100).toFixed(1)}%\n`;
             }
+          } else {
+             message += `• Reports: ${stats.pendingDRs} | Orders: ${stats.pendingOrders}\n`;
           }
           message += `━━━━━━━━━━━━━━━━━━\n`;
         });
@@ -151,7 +144,12 @@ export async function GET(request: Request) {
       })
     );
 
-    return NextResponse.json({ success: true, count: todayLogs?.length });
+    return NextResponse.json({ 
+      success: true, 
+      pht_midnight_queried: startOfTodayISO,
+      logs_found: todayLogs?.length 
+    });
+
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
