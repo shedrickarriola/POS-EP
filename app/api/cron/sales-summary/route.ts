@@ -13,15 +13,9 @@ export async function GET(request: Request) {
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
     
-    // --- STRICT MIDNIGHT PHT CALCULATION ---
-    // 1. Get the current date/time in PHT
+    // 1. Strict PHT Midnight Calculation
     const phtNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Manila" }));
-    
-    // 2. Create a date object for 12:00:00 AM TODAY in PHT
     const midnightPHT = new Date(phtNow.getFullYear(), phtNow.getMonth(), phtNow.getDate(), 0, 0, 0);
-    
-    // 3. Convert that PHT midnight to a UTC ISO string so Supabase understands it
-    // This correctly subtracts 8 hours from the PHT midnight to get the UTC equivalent
     const startOfTodayISO = midnightPHT.toISOString();
 
     const [
@@ -30,8 +24,6 @@ export async function GET(request: Request) {
       { data: branches },
       { data: orgs },
       { data: todayLogs },
-      { data: allPendingReports },
-      { data: allPendingPOs },
     ] = await Promise.all([
       supabase.from('orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
       supabase.from('orders').select('*').gte('created_at', startOfTodayISO),
@@ -41,25 +33,25 @@ export async function GET(request: Request) {
         .in('event_type', ['LOGIN', 'BRANCH_CHANGE'])
         .gte('created_at', startOfTodayISO)
         .order('created_at', { ascending: true }),
-      supabase.from('daily_reports').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
-      supabase.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
     ]);
 
-    // 1. Staff Mapping
+    // 2. Build Staff Map with "Clean" Keys
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
-      const bName = log.branch_name?.toString().trim().toUpperCase();
-      const staffName = log.user_name?.toString().trim().toUpperCase();
+      // CLEANING: Remove all spaces and make uppercase (e.g., "Pansol " -> "PANSOL")
+      const rawBName = log.branch_name?.toString() || "";
+      const cleanBName = rawBName.replace(/\s+/g, '').toUpperCase();
+      const staffName = log.user_name?.toString().trim().toUpperCase() || "UNKNOWN";
       
-      if (bName && staffName) {
-        if (!activeStaffMap[bName]) activeStaffMap[bName] = [];
-        const alreadyExists = activeStaffMap[bName].some(s => s.startsWith(staffName));
+      if (cleanBName) {
+        if (!activeStaffMap[cleanBName]) activeStaffMap[cleanBName] = [];
+        const alreadyExists = activeStaffMap[cleanBName].some(s => s.startsWith(staffName));
         
         if (!alreadyExists) {
           const loginTime = new Date(log.created_at).toLocaleTimeString('en-PH', {
             hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Manila'
           });
-          activeStaffMap[bName].push(`${staffName} (${loginTime})`);
+          activeStaffMap[cleanBName].push(`${staffName} (${loginTime})`);
         }
       }
     });
@@ -69,8 +61,6 @@ export async function GET(request: Request) {
       branchStats[b.id] = {
         generic: 0, branded: 0, total: 0,
         pendingOrders: allUncheckedOrders?.filter((o) => o.branch_id === b.id).length || 0,
-        pendingDRs: allPendingReports?.filter((r) => r.branch_id === b.id).length || 0,
-        pendingPOs: allPendingPOs?.filter((p) => p.branch_id === b.id).length || 0,
       };
     });
 
@@ -94,60 +84,41 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 2. Build & Send Message
-    await Promise.all(
-      Object.values(orgGroups).map(async (group: any) => {
-        let header = '';
-        switch (type) {
-          case 'REPORT_CHECKER': header = '🚨 ALL-TIME REPORT CHECKER (6AM)'; break;
-          case 'LOGIN':          header = '👥 STAFF LOGIN STATUS (12NN)'; break;
-          case 'UPDATE':         header = '📊 SALES UPDATE (5PM)'; break;
-          default:               header = '🏁 FINAL EOD REPORT (11PM)';
-        }
+    // 3. Match and Build Message
+    for (const group of Object.values(orgGroups) as any[]) {
+      let header = (type === 'REPORT_CHECKER') ? '🚨 REPORT CHECKER' : '📊 SALES SUMMARY';
+      let message = `<b>${header}</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n`;
+      message += `━━━━━━━━━━━━━━━━━━\n`;
 
-        let message = `<b>${header}</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n`;
+      group.branches.forEach((b: any) => {
+        const stats = branchStats[b.id];
+        
+        // CLEANING the Branch Table Name for matching
+        const cleanBranchTableName = b.branch_name?.toString().replace(/\s+/g, '').toUpperCase();
+        const staffList = activeStaffMap[cleanBranchTableName] || [];
+
+        const hasSales = stats.total > 0;
+        let statusIcon = (staffList.length > 0) ? '✅' : (hasSales ? '🚨' : '💤');
+
+        message += `<b>📍 ${b.branch_name.toUpperCase()} ${statusIcon}</b>\n`;
+        message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n`;
+        message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
+        message += `• Branded: ₱${stats.branded.toLocaleString()}\n`;
+        message += `• Total: ₱${stats.total.toLocaleString()}\n`;
         message += `━━━━━━━━━━━━━━━━━━\n`;
+      });
 
-        group.branches.forEach((b: any) => {
-          const stats = branchStats[b.id];
-          const bNameFull = b.branch_name?.toString().trim().toUpperCase();
-          const staffList = activeStaffMap[bNameFull] || [];
-
-          const hasSales = stats.total > 0;
-          const quotaReached = b.daily_generic_quota > 0 && stats.generic >= b.daily_generic_quota;
-
-          let statusIcon = (type === 'REPORT_CHECKER') ? '🔍' : 
-                          (!hasSales && staffList.length === 0 ? '💤' : 
-                          (!hasSales ? '🛠️' : (quotaReached ? '✅' : '🚨')));
-
-          message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
-
-          if (type !== 'REPORT_CHECKER') {
-            message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n`;
-            message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
-            message += `• Branded: ₱${stats.branded.toLocaleString()}\n`;
-            message += `• Total: ₱${stats.total.toLocaleString()}\n`;
-            if (b.daily_generic_quota > 0) {
-              message += `• Progress: ${((stats.generic / b.daily_generic_quota) * 100).toFixed(1)}%\n`;
-            }
-          } else {
-             message += `• Reports: ${stats.pendingDRs} | Orders: ${stats.pendingOrders}\n`;
-          }
-          message += `━━━━━━━━━━━━━━━━━━\n`;
-        });
-
-        return fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: group.chatId, text: message, parse_mode: 'HTML' }),
-        });
-      })
-    );
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: group.chatId, text: message, parse_mode: 'HTML' }),
+      });
+    }
 
     return NextResponse.json({ 
       success: true, 
-      pht_midnight_queried: startOfTodayISO,
-      logs_found: todayLogs?.length 
+      found_logs: todayLogs?.length,
+      staff_map_keys: Object.keys(activeStaffMap)
     });
 
   } catch (err: any) {
