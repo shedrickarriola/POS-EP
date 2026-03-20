@@ -151,7 +151,7 @@ export async function GET(request: Request) {
             } else if (!hasSales && staff.length > 0) {
               statusIcon = '🛠️'; // Staff present but 0 sales = Maintenance/Preparing
             } else if (hasSales && b.daily_generic_quota > 0 && !quotaReached) {
-              statusIcon = '🚨'; // Open and selling, but below quota
+              statusIcon = '🚨'; // Open and selling, but below quotaa
             } else {
               statusIcon = '✅'; // Target met or no quota set
             }
