@@ -12,10 +12,13 @@ export async function GET(request: Request) {
 
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
+
+    // Time Setup: Get PHT day start
     const now = new Date();
     const phtNow = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+    const startOfTodayPHT = new Date(phtNow.setUTCHours(0, 0, 0, 0));
     const startOfTodayUTC = new Date(
-      new Date(phtNow).setUTCHours(0, 0, 0, 0) - 8 * 60 * 60 * 1000
+      startOfTodayPHT.getTime() - 8 * 60 * 60 * 1000
     ).toISOString();
 
     const [
@@ -49,16 +52,17 @@ export async function GET(request: Request) {
         .or('is_checked.eq.false,is_checked.is.null'),
     ]);
 
-    // 1. Map Staff Activity with Trimming to prevent mismatch
+    // 1. Map Staff Activity using user_name from your logs
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
       const bName = log.branch_name?.toString().trim().toUpperCase();
-      const email = log.user_email?.split('@').trim().toUpperCase();
-      if (!bName || !email) return;
+      // FIX: Use user_name instead of email
+      const staffName = log.user_name?.toString().trim().toUpperCase();
 
-      if (!activeStaffMap[bName]) activeStaffMap[bName] = [];
-      if (!activeStaffMap[bName].includes(email)) {
-        activeStaffMap[bName].push(email);
+      if (bName && staffName) {
+        if (!activeStaffMap[bName]) activeStaffMap[bName] = [];
+        if (!activeStaffMap[bName].includes(staffName))
+          activeStaffMap[bName].push(staffName);
       }
     });
 
@@ -96,13 +100,12 @@ export async function GET(request: Request) {
     branches?.forEach((b: any) => {
       const org = orgMap[b.org_id];
       if (!org?.telegram_chat_id) return;
-      if (!orgGroups[org.id]) {
+      if (!orgGroups[org.id])
         orgGroups[org.id] = {
           chatId: org.telegram_chat_id,
           name: org.name,
           branches: [],
         };
-      }
       orgGroups[org.id].branches.push(b);
     });
 
@@ -129,10 +132,15 @@ export async function GET(request: Request) {
 
         group.branches.forEach((b: any) => {
           const stats = branchStats[b.id];
+          const bNameFull = b.branch_name?.toString().toUpperCase().trim();
 
-          // Match Branch Name using trimmed uppercase
-          const bKey = b.branch_name?.toString().trim().toUpperCase();
-          const staff = activeStaffMap[bKey] || [];
+          let staff = activeStaffMap[bNameFull] || [];
+          if (staff.length === 0) {
+            const key = Object.keys(activeStaffMap).find(
+              (k) => bNameFull.includes(k) || k.includes(bNameFull)
+            );
+            if (key) staff = activeStaffMap[key];
+          }
 
           const hasBacklog =
             stats.pendingOrders > 0 ||
@@ -142,22 +150,20 @@ export async function GET(request: Request) {
           const quotaReached =
             b.daily_generic_quota > 0 && stats.generic >= b.daily_generic_quota;
 
-          let statusIcon = '✅';
-          if (type === 'REPORT_CHECKER') {
-            statusIcon = hasBacklog ? '❌' : '✅';
-          } else {
-            if (!hasSales && staff.length === 0) {
-              statusIcon = '💤'; // No sales, No staff = Not open
-            } else if (!hasSales && staff.length > 0) {
-              statusIcon = '🛠️'; // Staff present but 0 sales = Maintenance/Preparing
-            } else if (hasSales && b.daily_generic_quota > 0 && !quotaReached) {
-              statusIcon = '🚨'; // Open and selling, but below quota
-            } else {
-              statusIcon = '✅'; // Target met or no quota set
-            }
-          }
+          let statusIcon =
+            type === 'REPORT_CHECKER'
+              ? hasBacklog
+                ? '❌'
+                : '✅'
+              : !hasSales && staff.length === 0
+              ? '💤'
+              : !hasSales
+              ? '🛠️'
+              : quotaReached
+              ? '✅'
+              : '🚨';
 
-          message += `<b>📍 ${b.branch_name.toUpperCase()} ${statusIcon}</b>\n`;
+          message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
 
           if (type === 'REPORT_CHECKER') {
             if (stats.pendingDRs > 0)
@@ -168,19 +174,17 @@ export async function GET(request: Request) {
               message += `• 📦 Pending POs: <b>${stats.pendingPOs}</b>\n`;
             if (!hasBacklog) message += `• <i>No pending backlogs found.</i>\n`;
           } else {
-            // Display staff for all other report types
             message += `👤 ${
               staff.length > 0 ? staff.join(', ') : 'OFFLINE'
             }\n`;
             message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
+            message += `• Branded: ₱${stats.branded.toLocaleString()}\n`;
             message += `• Total: ₱${stats.total.toLocaleString()}\n`;
-
             if (b.daily_generic_quota > 0) {
-              const prog = (
+              message += `• Progress: ${(
                 (stats.generic / b.daily_generic_quota) *
                 100
-              ).toFixed(1);
-              message += `• Progress: ${prog}%\n`;
+              ).toFixed(1)}%\n`;
             }
           }
           message += `━━━━━━━━━━━━━━━━━━\n`;
