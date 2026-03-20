@@ -10,18 +10,17 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  // 1. USE SERVICE ROLE KEY TO BYPASS RLS
-  // Make sure you have SUPABASE_SERVICE_ROLE_KEY in your .env
+  // Use Service Role to bypass RLS
   const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY! 
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
 
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
     
-    // 2. WIDE WINDOW (Last 3 days just to TEST if we can see ANY logs)
-    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+    // Look back 24 hours
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
     const [
       { data: todayLogs, error: logError },
@@ -30,19 +29,22 @@ export async function GET(request: Request) {
     ] = await Promise.all([
       supabaseAdmin.from('system_logs').select('*')
         .in('event_type', ['LOGIN', 'BRANCH_CHANGE'])
-        .gte('created_at', threeDaysAgo), // Testing with a very wide window
+        .gte('created_at', twentyFourHoursAgo),
       supabaseAdmin.from('branches').select('*'),
       supabaseAdmin.from('organizations').select('*')
     ]);
 
     if (logError) throw logError;
 
-    // 3. STAFF MAPPING
+    // 1. Staff Mapping with NULL checks
     const activeStaffMap: Record<string, string[]> = {};
+    
     todayLogs?.forEach((log: any) => {
-      const bKey = log.branch_name?.toString().trim().toUpperCase();
-      const sName = log.user_name?.toString().trim().toUpperCase();
+      // Use Optional Chaining (?.) and fallback to empty string to prevent the toUpperCase() error
+      const bKey = (log.branch_name || "").toString().trim().toUpperCase();
+      const sName = (log.user_name || "").toString().trim().toUpperCase();
       
+      // Only process if BOTH names exist
       if (bKey && sName) {
         if (!activeStaffMap[bKey]) activeStaffMap[bKey] = [];
         if (!activeStaffMap[bKey].some(n => n.startsWith(sName))) {
@@ -65,28 +67,39 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 4. Send Message
+    // 2. Build and Send Telegram Message
     for (const group of Object.values(orgGroups) as any[]) {
       let message = `<b>📊 STAFF STATUS REPORT</b>\n`;
-      message += `<i>Debug: Found ${todayLogs?.length || 0} logs in last 72hrs</i>\n`;
       message += `━━━━━━━━━━━━━━━━━━\n`;
 
       group.branches.forEach((b: any) => {
-        const bName = b.branch_name.toString().trim().toUpperCase();
+        // Safe check for branch table name too
+        const bName = (b.branch_name || "UNKNOWN").toString().trim().toUpperCase();
         const staff = activeStaffMap[bName] || [];
-        message += `<b>📍 ${bName}</b>\n👤 ${staff.length > 0 ? staff.join(', ') : 'OFFLINE'}\n`;
+
+        message += `<b>📍 ${bName}</b>\n`;
+        message += `👤 ${staff.length > 0 ? staff.join(', ') : 'OFFLINE'}\n`;
         message += `━━━━━━━━━━━━━━━━━━\n`;
       });
 
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: group.chatId, text: message, parse_mode: 'HTML' }),
+        body: JSON.stringify({ 
+            chat_id: group.chatId, 
+            text: message, 
+            parse_mode: 'HTML' 
+        }),
       });
     }
 
-    return NextResponse.json({ success: true, logs_count: todayLogs?.length });
+    return NextResponse.json({ 
+        success: true, 
+        logs_processed: todayLogs?.length 
+    });
+
   } catch (err: any) {
+    // If it still fails, this will tell us exactly where
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
