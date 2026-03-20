@@ -41,7 +41,8 @@ export async function GET(request: Request) {
         .from('system_logs')
         .select('*')
         .in('event_type', ['LOGIN', 'BRANCH_CHANGE'])
-        .gte('created_at', startOfTodayUTC),
+        .gte('created_at', startOfTodayUTC)
+        .order('created_at', { ascending: true }), // Crucial: Earliest logs first
       supabase
         .from('daily_reports')
         .select('branch_id, is_checked')
@@ -52,17 +53,33 @@ export async function GET(request: Request) {
         .or('is_checked.eq.false,is_checked.is.null'),
     ]);
 
-    // 1. Map Staff Activity using user_name from your logs
+    // 1. Map Staff Activity with First Login Time
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
       const bName = log.branch_name?.toString().trim().toUpperCase();
-      // FIX: Use user_name instead of email
       const staffName = log.user_name?.toString().trim().toUpperCase();
 
       if (bName && staffName) {
         if (!activeStaffMap[bName]) activeStaffMap[bName] = [];
-        if (!activeStaffMap[bName].includes(staffName))
-          activeStaffMap[bName].push(staffName);
+
+        // Only add if not already present to keep the FIRST login time
+        const alreadyExists = activeStaffMap[bName].some((s) =>
+          s.startsWith(staffName)
+        );
+
+        if (!alreadyExists) {
+          // Format the time to "1:11 PM"
+          const loginTime = new Date(log.created_at).toLocaleTimeString(
+            'en-PH',
+            {
+              hour: 'numeric',
+              minute: '2-digit',
+              hour12: true,
+              timeZone: 'Asia/Manila',
+            }
+          );
+          activeStaffMap[bName].push(`${staffName} (${loginTime})`);
+        }
       }
     });
 
