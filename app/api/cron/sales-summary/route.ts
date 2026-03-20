@@ -10,7 +10,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  // Use Admin Client to bypass RLS and ensure logs are found 
+  // 1. Initialize Admin Client to ensure RLS doesn't block log data 
   const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -19,12 +19,12 @@ export async function GET(request: Request) {
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
     
-    // 1. Strict PHT Midnight Calculation [cite: 5, 6, 7]
+    // 2. Strict PHT Midnight Calculation [cite: 5, 6, 7]
     const phtNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Manila" }));
     const midnightPHT = new Date(phtNow.getFullYear(), phtNow.getMonth(), phtNow.getDate(), 0, 0, 0);
     const startOfTodayISO = midnightPHT.toISOString();
 
-    // 2. Fetch Data 
+    // 3. Fetch Data [cite: 8, 9]
     const [
       { data: allUncheckedOrders },
       { data: todaySales },
@@ -46,11 +46,11 @@ export async function GET(request: Request) {
       supabaseAdmin.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
     ]);
 
-    // 3. Staff Mapping [cite: 10, 11, 12]
+    // 4. Staff Mapping [cite: 10, 11, 12]
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
-      const bName = (log.branch_name || "").toString().trim().toUpperCase();
-      const staffName = (log.user_name || "").toString().trim().toUpperCase();
+      const bName = log.branch_name?.toString().trim().toUpperCase();
+      const staffName = log.user_name?.toString().trim().toUpperCase();
       
       if (bName && staffName) {
         if (!activeStaffMap[bName]) activeStaffMap[bName] = [];
@@ -63,7 +63,7 @@ export async function GET(request: Request) {
       }
     });
 
-    // 4. Organize Stats [cite: 13, 14]
+    // 5. Organize Stats [cite: 13, 14]
     const branchStats: Record<string, any> = {};
     branches?.forEach((b) => {
       branchStats[b.id] = {
@@ -94,7 +94,7 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 5. Build & Send Message [cite: 17, 18, 19, 20]
+    // 6. Build & Send Message [cite: 17, 18]
     await Promise.all(
       Object.values(orgGroups).map(async (group: any) => {
         let header = '';
@@ -110,7 +110,7 @@ export async function GET(request: Request) {
 
         group.branches.forEach((b: any) => {
           const stats = branchStats[b.id];
-          const bNameFull = (b.branch_name || "").toString().trim().toUpperCase();
+          const bNameFull = b.branch_name?.toString().trim().toUpperCase();
           const staffList = activeStaffMap[bNameFull] || [];
 
           const hasSales = stats.total > 0;
@@ -123,20 +123,16 @@ export async function GET(request: Request) {
           message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
 
           if (type === 'REPORT_CHECKER') {
-            // Your Requested Pending Task Format 
-            const drPending = stats.pendingDRs > 0;
-            const orderPending = stats.uncheckedOrders > 0;
-            const poPending = stats.pendingPOs > 0;
-
-            if (drPending) message += `• 📝 Daily Report: <b>PENDING</b>\n`;
-            if (orderPending) message += `• 🛒 Unchecked Orders: <b>${stats.uncheckedOrders}</b>\n`;
-            if (poPending) message += `• 📦 PO Verification: <b>PENDING</b>\n`;
+            // Updated Format: Showing actual counts instead of just "PENDING"
+            if (stats.pendingDRs > 0) message += `• 📝 Daily Report: <b>${stats.pendingDRs}</b>\n`;
+            if (stats.uncheckedOrders > 0) message += `• 🛒 Unchecked Orders: <b>${stats.uncheckedOrders}</b>\n`;
+            if (stats.pendingPOs > 0) message += `• 📦 PO Verification: <b>${stats.pendingPOs}</b>\n`;
             
-            if (!drPending && !orderPending && !poPending) {
-              message += `• <i>No pending backlogs found.</i>\n`;
+            if (stats.pendingDRs === 0 && stats.uncheckedOrders === 0 && stats.pendingPOs === 0) {
+              message += `• <i>No pending tasks for today</i>\n`;
             }
           } else {
-            // Sales/Login Format for 12NN, 5PM, and 11PM [cite: 21, 22, 23]
+            // Sales/Login Format for 12NN, 5PM, and 11PM 
             message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n`;
             message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
             message += `• Branded: ₱${stats.branded.toLocaleString()}\n`;
