@@ -359,6 +359,10 @@ export default function NewPurchaseOrder() {
         { generic: 0, branded: 0 }
       );
 
+      const phtDate = new Date(new Date().getTime() + 8 * 60 * 60 * 1000)
+        .toISOString()
+        .split('T');
+
       // 1. Insert the Purchase Order Header
       const { data: newOrder, error: poError } = await supabase
         .from('purchase_orders')
@@ -373,6 +377,7 @@ export default function NewPurchaseOrder() {
             branch_id: currentBranchId,
             created_by: profile?.id,
             status: 'completed',
+            created_date_pht: phtDate,
           },
         ])
         .select()
@@ -395,6 +400,7 @@ export default function NewPurchaseOrder() {
           packaging_type: Number(item.packaging_type),
           unit_cost: Number(item.invoice_price),
           buy_cost: Number(item.buy_cost),
+          created_date_pht: phtDate,
         };
       });
 

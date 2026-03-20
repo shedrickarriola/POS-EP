@@ -134,12 +134,18 @@ export default function SalesOrderList() {
           `order_number.ilike.%${searchTerm}%,client_name.ilike.%${searchTerm}%`
         );
       }
-      if (startDate) query = query.gte('created_at', startDate);
-      if (endDate) query = query.lte('created_at', `${endDate}T23:59:59`);
+
+      // 1. USE created_date_pht FOR START DATE
+      if (startDate) query = query.gte('created_date_pht', startDate);
+
+      // 2. USE created_date_pht FOR END DATE (No timestamp needed)
+      if (endDate) query = query.lte('created_date_pht', endDate);
+
       if (selectedStaff) query = query.eq('created_by', selectedStaff);
 
+      // 3. ORDER BY THE DATE STRING
       const { data, error, count } = await query
-        .order('created_at', { ascending: false })
+        .order('created_date_pht', { ascending: false })
         .range(from, to);
 
       if (!error) {

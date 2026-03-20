@@ -340,6 +340,10 @@ export default function NewOrderPOS() {
       if (!branchData) throw new Error('No active branch selected');
       const branch = JSON.parse(branchData);
 
+      const phtDate = new Date(new Date().getTime() + 8 * 60 * 60 * 1000)
+        .toISOString()
+        .split('T');
+
       // 1. Create the Sale Record
       const { data: order, error: orderErr } = await supabase
         .from('orders')
@@ -354,6 +358,7 @@ export default function NewOrderPOS() {
             created_by: session.user.email,
             status: 'completed',
             branch_id: currentBranchId,
+            created_date_pht: phtDate,
           },
         ])
         .select()
@@ -369,6 +374,7 @@ export default function NewOrderPOS() {
         unit_price: Number(i.price_piece),
         type: i.type,
         subtotal: i.qty * (i.price_piece * (1 - i.discount_percent / 100)),
+        created_date_pht: phtDate,
       }));
 
       const { error: itemsErr } = await supabase

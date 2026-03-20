@@ -14,7 +14,9 @@ export async function GET(request: Request) {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
     const now = new Date();
     const phtNow = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-    const startOfTodayUTC = new Date(new Date(phtNow).setUTCHours(0, 0, 0, 0) - 8 * 60 * 60 * 1000).toISOString();
+    const startOfTodayUTC = new Date(
+      new Date(phtNow).setUTCHours(0, 0, 0, 0) - 8 * 60 * 60 * 1000
+    ).toISOString();
 
     const [
       { data: allUncheckedOrders },
@@ -25,13 +27,26 @@ export async function GET(request: Request) {
       { data: allPendingReports },
       { data: allPendingPOs },
     ] = await Promise.all([
-      supabase.from('orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
+      supabase
+        .from('orders')
+        .select('branch_id, is_checked')
+        .or('is_checked.eq.false,is_checked.is.null'),
       supabase.from('orders').select('*').gte('created_at', startOfTodayUTC),
       supabase.from('branches').select('*'),
       supabase.from('organizations').select('*'),
-      supabase.from('system_logs').select('*').in('event_type', ['LOGIN', 'BRANCH_CHANGE']).gte('created_at', startOfTodayUTC),
-      supabase.from('daily_reports').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
-      supabase.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
+      supabase
+        .from('system_logs')
+        .select('*')
+        .in('event_type', ['LOGIN', 'BRANCH_CHANGE'])
+        .gte('created_at', startOfTodayUTC),
+      supabase
+        .from('daily_reports')
+        .select('branch_id, is_checked')
+        .or('is_checked.eq.false,is_checked.is.null'),
+      supabase
+        .from('purchase_orders')
+        .select('branch_id, is_checked')
+        .or('is_checked.eq.false,is_checked.is.null'),
     ]);
 
     // 1. Map Staff Activity with Trimming to prevent mismatch
@@ -54,9 +69,12 @@ export async function GET(request: Request) {
         generic: 0,
         branded: 0,
         total: 0,
-        pendingOrders: allUncheckedOrders?.filter((o) => o.branch_id === b.id).length || 0,
-        pendingDRs: allPendingReports?.filter((r) => r.branch_id === b.id).length || 0,
-        pendingPOs: allPendingPOs?.filter((p) => p.branch_id === b.id).length || 0,
+        pendingOrders:
+          allUncheckedOrders?.filter((o) => o.branch_id === b.id).length || 0,
+        pendingDRs:
+          allPendingReports?.filter((r) => r.branch_id === b.id).length || 0,
+        pendingPOs:
+          allPendingPOs?.filter((p) => p.branch_id === b.id).length || 0,
       };
     });
 
@@ -70,14 +88,20 @@ export async function GET(request: Request) {
     });
 
     const orgMap: Record<string, any> = {};
-    orgs?.forEach((org) => { orgMap[org.id] = org; });
+    orgs?.forEach((org) => {
+      orgMap[org.id] = org;
+    });
 
     const orgGroups: Record<string, any> = {};
     branches?.forEach((b: any) => {
       const org = orgMap[b.org_id];
       if (!org?.telegram_chat_id) return;
       if (!orgGroups[org.id]) {
-        orgGroups[org.id] = { chatId: org.telegram_chat_id, name: org.name, branches: [] };
+        orgGroups[org.id] = {
+          chatId: org.telegram_chat_id,
+          name: org.name,
+          branches: [],
+        };
       }
       orgGroups[org.id].branches.push(b);
     });
@@ -87,10 +111,17 @@ export async function GET(request: Request) {
       Object.values(orgGroups).map(async (group: any) => {
         let header = '';
         switch (type) {
-          case 'REPORT_CHECKER': header = '🚨 ALL-TIME REPORT CHECKER (6AM)'; break;
-          case 'LOGIN':          header = '👥 STAFF LOGIN STATUS (12NN)'; break;
-          case 'UPDATE':         header = '📊 SALES UPDATE (5PM)'; break;
-          default:               header = '🏁 FINAL EOD REPORT (11PM)';
+          case 'REPORT_CHECKER':
+            header = '🚨 ALL-TIME REPORT CHECKER (6AM)';
+            break;
+          case 'LOGIN':
+            header = '👥 STAFF LOGIN STATUS (12NN)';
+            break;
+          case 'UPDATE':
+            header = '📊 SALES UPDATE (5PM)';
+            break;
+          default:
+            header = '🏁 FINAL EOD REPORT (11PM)';
         }
 
         let message = `<b>${header}</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n`;
@@ -98,14 +129,18 @@ export async function GET(request: Request) {
 
         group.branches.forEach((b: any) => {
           const stats = branchStats[b.id];
-          
+
           // Match Branch Name using trimmed uppercase
           const bKey = b.branch_name?.toString().trim().toUpperCase();
           const staff = activeStaffMap[bKey] || [];
 
-          const hasBacklog = stats.pendingOrders > 0 || stats.pendingDRs > 0 || stats.pendingPOs > 0;
+          const hasBacklog =
+            stats.pendingOrders > 0 ||
+            stats.pendingDRs > 0 ||
+            stats.pendingPOs > 0;
           const hasSales = stats.total > 0;
-          const quotaReached = b.daily_generic_quota > 0 && stats.generic >= b.daily_generic_quota;
+          const quotaReached =
+            b.daily_generic_quota > 0 && stats.generic >= b.daily_generic_quota;
 
           let statusIcon = '✅';
           if (type === 'REPORT_CHECKER') {
@@ -125,18 +160,26 @@ export async function GET(request: Request) {
           message += `<b>📍 ${b.branch_name.toUpperCase()} ${statusIcon}</b>\n`;
 
           if (type === 'REPORT_CHECKER') {
-            if (stats.pendingDRs > 0) message += `• 📝 Pending Reports: <b>${stats.pendingDRs}</b>\n`;
-            if (stats.pendingOrders > 0) message += `• 🛒 Unchecked Orders: <b>${stats.pendingOrders}</b>\n`;
-            if (stats.pendingPOs > 0) message += `• 📦 Pending POs: <b>${stats.pendingPOs}</b>\n`;
+            if (stats.pendingDRs > 0)
+              message += `• 📝 Pending Reports: <b>${stats.pendingDRs}</b>\n`;
+            if (stats.pendingOrders > 0)
+              message += `• 🛒 Unchecked Orders: <b>${stats.pendingOrders}</b>\n`;
+            if (stats.pendingPOs > 0)
+              message += `• 📦 Pending POs: <b>${stats.pendingPOs}</b>\n`;
             if (!hasBacklog) message += `• <i>No pending backlogs found.</i>\n`;
           } else {
             // Display staff for all other report types
-            message += `👤 ${staff.length > 0 ? staff.join(', ') : 'OFFLINE'}\n`;
+            message += `👤 ${
+              staff.length > 0 ? staff.join(', ') : 'OFFLINE'
+            }\n`;
             message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
             message += `• Total: ₱${stats.total.toLocaleString()}\n`;
-            
+
             if (b.daily_generic_quota > 0) {
-              const prog = ((stats.generic / b.daily_generic_quota) * 100).toFixed(1);
+              const prog = (
+                (stats.generic / b.daily_generic_quota) *
+                100
+              ).toFixed(1);
               message += `• Progress: ${prog}%\n`;
             }
           }

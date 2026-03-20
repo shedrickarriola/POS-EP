@@ -113,7 +113,7 @@ export default function PurchaseOrderList() {
         .from('purchase_orders')
         .select('total_amount, generic_amt, branded_amt')
         .eq('branch_id', currentBranchId)
-        .gte('created_at', firstOfMonth);
+        .gte('created_date_pht', firstOfMonth.split('T'));
 
       setMonthlyStats({
         total:
@@ -143,13 +143,12 @@ export default function PurchaseOrderList() {
           `po_number.ilike.%${searchTerm}%,invoice_id.ilike.%${searchTerm}%,supplier_name.ilike.%${searchTerm}%`
         );
       }
-      if (startDate) dataQuery = dataQuery.gte('created_at', startDate);
-      if (endDate)
-        dataQuery = dataQuery.lte('created_at', `${endDate}T23:59:59`);
+      if (startDate) dataQuery = dataQuery.gte('created_date_pht', startDate);
+      if (endDate) dataQuery = dataQuery.lte('created_date_pht', endDate);
 
       const from = currentPage * pageSize;
       const { data, count, error } = await dataQuery
-        .order('created_at', { ascending: false })
+        .order('created_date_pht', { ascending: false })
         .range(from, from + pageSize - 1);
 
       if (error) throw error;
@@ -388,7 +387,9 @@ export default function PurchaseOrderList() {
                           {order.po_number}
                         </span>
                         <span className="text-[9px] text-slate-500 uppercase mt-0.5">
-                          {new Date(order.created_at).toLocaleDateString()}
+                          {new Date(
+                            order.created_date_pht
+                          ).toLocaleDateString()}
                         </span>
                       </div>
                     </td>
