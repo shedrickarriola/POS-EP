@@ -12,115 +12,133 @@ export async function GET(request: Request) {
 
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
-
     const now = new Date();
     const phtNow = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-    const startOfPHTDayInUTC = new Date(
-      new Date(phtNow.setUTCHours(0, 0, 0, 0)).getTime() - 8 * 60 * 60 * 1000
-    ).toISOString();
+    const startOfTodayUTC = new Date(new Date(phtNow).setUTCHours(0, 0, 0, 0) - 8 * 60 * 60 * 1000).toISOString();
 
-    // 1. Fetch Sales, Branches, Orgs, and Logs
     const [
-      { data: sales },
+      { data: allUncheckedOrders },
+      { data: todaySales },
       { data: branches },
       { data: orgs },
-      { data: logs },
+      { data: todayLogs },
+      { data: allPendingReports },
+      { data: allPendingPOs },
     ] = await Promise.all([
-      supabase.from('orders').select('*').gte('created_at', startOfPHTDayInUTC),
+      supabase.from('orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
+      supabase.from('orders').select('*').gte('created_at', startOfTodayUTC),
       supabase.from('branches').select('*'),
       supabase.from('organizations').select('*'),
-      supabase
-        .from('system_logs')
-        .select('created_at, branch_name, user_email, event_type')
-        .in('event_type', ['LOGIN', 'BRANCH_CHANGE']) // Capture both events
-        .gte('created_at', startOfPHTDayInUTC)
-        .order('created_at', { ascending: true }),
+      supabase.from('system_logs').select('*').in('event_type', ['LOGIN', 'BRANCH_CHANGE']).gte('created_at', startOfTodayUTC),
+      supabase.from('daily_reports').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
+      supabase.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
     ]);
 
-    // 2. Mapping Earliest Activity per Branch
+    // 1. Map Staff Activity with Trimming to prevent mismatch
     const activeStaffMap: Record<string, string[]> = {};
-    const seenStaffAtBranch = new Set<string>();
-
-    logs?.forEach((log: any) => {
-      const bName = log.branch_name?.trim().toUpperCase();
-      const email = log.user_email?.toLowerCase();
+    todayLogs?.forEach((log: any) => {
+      const bName = log.branch_name?.toString().trim().toUpperCase();
+      const email = log.user_email?.split('@').trim().toUpperCase();
       if (!bName || !email) return;
 
-      const uniqueKey = `${email}-${bName}`;
-
-      if (!seenStaffAtBranch.has(uniqueKey)) {
-        seenStaffAtBranch.add(uniqueKey);
-
-        if (!activeStaffMap[bName]) activeStaffMap[bName] = [];
-
-        const time = new Date(log.created_at).toLocaleTimeString('en-PH', {
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: true,
-        });
-
-        const staffName = email.split('@')[0].toUpperCase();
-        activeStaffMap[bName].push(`${staffName} (${time})`);
+      if (!activeStaffMap[bName]) activeStaffMap[bName] = [];
+      if (!activeStaffMap[bName].includes(email)) {
+        activeStaffMap[bName].push(email);
       }
     });
 
+    // 2. Process Branch Stats
     const branchStats: Record<string, any> = {};
-    sales?.forEach((order: any) => {
+    branches?.forEach((b) => {
+      branchStats[b.id] = {
+        generic: 0,
+        branded: 0,
+        total: 0,
+        pendingOrders: allUncheckedOrders?.filter((o) => o.branch_id === b.id).length || 0,
+        pendingDRs: allPendingReports?.filter((r) => r.branch_id === b.id).length || 0,
+        pendingPOs: allPendingPOs?.filter((p) => p.branch_id === b.id).length || 0,
+      };
+    });
+
+    todaySales?.forEach((order: any) => {
       const bId = order.branch_id;
-      if (!branchStats[bId])
-        branchStats[bId] = { generic: 0, branded: 0, total: 0 };
-      branchStats[bId].generic += Number(order.generic_amt || 0);
-      branchStats[bId].total += Number(order.total_amount || 0);
+      if (branchStats[bId]) {
+        branchStats[bId].generic += Number(order.generic_amt || 0);
+        branchStats[bId].branded += Number(order.branded_amt || 0);
+        branchStats[bId].total += Number(order.total_amount || 0);
+      }
     });
 
     const orgMap: Record<string, any> = {};
-    orgs?.forEach((org) => {
-      orgMap[org.id] = org;
-    });
+    orgs?.forEach((org) => { orgMap[org.id] = org; });
 
     const orgGroups: Record<string, any> = {};
     branches?.forEach((b: any) => {
       const org = orgMap[b.org_id];
       if (!org?.telegram_chat_id) return;
-      if (!orgGroups[org.id])
-        orgGroups[org.id] = {
-          chatId: org.telegram_chat_id,
-          name: org.name,
-          branches: [],
-        };
+      if (!orgGroups[org.id]) {
+        orgGroups[org.id] = { chatId: org.telegram_chat_id, name: org.name, branches: [] };
+      }
       orgGroups[org.id].branches.push(b);
     });
 
-    // 3. Build Telegram Messages
+    // 3. Build & Send Message
     await Promise.all(
       Object.values(orgGroups).map(async (group: any) => {
-        let header =
-          type === 'LOGIN'
-            ? '☀️ MORNING SYNC & LOGINS'
-            : type === 'MIDDAY'
-            ? '📊 MIDDAY QUOTA'
-            : '🏁 FINAL EOD';
+        let header = '';
+        switch (type) {
+          case 'REPORT_CHECKER': header = '🚨 ALL-TIME REPORT CHECKER (6AM)'; break;
+          case 'LOGIN':          header = '👥 STAFF LOGIN STATUS (12NN)'; break;
+          case 'UPDATE':         header = '📊 SALES UPDATE (5PM)'; break;
+          default:               header = '🏁 FINAL EOD REPORT (11PM)';
+        }
+
         let message = `<b>${header}</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n`;
         message += `━━━━━━━━━━━━━━━━━━\n`;
 
         group.branches.forEach((b: any) => {
-          const stats = branchStats[b.id] || { generic: 0, total: 0 };
-          const branchKey = b.branch_name?.trim().toUpperCase();
-          const staff = activeStaffMap[branchKey] || [];
+          const stats = branchStats[b.id];
+          
+          // Match Branch Name using trimmed uppercase
+          const bKey = b.branch_name?.toString().trim().toUpperCase();
+          const staff = activeStaffMap[bKey] || [];
 
-          message += `<b>📍 ${b.branch_name.toUpperCase()}</b>\n`;
+          const hasBacklog = stats.pendingOrders > 0 || stats.pendingDRs > 0 || stats.pendingPOs > 0;
+          const hasSales = stats.total > 0;
+          const quotaReached = b.daily_generic_quota > 0 && stats.generic >= b.daily_generic_quota;
 
-          if (type === 'LOGIN') {
-            message +=
-              staff.length > 0
-                ? `👤 ${staff.join(', ')}\n`
-                : `⚠️ <b>NO LOGIN DETECTED</b>\n`;
+          let statusIcon = '✅';
+          if (type === 'REPORT_CHECKER') {
+            statusIcon = hasBacklog ? '❌' : '✅';
+          } else {
+            if (!hasSales && staff.length === 0) {
+              statusIcon = '💤'; // No sales, No staff = Not open
+            } else if (!hasSales && staff.length > 0) {
+              statusIcon = '🛠️'; // Staff present but 0 sales = Maintenance/Preparing
+            } else if (hasSales && b.daily_generic_quota > 0 && !quotaReached) {
+              statusIcon = '🚨'; // Open and selling, but below quota
+            } else {
+              statusIcon = '✅'; // Target met or no quota set
+            }
           }
 
-          message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
-          if (b.daily_generic_quota) {
-            const progress = (stats.generic / b.daily_generic_quota) * 100;
-            message += `• Progress: ${progress.toFixed(1)}%\n`;
+          message += `<b>📍 ${b.branch_name.toUpperCase()} ${statusIcon}</b>\n`;
+
+          if (type === 'REPORT_CHECKER') {
+            if (stats.pendingDRs > 0) message += `• 📝 Pending Reports: <b>${stats.pendingDRs}</b>\n`;
+            if (stats.pendingOrders > 0) message += `• 🛒 Unchecked Orders: <b>${stats.pendingOrders}</b>\n`;
+            if (stats.pendingPOs > 0) message += `• 📦 Pending POs: <b>${stats.pendingPOs}</b>\n`;
+            if (!hasBacklog) message += `• <i>No pending backlogs found.</i>\n`;
+          } else {
+            // Display staff for all other report types
+            message += `👤 ${staff.length > 0 ? staff.join(', ') : 'OFFLINE'}\n`;
+            message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
+            message += `• Total: ₱${stats.total.toLocaleString()}\n`;
+            
+            if (b.daily_generic_quota > 0) {
+              const prog = ((stats.generic / b.daily_generic_quota) * 100).toFixed(1);
+              message += `• Progress: ${prog}%\n`;
+            }
           }
           message += `━━━━━━━━━━━━━━━━━━\n`;
         });
@@ -137,10 +155,7 @@ export async function GET(request: Request) {
       })
     );
 
-    return NextResponse.json({
-      success: true,
-      logs_analyzed: logs?.length || 0,
-    });
+    return NextResponse.json({ success: true });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }

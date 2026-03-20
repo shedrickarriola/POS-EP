@@ -78,6 +78,7 @@ export default function StaffDashboard() {
     name: '',
     cost: 0,
     selling: 0,
+    type: '',
   });
   const [searchTerm, setSearchTerm] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
@@ -246,14 +247,82 @@ export default function StaffDashboard() {
   }
 
   async function fetchDailyReports(branchId: string) {
-    const { data } = await supabase
+    setLogStatus('CHECKING_FOR_MISSING_DATA...');
+
+    // 1. Fetch current summary table
+    const { data: currentReports, error: fetchError } = await supabase
       .from('daily_reports')
       .select('*')
       .eq('branch_id', branchId)
       .order('report_date', { ascending: false })
-      .limit(31); // Increase to 31 to cover a full month of backfills
+      .limit(31);
 
-    setDailyReports(data || []);
+    if (fetchError) return;
+
+    // 2. Identify dates to fix (Fixing the .split('T') here)
+    const last7Days = [...Array(7)].map((_, i) => {
+      const d = new Date(new Date().getTime() + 8 * 60 * 60 * 1000);
+      d.setDate(d.getDate() - i);
+      return d.toISOString().split('T'); // Added to get the string
+    });
+
+    const todayStr = last7Days;
+
+    const datesToFix = last7Days.filter((dateStr) => {
+      // ALWAYS include today so it updates as orders come in
+      if (dateStr === todayStr) return true;
+
+      const report = currentReports?.find((r) => r.report_date === dateStr);
+      // Only fix previous days if they are missing or still 0
+      return !report || Number(report.total_sales) === 0;
+    });
+
+    // 3. Repair the dates
+    if (datesToFix.length > 0) {
+      setLogStatus(`SYNCING_${datesToFix.length}_DAYS...`);
+
+      for (const dateStr of datesToFix) {
+        const { data: orders } = await supabase
+          .from('orders')
+          .select('generic_amt, branded_amt, total_amount')
+          .eq('branch_id', branchId)
+          .eq('created_date_pht', dateStr);
+
+        // Even if orders are 0, we upsert to keep the report accurate
+        const gen =
+          orders?.reduce((s, o) => s + (Number(o.generic_amt) || 0), 0) || 0;
+        const brd =
+          orders?.reduce((s, o) => s + (Number(o.branded_amt) || 0), 0) || 0;
+        const ttl =
+          orders?.reduce((s, o) => s + (Number(o.total_amount) || 0), 0) || 0;
+
+        await supabase.from('daily_reports').upsert(
+          {
+            branch_id: branchId,
+            report_date: dateStr,
+            generic_sales: gen,
+            branded_sales: brd,
+            total_sales: ttl,
+            branch_name: selectedBranch?.branch_name,
+          },
+          { onConflict: 'branch_id,report_date' }
+        );
+      }
+
+      // 4. Final fetch to show the new numbers
+      const { data: finalData } = await supabase
+        .from('daily_reports')
+        .select('*')
+        .eq('branch_id', branchId)
+        .order('report_date', { ascending: false })
+        .limit(31);
+
+      setDailyReports(finalData || []);
+    } else {
+      setDailyReports(currentReports || []);
+    }
+
+    setLogStatus('SYSTEM_READY');
   }
 
   const handleBranchSelect = async (branch: any) => {
@@ -424,7 +493,7 @@ export default function StaffDashboard() {
       ]);
       if (error) throw error;
       triggerToast(`${newProduct.name} Registered!`, 'success');
-      setNewProduct({ name: '', cost: 0, selling: 0 });
+      setNewProduct({ name: '', cost: 0, selling: 0, type: '' });
       setShowAddModal(false);
     } catch (err: any) {
       triggerToast(err.message, 'error');
@@ -469,81 +538,86 @@ export default function StaffDashboard() {
       monthlyTotal: dailyTotal * daysInMonth,
     };
   };
+
   const handleOpenReport = async () => {
-    const now = new Date();
-    // Ensure we use local date string for querying
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const localDateStr = `${year}-${month}-${day}`;
+    // 1. Determine target date - Ensure it is a STRING "YYYY-MM-DD"
+    const todayPHT = new Date(new Date().getTime() + 8 * 60 * 60 * 1000)
+      .toISOString()
+      .split('T'); // The is critical!
 
-    setLogStatus('CALCULATING_REALTIME_SALES...');
+    const targetDate = selectedDate || todayPHT;
 
-    // 1. Fetch orders for the current branch and today's date
-    const { data: orders, error: orderError } = await supabase
-      .from('orders')
-      .select('total_price, type')
-      .eq('branch_id', selectedBranch.id)
-      .eq('order_date', localDateStr);
+    setLogStatus(`REFRESHING_SALES_FOR: ${targetDate}...`);
 
-    let genTotal = 0;
-    let brdTotal = 0;
+    try {
+      // 2. Fetch RAW ORDERS using the new PHT column
+      const { data: orders, error: orderError } = await supabase
+        .from('orders')
+        .select('generic_amt, branded_amt, total_amount')
+        .eq('branch_id', selectedBranch.id)
+        .eq('created_date_pht', targetDate);
 
-    if (!orderError && orders) {
-      // Aggregating by 'type' column
-      genTotal = orders
-        .filter((o) => o.type === 'Generic')
-        .reduce((sum, o) => sum + (Number(o.total_price) || 0), 0);
+      if (orderError) throw orderError;
 
-      brdTotal = orders
-        .filter((o) => o.type === 'Branded')
-        .reduce((sum, o) => sum + (Number(o.total_price) || 0), 0);
-    }
+      let genTotal = 0;
+      let brdTotal = 0;
+      let ttlTotal = 0;
 
-    // 2. Weekly Validation (Sun-Sat Logic)
-    const lastSun = new Date();
-    lastSun.setDate(now.getDate() - now.getDay() - 7);
-    lastSun.setHours(0, 0, 0, 0);
-    const lastSat = new Date(lastSun);
-    lastSat.setDate(lastSun.getDate() + 6);
+      if (orders && orders.length > 0) {
+        genTotal = orders.reduce(
+          (sum, o) => sum + (Number(o.generic_amt) || 0),
+          0
+        );
+        brdTotal = orders.reduce(
+          (sum, o) => sum + (Number(o.branded_amt) || 0),
+          0
+        );
+        ttlTotal = orders.reduce(
+          (sum, o) => sum + (Number(o.total_amount) || 0),
+          0
+        );
 
-    const missingDates = [];
-    const tempDate = new Date(lastSun);
-    while (tempDate <= lastSat) {
-      const dStr = tempDate.toLocaleDateString('en-CA');
-      if (!dailyReports.find((r) => r.report_date === dStr)) {
-        missingDates.push(dStr);
+        // 3. REPAIR THE CALENDAR: Update the daily_reports table
+        const { error: upsertError } = await supabase
+          .from('daily_reports')
+          .upsert(
+            {
+              branch_id: selectedBranch.id,
+              report_date: targetDate,
+              generic_sales: genTotal,
+              branded_sales: brdTotal,
+              total_sales: ttlTotal,
+              branch_name: selectedBranch.branch_name,
+            },
+            { onConflict: 'branch_id,report_date' }
+          );
+
+        if (upsertError) console.error('Upsert Error:', upsertError);
+
+        // 4. Update the Dashboard Grid immediately
+        fetchDailyReports(selectedBranch.id);
       }
-      tempDate.setDate(tempDate.getDate() + 1);
+
+      // 5. Populate Remittance State for the Modal
+      setRemittance({
+        ...remittance,
+        report_date: targetDate,
+        actual_cash: 0,
+        expenses: 0,
+        generic_sales: genTotal,
+        branded_sales: brdTotal,
+        total_sales: ttlTotal,
+      });
+
+      setLogStatus(`SYNC_COMPLETE: ${targetDate}`);
+      setShowReportModal(true);
+    } catch (err) {
+      console.error('HandleOpenReport Error:', err);
+      setLogStatus('ERROR_FETCHING_SALES');
+      triggerToast('Failed to sync sales data', 'error');
     }
-
-    const hasHistory = dailyReports.some(
-      (r) => new Date(r.report_date) < lastSun
-    );
-
-    if (missingDates.length > 0 && hasHistory) {
-      setCanReportingProceed(false);
-      setMissingDate(missingDates[0]);
-      triggerToast(`Backfill required: ${missingDates[0]}`, 'error');
-    } else {
-      setCanReportingProceed(true);
-      setMissingDate(null);
-    }
-
-    // 3. Populate Remittance State with Real-Time Totals
-    setRemittance({
-      ...remittance,
-      report_date: localDateStr,
-      actual_cash: 0,
-      expenses: 0,
-      generic_sales: genTotal,
-      branded_sales: brdTotal,
-      total_sales: genTotal + brdTotal,
-    });
-
-    setLogStatus('SYNC_COMPLETE: READY_FOR_SUBMISSION');
-    setShowReportModal(true);
   };
+
   const handleSaveReport = async () => {
     if (!remittance.actual_cash)
       return triggerToast('Actual Cash Required', 'error');
@@ -584,57 +658,47 @@ export default function StaffDashboard() {
     }
   };
   const syncDailyReportRealtime = async (branchId: string) => {
-    const now = new Date();
-
-    // 1. Define the Time Range for Today (UTC/Local Range)
-    const startOfDay = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
-    const endOfDay = new Date(
-      new Date().setHours(23, 59, 59, 999)
-    ).toISOString();
+    // 1. Get Today's Date in PHT (YYYY-MM-DD)
+    const todayPHT = new Date(new Date().getTime() + 8 * 60 * 60 * 1000)
+      .toISOString()
+      .split('T'); // Added to get the string, not an array
 
     setLogStatus('REALTIME_SYNC_INITIATED...');
 
-    // 2. Fetch Orders for Today
+    // 2. Fetch Orders using the NEW column
     const { data: orders, error: orderError } = await supabase
       .from('orders')
-      .select('generic_amt, branded_amt, total_amount, created_at')
+      .select('generic_amt, branded_amt, total_amount')
       .eq('branch_id', branchId)
-      .gte('created_at', startOfDay)
-      .lte('created_at', endOfDay);
+      .eq('created_date_pht', todayPHT); // Direct match!
 
     if (orderError || !orders || orders.length === 0) {
       setLogStatus('IDLE: NO_ORDERS_TODAY');
       return;
     }
 
-    // 3. Extract the Date String from the first order's timestamp
-    // This turns "2026-03-10T14:30:00Z" into "2026-03-10"
-    const orderDateOnly = orders[0].created_at.split('T')[0];
-
-    // 4. Null-Safe Aggregation
+    // 3. Simple Aggregation
     const genTotal = Number(
       orders
         .reduce((sum, o) => sum + (parseFloat(o.generic_amt) || 0), 0)
         .toFixed(2)
     );
-
     const brdTotal = Number(
       orders
         .reduce((sum, o) => sum + (parseFloat(o.branded_amt) || 0), 0)
         .toFixed(2)
     );
-
     const ttlTotal = Number(
       orders
         .reduce((sum, o) => sum + (parseFloat(o.total_amount) || 0), 0)
         .toFixed(2)
     );
 
-    // 5. UPSERT using the date from the order timestamp
+    // 4. UPSERT to daily_reports
     const { error: upsertError } = await supabase.from('daily_reports').upsert(
       {
         branch_id: branchId,
-        report_date: orderDateOnly, // Using the order's own date
+        report_date: todayPHT, // Use the PHT date directly
         generic_sales: genTotal,
         branded_sales: brdTotal,
         total_sales: ttlTotal,
@@ -646,9 +710,7 @@ export default function StaffDashboard() {
     );
 
     if (!upsertError) {
-      setLogStatus(
-        `SYNC_SUCCESS: ${orderDateOnly} ₱${ttlTotal.toLocaleString()}`
-      );
+      setLogStatus(`SYNC_SUCCESS: ${todayPHT} ₱${ttlTotal.toLocaleString()}`);
       fetchDailyReports(branchId);
     } else {
       console.error('Upsert Error:', upsertError);
@@ -1349,7 +1411,7 @@ export default function StaffDashboard() {
 
         {/* Add Product Modal */}
         {showAddModal && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+          <div className="fixed inset-0 z- flex items-center justify-center p-6">
             <div
               className="absolute inset-0 bg-black/80 backdrop-blur-sm"
               onClick={() => setShowAddModal(false)}
@@ -1366,20 +1428,24 @@ export default function StaffDashboard() {
                   <X size={20} />
                 </button>
               </div>
+
               <div className="space-y-4">
+                {/* Product Name */}
                 <input
                   type="text"
                   value={newProduct.name}
                   onChange={(e) =>
                     setNewProduct({ ...newProduct, name: e.target.value })
                   }
-                  className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3 text-sm text-white outline-none"
+                  className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-emerald-500/50 transition-colors"
                   placeholder="Product Name"
                 />
+
+                {/* Pricing Grid */}
                 <div className="grid grid-cols-2 gap-4">
                   <input
                     type="number"
-                    value={newProduct.cost}
+                    value={newProduct.cost || ''}
                     onChange={(e) =>
                       setNewProduct({
                         ...newProduct,
@@ -1387,11 +1453,11 @@ export default function StaffDashboard() {
                       })
                     }
                     className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3 text-sm text-white outline-none"
-                    placeholder="Cost"
+                    placeholder="Cost Price"
                   />
                   <input
                     type="number"
-                    value={newProduct.selling}
+                    value={newProduct.selling || ''}
                     onChange={(e) =>
                       setNewProduct({
                         ...newProduct,
@@ -1399,14 +1465,57 @@ export default function StaffDashboard() {
                       })
                     }
                     className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3 text-sm text-white outline-none"
-                    placeholder="Selling"
+                    placeholder="Selling Price"
                   />
                 </div>
+
+                {/* MANDATORY TYPE SELECTION */}
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center">
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">
+                      Classification_Required
+                    </label>
+                    {!newProduct.type && (
+                      <span className="text-[9px] text-red-500 font-bold animate-pulse">
+                        * SELECT TYPE
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 p-1 bg-slate-950 rounded-xl border border-white/5">
+                    {['GENERIC', 'BRANDED'].map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() =>
+                          setNewProduct({ ...newProduct, type: t })
+                        }
+                        className={`py-3 rounded-lg text-[10px] font-black transition-all ${
+                          newProduct.type === t
+                            ? t === 'GENERIC'
+                              ? 'bg-blue-600 text-white shadow-lg'
+                              : 'bg-amber-600 text-white shadow-lg'
+                            : 'text-slate-600 hover:text-slate-400'
+                        }`}
+                      >
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* SUBMIT BUTTON - Disabled if no name or no type */}
                 <button
+                  disabled={!newProduct.name || !newProduct.type}
                   onClick={handleRegisterProduct}
-                  className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-sm font-black uppercase tracking-widest text-white mt-4 transition-all"
+                  className={`w-full py-4 rounded-xl text-sm font-black uppercase tracking-widest mt-4 transition-all ${
+                    newProduct.name && newProduct.type
+                      ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-xl shadow-emerald-500/20'
+                      : 'bg-slate-800 text-slate-600 cursor-not-allowed opacity-50'
+                  }`}
                 >
-                  Execute Registration
+                  {newProduct.type
+                    ? 'Execute Registration'
+                    : 'Complete Form to Register'}
                 </button>
               </div>
             </div>
