@@ -10,7 +10,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  // Use Admin Client to ensure RLS never blocks logs [cite: 1, 9]
+  // Use Admin Client to bypass RLS and ensure logs are found 
   const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -24,7 +24,7 @@ export async function GET(request: Request) {
     const midnightPHT = new Date(phtNow.getFullYear(), phtNow.getMonth(), phtNow.getDate(), 0, 0, 0);
     const startOfTodayISO = midnightPHT.toISOString();
 
-    // 2. Fetch Data [cite: 8, 9]
+    // 2. Fetch Data 
     const [
       { data: allUncheckedOrders },
       { data: todaySales },
@@ -49,8 +49,8 @@ export async function GET(request: Request) {
     // 3. Staff Mapping [cite: 10, 11, 12]
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
-      const bName = log.branch_name?.toString().trim().toUpperCase();
-      const staffName = log.user_name?.toString().trim().toUpperCase();
+      const bName = (log.branch_name || "").toString().trim().toUpperCase();
+      const staffName = (log.user_name || "").toString().trim().toUpperCase();
       
       if (bName && staffName) {
         if (!activeStaffMap[bName]) activeStaffMap[bName] = [];
@@ -68,7 +68,7 @@ export async function GET(request: Request) {
     branches?.forEach((b) => {
       branchStats[b.id] = {
         generic: 0, branded: 0, total: 0,
-        pendingOrders: allUncheckedOrders?.filter((o) => o.branch_id === b.id).length || 0,
+        uncheckedOrders: allUncheckedOrders?.filter((o) => o.branch_id === b.id).length || 0,
         pendingDRs: allPendingReports?.filter((r) => r.branch_id === b.id).length || 0,
         pendingPOs: allPendingPOs?.filter((p) => p.branch_id === b.id).length || 0,
       };
@@ -94,7 +94,7 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 5. Build & Send Message [cite: 17, 18]
+    // 5. Build & Send Message [cite: 17, 18, 19, 20]
     await Promise.all(
       Object.values(orgGroups).map(async (group: any) => {
         let header = '';
@@ -110,7 +110,7 @@ export async function GET(request: Request) {
 
         group.branches.forEach((b: any) => {
           const stats = branchStats[b.id];
-          const bNameFull = b.branch_name?.toString().trim().toUpperCase();
+          const bNameFull = (b.branch_name || "").toString().trim().toUpperCase();
           const staffList = activeStaffMap[bNameFull] || [];
 
           const hasSales = stats.total > 0;
@@ -123,10 +123,20 @@ export async function GET(request: Request) {
           message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
 
           if (type === 'REPORT_CHECKER') {
-             // 6AM Morning Checker: Restore Reports, Orders, and POs [cite: 24, 25]
-             message += `• Reports: ${stats.pendingDRs} | Orders: ${stats.pendingOrders} | POs: ${stats.pendingPOs}\n`;
+            // Your Requested Pending Task Format 
+            const drPending = stats.pendingDRs > 0;
+            const orderPending = stats.uncheckedOrders > 0;
+            const poPending = stats.pendingPOs > 0;
+
+            if (drPending) message += `• 📝 Daily Report: <b>PENDING</b>\n`;
+            if (orderPending) message += `• 🛒 Unchecked Orders: <b>${stats.uncheckedOrders}</b>\n`;
+            if (poPending) message += `• 📦 PO Verification: <b>PENDING</b>\n`;
+            
+            if (!drPending && !orderPending && !poPending) {
+              message += `• <i>No pending backlogs found.</i>\n`;
+            }
           } else {
-            // LOGIN, UPDATE, and EOD: Always show staff and sales progress 
+            // Sales/Login Format for 12NN, 5PM, and 11PM [cite: 21, 22, 23]
             message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n`;
             message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
             message += `• Branded: ₱${stats.branded.toLocaleString()}\n`;
