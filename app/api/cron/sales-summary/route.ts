@@ -12,14 +12,12 @@ export async function GET(request: Request) {
 
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
-
+    
     // Time Setup: Get PHT day start
     const now = new Date();
     const phtNow = new Date(now.getTime() + 8 * 60 * 60 * 1000);
     const startOfTodayPHT = new Date(phtNow.setUTCHours(0, 0, 0, 0));
-    const startOfTodayUTC = new Date(
-      startOfTodayPHT.getTime() - 8 * 60 * 60 * 1000
-    ).toISOString();
+    const startOfTodayUTC = new Date(startOfTodayPHT.getTime() - 8 * 60 * 60 * 1000).toISOString();
 
     const [
       { data: allUncheckedOrders },
@@ -30,27 +28,16 @@ export async function GET(request: Request) {
       { data: allPendingReports },
       { data: allPendingPOs },
     ] = await Promise.all([
-      supabase
-        .from('orders')
-        .select('branch_id, is_checked')
-        .or('is_checked.eq.false,is_checked.is.null'),
+      supabase.from('orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
       supabase.from('orders').select('*').gte('created_at', startOfTodayUTC),
       supabase.from('branches').select('*'),
       supabase.from('organizations').select('*'),
-      supabase
-        .from('system_logs')
-        .select('*')
+      supabase.from('system_logs').select('*')
         .in('event_type', ['LOGIN', 'BRANCH_CHANGE'])
         .gte('created_at', startOfTodayUTC)
         .order('created_at', { ascending: true }), // Crucial: Earliest logs first
-      supabase
-        .from('daily_reports')
-        .select('branch_id, is_checked')
-        .or('is_checked.eq.false,is_checked.is.null'),
-      supabase
-        .from('purchase_orders')
-        .select('branch_id, is_checked')
-        .or('is_checked.eq.false,is_checked.is.null'),
+      supabase.from('daily_reports').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
+      supabase.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
     ]);
 
     // 1. Map Staff Activity with First Login Time
@@ -58,26 +45,21 @@ export async function GET(request: Request) {
     todayLogs?.forEach((log: any) => {
       const bName = log.branch_name?.toString().trim().toUpperCase();
       const staffName = log.user_name?.toString().trim().toUpperCase();
-
+      
       if (bName && staffName) {
         if (!activeStaffMap[bName]) activeStaffMap[bName] = [];
-
+        
         // Only add if not already present to keep the FIRST login time
-        const alreadyExists = activeStaffMap[bName].some((s) =>
-          s.startsWith(staffName)
-        );
-
+        const alreadyExists = activeStaffMap[bName].some(s => s.startsWith(staffName));
+        
         if (!alreadyExists) {
           // Format the time to "1:11 PM"
-          const loginTime = new Date(log.created_at).toLocaleTimeString(
-            'en-PH',
-            {
-              hour: 'numeric',
-              minute: '2-digit',
-              hour12: true,
-              timeZone: 'Asia/Manila',
-            }
-          );
+          const loginTime = new Date(log.created_at).toLocaleTimeString('en-PH', {
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true,
+            timeZone: 'Asia/Manila'
+          });
           activeStaffMap[bName].push(`${staffName} (${loginTime})`);
         }
       }
@@ -87,15 +69,10 @@ export async function GET(request: Request) {
     const branchStats: Record<string, any> = {};
     branches?.forEach((b) => {
       branchStats[b.id] = {
-        generic: 0,
-        branded: 0,
-        total: 0,
-        pendingOrders:
-          allUncheckedOrders?.filter((o) => o.branch_id === b.id).length || 0,
-        pendingDRs:
-          allPendingReports?.filter((r) => r.branch_id === b.id).length || 0,
-        pendingPOs:
-          allPendingPOs?.filter((p) => p.branch_id === b.id).length || 0,
+        generic: 0, branded: 0, total: 0,
+        pendingOrders: allUncheckedOrders?.filter((o) => o.branch_id === b.id).length || 0,
+        pendingDRs: allPendingReports?.filter((r) => r.branch_id === b.id).length || 0,
+        pendingPOs: allPendingPOs?.filter((p) => p.branch_id === b.id).length || 0,
       };
     });
 
@@ -109,20 +86,13 @@ export async function GET(request: Request) {
     });
 
     const orgMap: Record<string, any> = {};
-    orgs?.forEach((org) => {
-      orgMap[org.id] = org;
-    });
+    orgs?.forEach((org) => { orgMap[org.id] = org; });
 
     const orgGroups: Record<string, any> = {};
     branches?.forEach((b: any) => {
       const org = orgMap[b.org_id];
       if (!org?.telegram_chat_id) return;
-      if (!orgGroups[org.id])
-        orgGroups[org.id] = {
-          chatId: org.telegram_chat_id,
-          name: org.name,
-          branches: [],
-        };
+      if (!orgGroups[org.id]) orgGroups[org.id] = { chatId: org.telegram_chat_id, name: org.name, branches: [] };
       orgGroups[org.id].branches.push(b);
     });
 
@@ -131,17 +101,10 @@ export async function GET(request: Request) {
       Object.values(orgGroups).map(async (group: any) => {
         let header = '';
         switch (type) {
-          case 'REPORT_CHECKER':
-            header = '🚨 ALL-TIME REPORT CHECKER (6AM)';
-            break;
-          case 'LOGIN':
-            header = '👥 STAFF LOGIN STATUS (12NN)';
-            break;
-          case 'UPDATE':
-            header = '📊 SALES UPDATE (5PM)';
-            break;
-          default:
-            header = '🏁 FINAL EOD REPORT (11PM)';
+          case 'REPORT_CHECKER': header = '🚨 ALL-TIME REPORT CHECKER (6AM)'; break;
+          case 'LOGIN':          header = '👥 STAFF LOGIN STATUS (12NN)'; break;
+          case 'UPDATE':         header = '📊 SALES UPDATE (5PM)'; break;
+          default:               header = '🏁 FINAL EOD REPORT (11PM)';
         }
 
         let message = `<b>${header}</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n`;
@@ -150,58 +113,35 @@ export async function GET(request: Request) {
         group.branches.forEach((b: any) => {
           const stats = branchStats[b.id];
           const bNameFull = b.branch_name?.toString().toUpperCase().trim();
-
+          
           let staff = activeStaffMap[bNameFull] || [];
           if (staff.length === 0) {
-            const key = Object.keys(activeStaffMap).find(
-              (k) => bNameFull.includes(k) || k.includes(bNameFull)
-            );
-            if (key) staff = activeStaffMap[key];
+              const key = Object.keys(activeStaffMap).find(k => bNameFull.includes(k) || k.includes(bNameFull));
+              if (key) staff = activeStaffMap[key];
           }
 
-          const hasBacklog =
-            stats.pendingOrders > 0 ||
-            stats.pendingDRs > 0 ||
-            stats.pendingPOs > 0;
+          const hasBacklog = stats.pendingOrders > 0 || stats.pendingDRs > 0 || stats.pendingPOs > 0;
           const hasSales = stats.total > 0;
-          const quotaReached =
-            b.daily_generic_quota > 0 && stats.generic >= b.daily_generic_quota;
+          const quotaReached = b.daily_generic_quota > 0 && stats.generic >= b.daily_generic_quota;
 
-          let statusIcon =
-            type === 'REPORT_CHECKER'
-              ? hasBacklog
-                ? '❌'
-                : '✅'
-              : !hasSales && staff.length === 0
-              ? '💤'
-              : !hasSales
-              ? '🛠️'
-              : quotaReached
-              ? '✅'
-              : '🚨';
+          let statusIcon = (type === 'REPORT_CHECKER') 
+            ? (hasBacklog ? '❌' : '✅') 
+            : (!hasSales && staff.length === 0 ? '💤' : (!hasSales ? '🛠️' : (quotaReached ? '✅' : '🚨')));
 
           message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
 
           if (type === 'REPORT_CHECKER') {
-            if (stats.pendingDRs > 0)
-              message += `• 📝 Pending Reports: <b>${stats.pendingDRs}</b>\n`;
-            if (stats.pendingOrders > 0)
-              message += `• 🛒 Unchecked Orders: <b>${stats.pendingOrders}</b>\n`;
-            if (stats.pendingPOs > 0)
-              message += `• 📦 Pending POs: <b>${stats.pendingPOs}</b>\n`;
+            if (stats.pendingDRs > 0) message += `• 📝 Pending Reports: <b>${stats.pendingDRs}</b>\n`;
+            if (stats.pendingOrders > 0) message += `• 🛒 Unchecked Orders: <b>${stats.pendingOrders}</b>\n`;
+            if (stats.pendingPOs > 0) message += `• 📦 Pending POs: <b>${stats.pendingPOs}</b>\n`;
             if (!hasBacklog) message += `• <i>No pending backlogs found.</i>\n`;
           } else {
-            message += `👤 ${
-              staff.length > 0 ? staff.join(', ') : 'OFFLINE'
-            }\n`;
+            message += `👤 ${staff.length > 0 ? staff.join(', ') : 'OFFLINE'}\n`;
             message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
             message += `• Branded: ₱${stats.branded.toLocaleString()}\n`;
             message += `• Total: ₱${stats.total.toLocaleString()}\n`;
             if (b.daily_generic_quota > 0) {
-              message += `• Progress: ${(
-                (stats.generic / b.daily_generic_quota) *
-                100
-              ).toFixed(1)}%\n`;
+              message += `• Progress: ${((stats.generic / b.daily_generic_quota) * 100).toFixed(1)}%\n`;
             }
           }
           message += `━━━━━━━━━━━━━━━━━━\n`;
@@ -210,11 +150,7 @@ export async function GET(request: Request) {
         return fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: group.chatId,
-            text: message,
-            parse_mode: 'HTML',
-          }),
+          body: JSON.stringify({ chat_id: group.chatId, text: message, parse_mode: 'HTML' }),
         });
       })
     );
