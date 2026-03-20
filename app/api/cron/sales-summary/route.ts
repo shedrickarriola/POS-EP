@@ -1,5 +1,5 @@
+import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
-import { supabase } from '../../../../lib/supabase';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -10,30 +10,34 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
+  // 1. USE SERVICE ROLE KEY TO BYPASS RLS
+  // Make sure you have SUPABASE_SERVICE_ROLE_KEY in your .env
+  const supabaseAdmin = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY! 
+  );
+
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
     
-    // --- THE FIX: USE A ROLLING 24-HOUR WINDOW ---
-    // Instead of calculating "Midnight", we just look at the last 24 hours.
-    // This ignores all timezone/midnight confusion.
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    // 2. WIDE WINDOW (Last 3 days just to TEST if we can see ANY logs)
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
 
     const [
-      { data: todaySales },
+      { data: todayLogs, error: logError },
       { data: branches },
-      { data: orgs },
-      { data: todayLogs }
+      { data: orgs }
     ] = await Promise.all([
-      supabase.from('orders').select('*').gte('created_at', twentyFourHoursAgo),
-      supabase.from('branches').select('*'),
-      supabase.from('organizations').select('*'),
-      supabase.from('system_logs').select('*')
+      supabaseAdmin.from('system_logs').select('*')
         .in('event_type', ['LOGIN', 'BRANCH_CHANGE'])
-        .gte('created_at', twentyFourHoursAgo)
-        .order('created_at', { ascending: true }),
+        .gte('created_at', threeDaysAgo), // Testing with a very wide window
+      supabaseAdmin.from('branches').select('*'),
+      supabaseAdmin.from('organizations').select('*')
     ]);
 
-    // 1. Map Staff (Normalize keys to "PANSOL")
+    if (logError) throw logError;
+
+    // 3. STAFF MAPPING
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
       const bKey = log.branch_name?.toString().trim().toUpperCase();
@@ -41,8 +45,7 @@ export async function GET(request: Request) {
       
       if (bKey && sName) {
         if (!activeStaffMap[bKey]) activeStaffMap[bKey] = [];
-        if (!activeStaffMap[bKey].some(name => name.startsWith(sName))) {
-          // Format time for PHT display
+        if (!activeStaffMap[bKey].some(n => n.startsWith(sName))) {
           const time = new Date(log.created_at).toLocaleTimeString('en-PH', {
             hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Manila'
           });
@@ -62,19 +65,16 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 2. Build Message
+    // 4. Send Message
     for (const group of Object.values(orgGroups) as any[]) {
-      let header = (type === 'REPORT_CHECKER') ? '🚨 REPORT CHECKER' : '📊 SALES SUMMARY';
-      let message = `<b>${header}</b>\n`;
-      message += `🏢 <b>${group.name.toUpperCase()}</b>\n`;
+      let message = `<b>📊 STAFF STATUS REPORT</b>\n`;
+      message += `<i>Debug: Found ${todayLogs?.length || 0} logs in last 72hrs</i>\n`;
       message += `━━━━━━━━━━━━━━━━━━\n`;
 
       group.branches.forEach((b: any) => {
         const bName = b.branch_name.toString().trim().toUpperCase();
-        const staffEntries = activeStaffMap[bName] || [];
-
-        message += `<b>📍 ${bName}</b>\n`;
-        message += `👤 ${staffEntries.length > 0 ? staffEntries.join(', ') : 'OFFLINE'}\n`;
+        const staff = activeStaffMap[bName] || [];
+        message += `<b>📍 ${bName}</b>\n👤 ${staff.length > 0 ? staff.join(', ') : 'OFFLINE'}\n`;
         message += `━━━━━━━━━━━━━━━━━━\n`;
       });
 
@@ -85,7 +85,7 @@ export async function GET(request: Request) {
       });
     }
 
-    return NextResponse.json({ success: true, logs_found: todayLogs?.length });
+    return NextResponse.json({ success: true, logs_count: todayLogs?.length });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
