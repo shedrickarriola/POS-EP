@@ -1,5 +1,5 @@
+import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
-import { supabase } from '../../../../lib/supabase';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -10,20 +10,21 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
+  // Use Admin Client to ensure RLS doesn't block logs for any report type
+  const supabaseAdmin = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
     
-    // --- STRICT MIDNIGHT PHT CALCULATION ---
-    // 1. Get the current date/time in PHT
+    // 1. Strict PHT Midnight Calculation [cite: 5, 6, 7]
     const phtNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Manila" }));
-    
-    // 2. Create a date object for 12:00:00 AM TODAY in PHT
     const midnightPHT = new Date(phtNow.getFullYear(), phtNow.getMonth(), phtNow.getDate(), 0, 0, 0);
-    
-    // 3. Convert that PHT midnight to a UTC ISO string so Supabase understands it
-    // This correctly subtracts 8 hours from the PHT midnight to get the UTC equivalent
     const startOfTodayISO = midnightPHT.toISOString();
 
+    // 2. Fetch Data [cite: 8, 9]
     const [
       { data: allUncheckedOrders },
       { data: todaySales },
@@ -33,19 +34,19 @@ export async function GET(request: Request) {
       { data: allPendingReports },
       { data: allPendingPOs },
     ] = await Promise.all([
-      supabase.from('orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
-      supabase.from('orders').select('*').gte('created_at', startOfTodayISO),
-      supabase.from('branches').select('*'),
-      supabase.from('organizations').select('*'),
-      supabase.from('system_logs').select('*')
+      supabaseAdmin.from('orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
+      supabaseAdmin.from('orders').select('*').gte('created_at', startOfTodayISO),
+      supabaseAdmin.from('branches').select('*'),
+      supabaseAdmin.from('organizations').select('*'),
+      supabaseAdmin.from('system_logs').select('*')
         .in('event_type', ['LOGIN', 'BRANCH_CHANGE'])
         .gte('created_at', startOfTodayISO)
         .order('created_at', { ascending: true }),
-      supabase.from('daily_reports').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
-      supabase.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
+      supabaseAdmin.from('daily_reports').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
+      supabaseAdmin.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
     ]);
 
-    // 1. Staff Mapping
+    // 3. Staff Mapping [cite: 10, 11, 12]
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
       const bName = log.branch_name?.toString().trim().toUpperCase();
@@ -53,9 +54,7 @@ export async function GET(request: Request) {
       
       if (bName && staffName) {
         if (!activeStaffMap[bName]) activeStaffMap[bName] = [];
-        const alreadyExists = activeStaffMap[bName].some(s => s.startsWith(staffName));
-        
-        if (!alreadyExists) {
+        if (!activeStaffMap[bName].some(s => s.startsWith(staffName))) {
           const loginTime = new Date(log.created_at).toLocaleTimeString('en-PH', {
             hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Manila'
           });
@@ -64,6 +63,7 @@ export async function GET(request: Request) {
       }
     });
 
+    // 4. Organize Stats [cite: 13, 14, 15, 16]
     const branchStats: Record<string, any> = {};
     branches?.forEach((b) => {
       branchStats[b.id] = {
@@ -94,7 +94,7 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 2. Build & Send Message
+    // 5. Build & Send Message [cite: 17, 18, 19, 20, 21]
     await Promise.all(
       Object.values(orgGroups).map(async (group: any) => {
         let header = '';
@@ -123,6 +123,7 @@ export async function GET(request: Request) {
           message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
 
           if (type !== 'REPORT_CHECKER') {
+            // ALWAYS SHOW staff and sales progress for LOGIN, UPDATE, and EOD 
             message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n`;
             message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
             message += `• Branded: ₱${stats.branded.toLocaleString()}\n`;
@@ -131,7 +132,8 @@ export async function GET(request: Request) {
               message += `• Progress: ${((stats.generic / b.daily_generic_quota) * 100).toFixed(1)}%\n`;
             }
           } else {
-             message += `• Reports: ${stats.pendingDRs} | Orders: ${stats.pendingOrders}\n`;
+             // Morning Checker: Reports, Orders, and Restore POs [cite: 24, 25]
+             message += `• Reports: ${stats.pendingDRs} | Orders: ${stats.pendingOrders} | POs: ${stats.pendingPOs}\n`;
           }
           message += `━━━━━━━━━━━━━━━━━━\n`;
         });
@@ -144,13 +146,9 @@ export async function GET(request: Request) {
       })
     );
 
-    return NextResponse.json({ 
-      success: true, 
-      pht_midnight_queried: startOfTodayISO,
-      logs_found: todayLogs?.length 
-    });
+    return NextResponse.json({ success: true, logs_found: todayLogs?.length });
 
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
-} 
+}
