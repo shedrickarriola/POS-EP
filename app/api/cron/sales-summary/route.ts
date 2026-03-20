@@ -10,7 +10,6 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  // 1. Initialize Admin Client to ensure RLS doesn't block log data 
   const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -19,12 +18,10 @@ export async function GET(request: Request) {
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
     
-    // 2. Strict PHT Midnight Calculation [cite: 5, 6, 7]
     const phtNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Manila" }));
     const midnightPHT = new Date(phtNow.getFullYear(), phtNow.getMonth(), phtNow.getDate(), 0, 0, 0);
     const startOfTodayISO = midnightPHT.toISOString();
 
-    // 3. Fetch Data [cite: 8, 9]
     const [
       { data: allUncheckedOrders },
       { data: todaySales },
@@ -46,12 +43,10 @@ export async function GET(request: Request) {
       supabaseAdmin.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
     ]);
 
-    // 4. Staff Mapping [cite: 10, 11, 12]
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
       const bName = log.branch_name?.toString().trim().toUpperCase();
       const staffName = log.user_name?.toString().trim().toUpperCase();
-      
       if (bName && staffName) {
         if (!activeStaffMap[bName]) activeStaffMap[bName] = [];
         if (!activeStaffMap[bName].some(s => s.startsWith(staffName))) {
@@ -63,7 +58,6 @@ export async function GET(request: Request) {
       }
     });
 
-    // 5. Organize Stats [cite: 13, 14]
     const branchStats: Record<string, any> = {};
     branches?.forEach((b) => {
       branchStats[b.id] = {
@@ -94,66 +88,67 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 6. Build & Send Message [cite: 17, 18]
-    await Promise.all(
-      Object.values(orgGroups).map(async (group: any) => {
-        let header = '';
-        switch (type) {
-          case 'REPORT_CHECKER': header = '🚨 ALL-TIME REPORT CHECKER (6AM)'; break;
-          case 'LOGIN':          header = '👥 STAFF LOGIN STATUS (12NN)'; break;
-          case 'UPDATE':         header = '📊 SALES UPDATE (5PM)'; break;
-          default:               header = '🏁 FINAL EOD REPORT (11PM)';
+    for (const group of Object.values(orgGroups) as any[]) {
+      let header = '';
+      switch (type) {
+        case 'REPORT_CHECKER': header = '🚨 ALL-TIME REPORT CHECKER (6AM)'; break;
+        case 'LOGIN':          header = '👥 STAFF LOGIN STATUS (12NN)'; break;
+        case 'UPDATE':         header = '📊 SALES UPDATE (5PM)'; break;
+        default:               header = '🏁 FINAL EOD REPORT (11PM)';
+      }
+
+      let message = `<b>${header}</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n`;
+      message += `━━━━━━━━━━━━━━━━━━\n`;
+
+      group.branches.forEach((b: any) => {
+        const stats = branchStats[b.id];
+        const bNameFull = b.branch_name?.toString().trim().toUpperCase();
+        const staffList = activeStaffMap[bNameFull] || [];
+
+        const hasSales = stats.total > 0;
+        const quotaReached = b.daily_generic_quota > 0 && stats.generic >= b.daily_generic_quota;
+        
+        // Logical check for pending tasks
+        const hasPendingTasks = stats.pendingDRs > 0 || stats.uncheckedOrders > 0 || stats.pendingPOs > 0;
+
+        // Icon Logic
+        let statusIcon = '';
+        if (type === 'REPORT_CHECKER') {
+          statusIcon = hasPendingTasks ? '🚨' : '✅';
+        } else {
+          statusIcon = (!hasSales && staffList.length === 0 ? '💤' : (!hasSales ? '🛠️' : (quotaReached ? '✅' : '🚨')));
         }
 
-        let message = `<b>${header}</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n`;
-        message += `━━━━━━━━━━━━━━━━━━\n`;
+        message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
 
-        group.branches.forEach((b: any) => {
-          const stats = branchStats[b.id];
-          const bNameFull = b.branch_name?.toString().trim().toUpperCase();
-          const staffList = activeStaffMap[bNameFull] || [];
-
-          const hasSales = stats.total > 0;
-          const quotaReached = b.daily_generic_quota > 0 && stats.generic >= b.daily_generic_quota;
-
-          let statusIcon = (type === 'REPORT_CHECKER') ? '🔍' : 
-                          (!hasSales && staffList.length === 0 ? '💤' : 
-                          (!hasSales ? '🛠️' : (quotaReached ? '✅' : '🚨')));
-
-          message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
-
-          if (type === 'REPORT_CHECKER') {
-            // Updated Format: Showing actual counts instead of just "PENDING"
-            if (stats.pendingDRs > 0) message += `• 📝 Daily Report: <b>${stats.pendingDRs}</b>\n`;
-            if (stats.uncheckedOrders > 0) message += `• 🛒 Unchecked Orders: <b>${stats.uncheckedOrders}</b>\n`;
-            if (stats.pendingPOs > 0) message += `• 📦 PO Verification: <b>${stats.pendingPOs}</b>\n`;
-            
-            if (stats.pendingDRs === 0 && stats.uncheckedOrders === 0 && stats.pendingPOs === 0) {
-              message += `• <i>No pending tasks for today</i>\n`;
-            }
-          } else {
-            // Sales/Login Format for 12NN, 5PM, and 11PM 
-            message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n`;
-            message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
-            message += `• Branded: ₱${stats.branded.toLocaleString()}\n`;
-            message += `• Total: ₱${stats.total.toLocaleString()}\n`;
-            if (b.daily_generic_quota > 0) {
-              message += `• Progress: ${((stats.generic / b.daily_generic_quota) * 100).toFixed(1)}%\n`;
-            }
+        if (type === 'REPORT_CHECKER') {
+          if (stats.pendingDRs > 0) message += `• 📝 Daily Report: <b>${stats.pendingDRs}</b>\n`;
+          if (stats.uncheckedOrders > 0) message += `• 🛒 Unchecked Orders: <b>${stats.uncheckedOrders}</b>\n`;
+          if (stats.pendingPOs > 0) message += `• 📦 PO Verification: <b>${stats.pendingPOs}</b>\n`;
+          
+          if (!hasPendingTasks) {
+            message += `• <i>No pending tasks for today</i>\n`;
           }
-          message += `━━━━━━━━━━━━━━━━━━\n`;
-        });
+        } else {
+          message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n`;
+          message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
+          message += `• Branded: ₱${stats.branded.toLocaleString()}\n`;
+          message += `• Total: ₱${stats.total.toLocaleString()}\n`;
+          if (b.daily_generic_quota > 0) {
+            message += `• Progress: ${((stats.generic / b.daily_generic_quota) * 100).toFixed(1)}%\n`;
+          }
+        }
+        message += `━━━━━━━━━━━━━━━━━━\n`;
+      });
 
-        return fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: group.chatId, text: message, parse_mode: 'HTML' }),
-        });
-      })
-    );
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: group.chatId, text: message, parse_mode: 'HTML' }),
+      });
+    }
 
     return NextResponse.json({ success: true, logs_found: todayLogs?.length });
-
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
