@@ -147,7 +147,7 @@ export async function GET(request: Request) {
             statusIcon = hasBacklog ? '❌' : '✅';
           } else {
             if (!hasSales && staff.length === 0) {
-              statusIcon = '💤'; // No sales, No staff = Not open
+              statusIcon = '💤'; // No sales, No staff = Not opens
             } else if (!hasSales && staff.length > 0) {
               statusIcon = '🛠️'; // Staff present but 0 sales = Maintenance/Preparing
             } else if (hasSales && b.daily_generic_quota > 0 && !quotaReached) {
