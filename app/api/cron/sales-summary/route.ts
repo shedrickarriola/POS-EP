@@ -13,15 +13,9 @@ export async function GET(request: Request) {
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
     
-    // --- STRICT MIDNIGHT PHT CALCULATION ---
-    // 1. Get the current date/time in PHT
+    // 1. Strict PHT Midnight Calculation
     const phtNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Manila" }));
-    
-    // 2. Create a date object for 12:00:00 AM TODAY in PHT
     const midnightPHT = new Date(phtNow.getFullYear(), phtNow.getMonth(), phtNow.getDate(), 0, 0, 0);
-    
-    // 3. Convert that PHT midnight to a UTC ISO string so Supabase understands it
-    // This correctly subtracts 8 hours from the PHT midnight to get the UTC equivalent
     const startOfTodayISO = midnightPHT.toISOString();
 
     const [
@@ -45,7 +39,7 @@ export async function GET(request: Request) {
       supabase.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
     ]);
 
-    // 1. Staff Mapping
+    // 2. Staff Mapping (Login Tracking)
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
       const bName = log.branch_name?.toString().trim().toUpperCase();
@@ -94,7 +88,7 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 2. Build & Send Message
+    // 3. Build & Send Message
     await Promise.all(
       Object.values(orgGroups).map(async (group: any) => {
         let header = '';
@@ -116,22 +110,26 @@ export async function GET(request: Request) {
           const hasSales = stats.total > 0;
           const quotaReached = b.daily_generic_quota > 0 && stats.generic >= b.daily_generic_quota;
 
+          // Status Icon Logic
           let statusIcon = (type === 'REPORT_CHECKER') ? '🔍' : 
                           (!hasSales && staffList.length === 0 ? '💤' : 
                           (!hasSales ? '🛠️' : (quotaReached ? '✅' : '🚨')));
 
           message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
 
-          if (type !== 'REPORT_CHECKER') {
+          if (type === 'REPORT_CHECKER') {
+             message += `• Reports: ${stats.pendingDRs} | Orders: ${stats.pendingOrders}\n`;
+          } else {
+            // ALWAYS show staff and percentage for LOGIN, UPDATE, and EOD
             message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n`;
             message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
             message += `• Branded: ₱${stats.branded.toLocaleString()}\n`;
             message += `• Total: ₱${stats.total.toLocaleString()}\n`;
+            
             if (b.daily_generic_quota > 0) {
-              message += `• Progress: ${((stats.generic / b.daily_generic_quota) * 100).toFixed(1)}%\n`;
+              const progress = (stats.generic / b.daily_generic_quota) * 100;
+              message += `• Progress: ${progress.toFixed(1)}% ${progress >= 100 ? '⭐' : ''}\n`;
             }
-          } else {
-             message += `• Reports: ${stats.pendingDRs} | Orders: ${stats.pendingOrders}\n`;
           }
           message += `━━━━━━━━━━━━━━━━━━\n`;
         });
@@ -144,12 +142,7 @@ export async function GET(request: Request) {
       })
     );
 
-    return NextResponse.json({ 
-      success: true, 
-      pht_midnight_queried: startOfTodayISO,
-      logs_found: todayLogs?.length 
-    });
-
+    return NextResponse.json({ success: true, logs_found: todayLogs?.length });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
