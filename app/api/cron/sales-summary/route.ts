@@ -1,23 +1,32 @@
+import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
-import { supabase } from '../../../../lib/supabase';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const type = (searchParams.get('type') || 'EOD').toUpperCase();
   const key = searchParams.get('key');
 
+  // 1. Security Check
   if (key !== process.env.CRON_SECRET) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
+  // 2. Initialize Admin Client to Bypass RLS
+  // Ensure these exist in your Vercel/Environment variables
+  const supabaseAdmin = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
     
-    // 1. Strict PHT Midnight Calculation
+    // 3. Strict PHT Midnight Calculation
     const phtNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Manila" }));
     const midnightPHT = new Date(phtNow.getFullYear(), phtNow.getMonth(), phtNow.getDate(), 0, 0, 0);
     const startOfTodayISO = midnightPHT.toISOString();
 
+    // 4. Fetch Data with Admin Privileges
     const [
       { data: allUncheckedOrders },
       { data: todaySales },
@@ -25,26 +34,26 @@ export async function GET(request: Request) {
       { data: orgs },
       { data: todayLogs },
     ] = await Promise.all([
-      supabase.from('orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
-      supabase.from('orders').select('*').gte('created_at', startOfTodayISO),
-      supabase.from('branches').select('*'),
-      supabase.from('organizations').select('*'),
-      supabase.from('system_logs').select('*')
+      supabaseAdmin.from('orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
+      supabaseAdmin.from('orders').select('*').gte('created_at', startOfTodayISO),
+      supabaseAdmin.from('branches').select('*'),
+      supabaseAdmin.from('organizations').select('*'),
+      supabaseAdmin.from('system_logs').select('*')
         .in('event_type', ['LOGIN', 'BRANCH_CHANGE'])
         .gte('created_at', startOfTodayISO)
         .order('created_at', { ascending: true }),
     ]);
 
-    // 2. Build Staff Map with "Clean" Keys
+    // 5. Build Staff Map (The "Matchmaker")
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
-      // CLEANING: Remove all spaces and make uppercase (e.g., "Pansol " -> "PANSOL")
       const rawBName = log.branch_name?.toString() || "";
       const cleanBName = rawBName.replace(/\s+/g, '').toUpperCase();
-      const staffName = log.user_name?.toString().trim().toUpperCase() || "UNKNOWN";
+      const staffName = (log.user_name || "UNKNOWN").toString().trim().toUpperCase();
       
-      if (cleanBName) {
+      if (cleanBName && staffName) {
         if (!activeStaffMap[cleanBName]) activeStaffMap[cleanBName] = [];
+        
         const alreadyExists = activeStaffMap[cleanBName].some(s => s.startsWith(staffName));
         
         if (!alreadyExists) {
@@ -56,6 +65,7 @@ export async function GET(request: Request) {
       }
     });
 
+    // 6. Process Branch Stats
     const branchStats: Record<string, any> = {};
     branches?.forEach((b) => {
       branchStats[b.id] = {
@@ -84,17 +94,22 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 3. Match and Build Message
+    // 7. Build & Send Telegram Messages
     for (const group of Object.values(orgGroups) as any[]) {
-      let header = (type === 'REPORT_CHECKER') ? '🚨 REPORT CHECKER' : '📊 SALES SUMMARY';
+      let header = '';
+      switch (type) {
+        case 'REPORT_CHECKER': header = '🚨 REPORT CHECKER'; break;
+        case 'LOGIN':          header = '👥 STAFF LOGIN STATUS'; break;
+        case 'UPDATE':         header = '📊 SALES UPDATE'; break;
+        default:               header = '🏁 FINAL EOD REPORT';
+      }
+
       let message = `<b>${header}</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n`;
       message += `━━━━━━━━━━━━━━━━━━\n`;
 
       group.branches.forEach((b: any) => {
         const stats = branchStats[b.id];
-        
-        // CLEANING the Branch Table Name for matching
-        const cleanBranchTableName = b.branch_name?.toString().replace(/\s+/g, '').toUpperCase();
+        const cleanBranchTableName = (b.branch_name || "").toString().replace(/\s+/g, '').toUpperCase();
         const staffList = activeStaffMap[cleanBranchTableName] || [];
 
         const hasSales = stats.total > 0;
@@ -118,7 +133,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ 
       success: true, 
       found_logs: todayLogs?.length,
-      staff_map_keys: Object.keys(activeStaffMap)
+      staff_keys: Object.keys(activeStaffMap)
     });
 
   } catch (err: any) {
