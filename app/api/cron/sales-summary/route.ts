@@ -10,7 +10,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  // Use Admin Client to ensure RLS doesn't block logs for any report type
+  // Use Admin Client to ensure RLS never blocks logs [cite: 1, 9]
   const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -63,7 +63,7 @@ export async function GET(request: Request) {
       }
     });
 
-    // 4. Organize Stats [cite: 13, 14, 15, 16]
+    // 4. Organize Stats [cite: 13, 14]
     const branchStats: Record<string, any> = {};
     branches?.forEach((b) => {
       branchStats[b.id] = {
@@ -94,7 +94,7 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 5. Build & Send Message [cite: 17, 18, 19, 20, 21]
+    // 5. Build & Send Message [cite: 17, 18]
     await Promise.all(
       Object.values(orgGroups).map(async (group: any) => {
         let header = '';
@@ -122,8 +122,11 @@ export async function GET(request: Request) {
 
           message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
 
-          if (type !== 'REPORT_CHECKER') {
-            // ALWAYS SHOW staff and sales progress for LOGIN, UPDATE, and EOD 
+          if (type === 'REPORT_CHECKER') {
+             // 6AM Morning Checker: Restore Reports, Orders, and POs [cite: 24, 25]
+             message += `• Reports: ${stats.pendingDRs} | Orders: ${stats.pendingOrders} | POs: ${stats.pendingPOs}\n`;
+          } else {
+            // LOGIN, UPDATE, and EOD: Always show staff and sales progress 
             message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n`;
             message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
             message += `• Branded: ₱${stats.branded.toLocaleString()}\n`;
@@ -131,9 +134,6 @@ export async function GET(request: Request) {
             if (b.daily_generic_quota > 0) {
               message += `• Progress: ${((stats.generic / b.daily_generic_quota) * 100).toFixed(1)}%\n`;
             }
-          } else {
-             // Morning Checker: Reports, Orders, and Restore POs [cite: 24, 25]
-             message += `• Reports: ${stats.pendingDRs} | Orders: ${stats.pendingOrders} | POs: ${stats.pendingPOs}\n`;
           }
           message += `━━━━━━━━━━━━━━━━━━\n`;
         });
