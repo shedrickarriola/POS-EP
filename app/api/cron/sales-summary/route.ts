@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js'; // Recommended for Admin/Cron access
+import { createClient } from '@supabase/supabase-js'; 
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -10,7 +10,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  // Using Service Role Client to ensure the cron can see all inventory data
+  // Use Service Role to ensure the Cron can bypass RLS for inventory checks
   const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -22,7 +22,7 @@ export async function GET(request: Request) {
     const midnightPHT = new Date(phtNow.getFullYear(), phtNow.getMonth(), phtNow.getDate(), 0, 0, 0);
     const startOfTodayISO = midnightPHT.toISOString();
 
-    // 1. DATA FETCHING (Now includes the 'inventory' table from your image)
+    // 1. DATA FETCHING (Now including the 'inventory' table)
     const [
       { data: allUncheckedOrders },
       { data: todaySales },
@@ -31,7 +31,7 @@ export async function GET(request: Request) {
       { data: todayLogs },
       { data: allPendingReports },
       { data: allPendingPOs },
-      { data: inventory } // <--- ADDED: Fetches the table shown in your PNG
+      { data: inventoryData } // <--- FETCH ADDED HERE
     ] = await Promise.all([
       supabaseAdmin.from('orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
       supabaseAdmin.from('orders').select('*').gte('created_at', startOfTodayISO),
@@ -43,10 +43,10 @@ export async function GET(request: Request) {
         .order('created_at', { ascending: true }),
       supabaseAdmin.from('daily_reports').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
       supabaseAdmin.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
-      supabaseAdmin.from('inventory').select('*').order('sold_weekly', { ascending: false }) // <--- ADDED
+      supabaseAdmin.from('inventory').select('*').order('sold_weekly', { ascending: false }) // <--- QUERY ADDED HERE
     ]);
 
-    // 2. STAFF MAPPING (Retained from your source)
+    // 2. STAFF MAPPING (Retained from source)
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
       const bName = log.branch_name?.toString().trim().toUpperCase();
@@ -54,15 +54,13 @@ export async function GET(request: Request) {
       if (bName && staffName) {
         if (!activeStaffMap[bName]) activeStaffMap[bName] = [];
         if (!activeStaffMap[bName].some(s => s.startsWith(staffName))) {
-          const loginTime = new Date(log.created_at).toLocaleTimeString('en-PH', {
-            hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Manila'
-          });
+          const loginTime = new Date(log.created_at).toLocaleTimeString('en-PH', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Manila' });
           activeStaffMap[bName].push(`${staffName} (${loginTime})`);
         }
       }
     });
 
-    // 3. BRANCH STATS (Retained all totals: Generic, Branded, Total)
+    // 3. BRANCH STATS (Retained all original totals)
     const branchStats: Record<string, any> = {};
     branches?.forEach((b) => {
       branchStats[b.id] = {
@@ -91,18 +89,16 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 4. MESSAGE BUILDING
+    // 4. MESSAGE LOOP
     for (const group of Object.values(orgGroups) as any[]) {
       let message = "";
 
       if (type === 'STOCK_ADVISORY') {
-        // --- NEW DEDICATED STOCK REPORT ---
         message = `<b>📦 WEEKLY STOCK RECOMMENDATIONS</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
         group.branches.forEach((b: any) => {
-          // Identify items where stock is <= weekly sales velocity or critically low (< 5)
-          const toOrder = inventory?.filter((p: any) => 
-            p.branch_id === b.id && 
-            (Number(p.stock) <= Number(p.sold_weekly || 0) || Number(p.stock) < 5)
+          // Identify items where stock is <= weekly sales or critically low (< 5)
+          const toOrder = inventoryData?.filter((p: any) => 
+            p.branch_id === b.id && (Number(p.stock) <= Number(p.sold_weekly || 0) || Number(p.stock) < 5)
           ).slice(0, 10);
 
           message += `<b>📍 ${b.branch_name.toUpperCase()}</b>\n`;
@@ -117,7 +113,7 @@ export async function GET(request: Request) {
           message += `━━━━━━━━━━━━━━━━━━\n`;
         });
       } else {
-        // --- RETAINED ORIGINAL REPORTS (Checker, Login, Update, EOD) ---
+        // --- RETAIN ALL ORIGINAL REPORTS (Checker, Login, Update, EOD) ---
         let header = '';
         switch (type) {
           case 'REPORT_CHECKER': header = '🚨 ALL-TIME REPORT CHECKER (6AM)'; break;
@@ -125,7 +121,6 @@ export async function GET(request: Request) {
           case 'UPDATE':         header = '📊 SALES UPDATE (5PM)'; break;
           default:               header = '🏁 FINAL EOD REPORT (11PM)';
         }
-
         message = `<b>${header}</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
 
         group.branches.forEach((b: any) => {
@@ -133,7 +128,7 @@ export async function GET(request: Request) {
           const bNameFull = b.branch_name?.toString().trim().toUpperCase();
           const staffList = activeStaffMap[bNameFull] || [];
           const hasPending = stats.pendingDRs > 0 || stats.pendingOrders > 0 || stats.pendingPOs > 0;
-
+          
           let statusIcon = (type === 'REPORT_CHECKER') ? (hasPending ? '🚨' : '✅') : 
                           (stats.total === 0 && staffList.length === 0 ? '💤' : 
                           (stats.total === 0 ? '🛠️' : (b.daily_generic_quota > 0 && stats.generic >= b.daily_generic_quota ? '✅' : '🚨')));
@@ -142,7 +137,6 @@ export async function GET(request: Request) {
           if (type === 'REPORT_CHECKER') {
             message += `• Reports: ${stats.pendingDRs} | Orders: ${stats.pendingOrders}\n`;
             if (stats.pendingPOs > 0) message += `• PO Verification: ${stats.pendingPOs}\n`;
-            if (!hasPending) message += `• <i>No pending tasks</i>\n`;
           } else {
             message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n`;
             message += `• Generic: ₱${stats.generic.toLocaleString()}\n• Branded: ₱${stats.branded.toLocaleString()}\n• Total: ₱${stats.total.toLocaleString()}\n`;
