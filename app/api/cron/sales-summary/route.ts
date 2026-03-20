@@ -1,5 +1,5 @@
+import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
-import { supabase } from '../../../../lib/supabase';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -10,14 +10,21 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
+  // 1. Initialize Admin Client (Ensures RLS doesn't hide your logs)
+  const supabaseAdmin = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
     
-    // 1. Strict PHT Midnight Calculation
+    // 2. Strict PHT Midnight Calculation
     const phtNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Manila" }));
     const midnightPHT = new Date(phtNow.getFullYear(), phtNow.getMonth(), phtNow.getDate(), 0, 0, 0);
     const startOfTodayISO = midnightPHT.toISOString();
 
+    // 3. Fetch all data using Admin privileges
     const [
       { data: allUncheckedOrders },
       { data: todaySales },
@@ -27,23 +34,23 @@ export async function GET(request: Request) {
       { data: allPendingReports },
       { data: allPendingPOs },
     ] = await Promise.all([
-      supabase.from('orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
-      supabase.from('orders').select('*').gte('created_at', startOfTodayISO),
-      supabase.from('branches').select('*'),
-      supabase.from('organizations').select('*'),
-      supabase.from('system_logs').select('*')
+      supabaseAdmin.from('orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
+      supabaseAdmin.from('orders').select('*').gte('created_at', startOfTodayISO),
+      supabaseAdmin.from('branches').select('*'),
+      supabaseAdmin.from('organizations').select('*'),
+      supabaseAdmin.from('system_logs').select('*')
         .in('event_type', ['LOGIN', 'BRANCH_CHANGE'])
         .gte('created_at', startOfTodayISO)
         .order('created_at', { ascending: true }),
-      supabase.from('daily_reports').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
-      supabase.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
+      supabaseAdmin.from('daily_reports').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
+      supabaseAdmin.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
     ]);
 
-    // 2. Staff Mapping (Login Tracking)
+    // 4. Staff Mapping (Login Tracking)
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
-      const bName = log.branch_name?.toString().trim().toUpperCase();
-      const staffName = log.user_name?.toString().trim().toUpperCase();
+      const bName = (log.branch_name || "").toString().trim().toUpperCase();
+      const staffName = (log.user_name || "").toString().trim().toUpperCase();
       
       if (bName && staffName) {
         if (!activeStaffMap[bName]) activeStaffMap[bName] = [];
@@ -88,61 +95,62 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 3. Build & Send Message
-    await Promise.all(
-      Object.values(orgGroups).map(async (group: any) => {
-        let header = '';
-        switch (type) {
-          case 'REPORT_CHECKER': header = '🚨 ALL-TIME REPORT CHECKER (6AM)'; break;
-          case 'LOGIN':          header = '👥 STAFF LOGIN STATUS (12NN)'; break;
-          case 'UPDATE':         header = '📊 SALES UPDATE (5PM)'; break;
-          default:               header = '🏁 FINAL EOD REPORT (11PM)';
-        }
+    // 5. Build & Send Message
+    for (const group of Object.values(orgGroups) as any[]) {
+      let header = '';
+      switch (type) {
+        case 'REPORT_CHECKER': header = '🚨 ALL-TIME REPORT CHECKER (6AM)'; break;
+        case 'LOGIN':          header = '👥 STAFF LOGIN STATUS (12NN)'; break;
+        case 'UPDATE':         header = '📊 SALES UPDATE (5PM)'; break;
+        default:               header = '🏁 FINAL EOD REPORT (11PM)';
+      }
 
-        let message = `<b>${header}</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n`;
-        message += `━━━━━━━━━━━━━━━━━━\n`;
+      let message = `<b>${header}</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n`;
+      message += `━━━━━━━━━━━━━━━━━━\n`;
 
-        group.branches.forEach((b: any) => {
-          const stats = branchStats[b.id];
-          const bNameFull = b.branch_name?.toString().trim().toUpperCase();
-          const staffList = activeStaffMap[bNameFull] || [];
+      group.branches.forEach((b: any) => {
+        const stats = branchStats[b.id];
+        const bNameFull = (b.branch_name || "").toString().trim().toUpperCase();
+        const staffList = activeStaffMap[bNameFull] || [];
 
-          const hasSales = stats.total > 0;
-          const quotaReached = b.daily_generic_quota > 0 && stats.generic >= b.daily_generic_quota;
+        const hasSales = stats.total > 0;
+        const quotaReached = b.daily_generic_quota > 0 && stats.generic >= b.daily_generic_quota;
 
-          // Status Icon Logic
-          let statusIcon = (type === 'REPORT_CHECKER') ? '🔍' : 
-                          (!hasSales && staffList.length === 0 ? '💤' : 
-                          (!hasSales ? '🛠️' : (quotaReached ? '✅' : '🚨')));
+        let statusIcon = (type === 'REPORT_CHECKER') ? '🔍' : 
+                        (!hasSales && staffList.length === 0 ? '💤' : 
+                        (!hasSales ? '🛠️' : (quotaReached ? '✅' : '🚨')));
 
-          message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
+        message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
 
-          if (type === 'REPORT_CHECKER') {
-             message += `• Reports: ${stats.pendingDRs} | Orders: ${stats.pendingOrders}\n`;
-          } else {
-            // ALWAYS show staff and percentage for LOGIN, UPDATE, and EOD
-            message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n`;
-            message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
-            message += `• Branded: ₱${stats.branded.toLocaleString()}\n`;
-            message += `• Total: ₱${stats.total.toLocaleString()}\n`;
-            
-            if (b.daily_generic_quota > 0) {
-              const progress = (stats.generic / b.daily_generic_quota) * 100;
-              message += `• Progress: ${progress.toFixed(1)}% ${progress >= 100 ? '⭐' : ''}\n`;
-            }
+        if (type === 'REPORT_CHECKER') {
+          message += `• Reports: ${stats.pendingDRs} | Orders: ${stats.pendingOrders}\n`;
+        } else {
+          // ALWAYS SHOW log-ins and percentage for 12nn, 5pm, and 11pm
+          message += `👤 ${staffList.length > 0 ? staffList.join(', ') : 'OFFLINE'}\n`;
+          message += `• Generic: ₱${stats.generic.toLocaleString()}\n`;
+          message += `• Branded: ₱${stats.branded.toLocaleString()}\n`;
+          message += `• Total: ₱${stats.total.toLocaleString()}\n`;
+          
+          if (b.daily_generic_quota > 0) {
+            const progress = (stats.generic / b.daily_generic_quota) * 100;
+            message += `• Progress: ${progress.toFixed(1)}% ${progress >= 100 ? '⭐' : ''}\n`;
           }
-          message += `━━━━━━━━━━━━━━━━━━\n`;
-        });
+        }
+        message += `━━━━━━━━━━━━━━━━━━\n`;
+      });
 
-        return fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: group.chatId, text: message, parse_mode: 'HTML' }),
-        });
-      })
-    );
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: group.chatId, text: message, parse_mode: 'HTML' }),
+      });
+    }
 
-    return NextResponse.json({ success: true, logs_found: todayLogs?.length });
+    return NextResponse.json({ 
+      success: true, 
+      logs_found: todayLogs?.length 
+    });
+
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
