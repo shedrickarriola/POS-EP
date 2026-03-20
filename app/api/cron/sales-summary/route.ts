@@ -13,10 +13,10 @@ export async function GET(request: Request) {
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
     
-    // 1. PHT Date Logic (Calculates 12:00 AM PHT Today)
-    const phtNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Manila" }));
-    const midnightPHT = new Date(phtNow.getFullYear(), phtNow.getMonth(), phtNow.getDate(), 0, 0, 0);
-    const startOfTodayISO = midnightPHT.toISOString();
+    // --- THE FIX: USE A ROLLING 24-HOUR WINDOW ---
+    // Instead of calculating "Midnight", we just look at the last 24 hours.
+    // This ignores all timezone/midnight confusion.
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
     const [
       { data: todaySales },
@@ -24,16 +24,16 @@ export async function GET(request: Request) {
       { data: orgs },
       { data: todayLogs }
     ] = await Promise.all([
-      supabase.from('orders').select('*').gte('created_at', startOfTodayISO),
+      supabase.from('orders').select('*').gte('created_at', twentyFourHoursAgo),
       supabase.from('branches').select('*'),
       supabase.from('organizations').select('*'),
       supabase.from('system_logs').select('*')
         .in('event_type', ['LOGIN', 'BRANCH_CHANGE'])
-        .gte('created_at', startOfTodayISO)
+        .gte('created_at', twentyFourHoursAgo)
         .order('created_at', { ascending: true }),
     ]);
 
-    // 2. Map Staff (Normalize keys to "PANSOL")
+    // 1. Map Staff (Normalize keys to "PANSOL")
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
       const bKey = log.branch_name?.toString().trim().toUpperCase();
@@ -42,6 +42,7 @@ export async function GET(request: Request) {
       if (bKey && sName) {
         if (!activeStaffMap[bKey]) activeStaffMap[bKey] = [];
         if (!activeStaffMap[bKey].some(name => name.startsWith(sName))) {
+          // Format time for PHT display
           const time = new Date(log.created_at).toLocaleTimeString('en-PH', {
             hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Manila'
           });
@@ -61,16 +62,15 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 3. Build Message
+    // 2. Build Message
     for (const group of Object.values(orgGroups) as any[]) {
-      let message = `<b>📊 STAFF STATUS REPORT</b>\n`;
-      message += `<i>Found ${todayLogs?.length || 0} logs since midnight.</i>\n`; // DEBUG LINE
+      let header = (type === 'REPORT_CHECKER') ? '🚨 REPORT CHECKER' : '📊 SALES SUMMARY';
+      let message = `<b>${header}</b>\n`;
+      message += `🏢 <b>${group.name.toUpperCase()}</b>\n`;
       message += `━━━━━━━━━━━━━━━━━━\n`;
 
       group.branches.forEach((b: any) => {
         const bName = b.branch_name.toString().trim().toUpperCase();
-        
-        // Match logic: Look for "Pansol" in the staff map
         const staffEntries = activeStaffMap[bName] || [];
 
         message += `<b>📍 ${bName}</b>\n`;
@@ -85,7 +85,7 @@ export async function GET(request: Request) {
       });
     }
 
-    return NextResponse.json({ success: true, logs: todayLogs?.length });
+    return NextResponse.json({ success: true, logs_found: todayLogs?.length });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
