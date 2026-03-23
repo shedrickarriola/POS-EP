@@ -1,5 +1,5 @@
+import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js'; 
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -10,7 +10,6 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  // Use Service Role to ensure the Cron can bypass RLS for inventory checks
   const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -22,7 +21,7 @@ export async function GET(request: Request) {
     const midnightPHT = new Date(phtNow.getFullYear(), phtNow.getMonth(), phtNow.getDate(), 0, 0, 0);
     const startOfTodayISO = midnightPHT.toISOString();
 
-    // 1. DATA FETCHING (Now including the 'inventory' table)
+    // 1. DATA FETCHING (Includes the inventory table from your schema)
     const [
       { data: allUncheckedOrders },
       { data: todaySales },
@@ -31,7 +30,7 @@ export async function GET(request: Request) {
       { data: todayLogs },
       { data: allPendingReports },
       { data: allPendingPOs },
-      { data: inventoryData } // <--- FETCH ADDED HERE
+      { data: inventory }
     ] = await Promise.all([
       supabaseAdmin.from('orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
       supabaseAdmin.from('orders').select('*').gte('created_at', startOfTodayISO),
@@ -43,10 +42,10 @@ export async function GET(request: Request) {
         .order('created_at', { ascending: true }),
       supabaseAdmin.from('daily_reports').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
       supabaseAdmin.from('purchase_orders').select('branch_id, is_checked').or('is_checked.eq.false,is_checked.is.null'),
-      supabaseAdmin.from('inventory').select('*').order('sold_weekly', { ascending: false }) // <--- QUERY ADDED HERE
+      supabaseAdmin.from('inventory').select('*').order('sold_weekly', { ascending: false }) // Prioritize top sellers
     ]);
 
-    // 2. STAFF MAPPING (Retained from source)
+    // 2. STAFF MAPPING (Retained from Telegram320.txt)
     const activeStaffMap: Record<string, string[]> = {};
     todayLogs?.forEach((log: any) => {
       const bName = log.branch_name?.toString().trim().toUpperCase();
@@ -60,7 +59,7 @@ export async function GET(request: Request) {
       }
     });
 
-    // 3. BRANCH STATS (Retained all original totals)
+    // 3. BRANCH STATS (Retained all original Generic/Branded/Total logic)
     const branchStats: Record<string, any> = {};
     branches?.forEach((b) => {
       branchStats[b.id] = {
@@ -94,18 +93,22 @@ export async function GET(request: Request) {
       let message = "";
 
       if (type === 'STOCK_ADVISORY') {
-        message = `<b>📦 WEEKLY STOCK RECOMMENDATIONS</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
+        message = `<b>📦 2-WEEK STOCK ADVISORY</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
         group.branches.forEach((b: any) => {
-          // Identify items where stock is <= weekly sales or critically low (< 5)
-          const toOrder = inventoryData?.filter((p: any) => 
-            p.branch_id === b.id && (Number(p.stock) <= Number(p.sold_weekly || 0) || Number(p.stock) < 5)
-          ).slice(0, 10);
+          // RECOMMENDATION LOGIC:
+          // 1. Filter by branch.
+          // 2. Item is critical if: Stock is <= (Weekly Sales * 2) OR Stock is < 5.
+          // 3. Take top 20 items by sales volume.
+          const toOrder = inventory?.filter((p: any) => 
+            p.branch_id === b.id && 
+            (Number(p.stock) <= (Number(p.sold_weekly || 0) * 2) || Number(p.stock) < 5)
+          ).slice(0, 20);
 
           message += `<b>📍 ${b.branch_name.toUpperCase()}</b>\n`;
           if (toOrder && toOrder.length > 0) {
             toOrder.forEach((p: any) => {
               const icon = Number(p.stock) <= 0 ? '🚨' : '⚠️';
-              message += `${icon} ${p.item_name}: ${p.stock} left (Sold ${p.sold_weekly}/wk)\n`;
+              message += `${icon} ${p.item_name}: ${p.stock} left (Avg. ${p.sold_weekly}/wk)\n`;
             });
           } else {
             message += `✅ <i>Stock levels healthy</i>\n`;
@@ -113,7 +116,7 @@ export async function GET(request: Request) {
           message += `━━━━━━━━━━━━━━━━━━\n`;
         });
       } else {
-        // --- RETAIN ALL ORIGINAL REPORTS (Checker, Login, Update, EOD) ---
+        // --- RETAIN ORIGINAL REPORTS (Checker, Login, Update, EOD) ---
         let header = '';
         switch (type) {
           case 'REPORT_CHECKER': header = '🚨 ALL-TIME REPORT CHECKER (6AM)'; break;
