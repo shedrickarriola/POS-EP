@@ -1318,6 +1318,7 @@ export default function SalesOrderList() {
             <ChevronRight size={16} />
           </button>
         </div>
+        
       </div>
     </div>
   );
