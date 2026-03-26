@@ -344,6 +344,9 @@ export default function NewOrderPOS() {
         .toISOString()
         .split('T');
 
+      const phtDateString = new Date().toLocaleDateString('en-CA', {
+        timeZone: 'Asia/Manila',
+      });
       // 1. Create the Sale Record
       const { data: order, error: orderErr } = await supabase
         .from('orders')
@@ -358,7 +361,7 @@ export default function NewOrderPOS() {
             created_by: session.user.email,
             status: 'completed',
             branch_id: currentBranchId,
-            created_date_pht: phtDate,
+            created_date_pht: phtDateString,
           },
         ])
         .select()
@@ -374,7 +377,7 @@ export default function NewOrderPOS() {
         unit_price: Number(i.price_piece),
         type: i.type,
         subtotal: i.qty * (i.price_piece * (1 - i.discount_percent / 100)),
-        created_date_pht: phtDate,
+        created_date_pht: phtDateString,
       }));
 
       const { error: itemsErr } = await supabase
@@ -931,7 +934,7 @@ export default function NewOrderPOS() {
                 className="w-full bg-slate-950 border border-white/10 rounded-lg py-2 px-3 text-white font-mono text-xl font-bold outline-none focus:border-emerald-500/50"
                 placeholder="0.00"
               />
-              {metrics.change > 0 && (
+              {metrics.change >= 0 && (
                 <p className="text-[10px] font-bold text-emerald-500 mt-1">
                   CHANGE: ₱{metrics.change.toLocaleString()}
                 </p>

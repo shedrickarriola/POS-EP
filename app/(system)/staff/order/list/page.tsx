@@ -335,7 +335,9 @@ export default function SalesOrderList() {
 
       // 3. ORDER BY THE DATE STRING
       const { data, error, count } = await query
-        .order('created_date_pht', { ascending: false })
+        .order('created_date_pht', { ascending: false }) // 1. Primary: Group by Day
+        .order('created_at', { ascending: false }) // 2. Secondary: Most recent time first
+        .order('order_number', { ascending: false })
         .range(from, to);
 
       if (!error) {
@@ -1318,7 +1320,6 @@ export default function SalesOrderList() {
             <ChevronRight size={16} />
           </button>
         </div>
-        
       </div>
     </div>
   );
