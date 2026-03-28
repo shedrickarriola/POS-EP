@@ -95,6 +95,12 @@ export default function NewOrderPOS() {
   const [activeSearchIndex, setActiveSearchIndex] = useState<number | null>(
     null
   );
+
+  const DISCOUNT_OPTIONS = [
+    { label: 'No Discount', value: 0 },
+    { label: '20% Off', value: 20 },
+    { label: '5+1 Promo', value: 16.666667 },
+  ];
   const [items, setItems] = useState<OrderLineItem[]>([
     {
       id: crypto.randomUUID(),
@@ -112,7 +118,29 @@ export default function NewOrderPOS() {
   ]);
 
   const isDrugstoreUser = user?.email === 'drugstore@gmail.com';
+  const handleQtyChange = (productId: string, newQty: number) => {
+    setItems(
+      items.map((item) => {
+        if (item.product_id === productId) {
+          let currentDiscount = item.discount_percent;
 
+          // Auto-revert to 0% if the new quantity breaks the multiple rules
+          if (currentDiscount === 20 && (newQty < 120 || newQty % 120 !== 0)) {
+            currentDiscount = 0;
+          }
+          if (
+            currentDiscount === 16.666667 &&
+            (newQty < 6 || newQty % 6 !== 0)
+          ) {
+            currentDiscount = 0;
+          }
+
+          return { ...item, qty: newQty, discount_percent: currentDiscount };
+        }
+        return item;
+      })
+    );
+  };
   // --- AI PROCESSING ---
   const processAiResults = (extracted: any) => {
     const dataToProcess = Array.isArray(extracted)
@@ -326,6 +354,8 @@ export default function NewOrderPOS() {
     setActiveSearchIndex(null);
   };
 
+  const [confirmedSONumber, setConfirmedSONumber] = useState<string>('');
+
   const handleSubmit = async () => {
     if (!metrics.isValid || loading) return;
     setLoading(true);
@@ -340,19 +370,23 @@ export default function NewOrderPOS() {
       if (!branchData) throw new Error('No active branch selected');
       const branch = JSON.parse(branchData);
 
-      const phtDate = new Date(new Date().getTime() + 8 * 60 * 60 * 1000)
-        .toISOString()
-        .split('T');
-
+      // Fixed: Generate clean Philippine Date string (YYYY-MM-DD)
       const phtDateString = new Date().toLocaleDateString('en-CA', {
         timeZone: 'Asia/Manila',
       });
+
       // 1. Create the Sale Record
+      // Fetch the unique atomic SO number from the sequence first
+      const { data: generatedSO, error: soErr } = await supabase.rpc(
+        'get_next_so_number'
+      );
+      if (soErr) throw soErr;
+
       const { data: order, error: orderErr } = await supabase
         .from('orders')
         .insert([
           {
-            order_number: nextSONumber,
+            order_number: generatedSO, // Database-generated (e.g., SO1001)
             client_name: clientName || 'WALK-IN',
             total_amount: metrics.total,
             generic_amt: metrics.generic_amt,
@@ -369,7 +403,10 @@ export default function NewOrderPOS() {
 
       if (orderErr) throw orderErr;
 
-      // 2. Create Sale Items
+      // Update state to show the confirmed number in your Success Modal
+      setConfirmedSONumber(order.order_number);
+
+      // 2. Create Sale Items (Retaining all your columns)
       const payload = items.map((i) => ({
         order_id: order.id,
         product_id: i.product_id,
@@ -386,41 +423,20 @@ export default function NewOrderPOS() {
 
       if (itemsErr) throw itemsErr;
 
-      // 3. DEDUCT STOCK & UPDATE SALES METRICS
-      for (const item of items) {
-        const soldQty = Number(item.qty) || 0;
+      // 3. DEDUCT STOCK & UPDATE SALES METRICS (Using the RPC we built)
+      const itemsPayloadForRPC = items.map((i) => ({
+        product_id: i.product_id,
+        qty: Number(i.qty),
+      }));
 
-        // We use rpc or manual increment logic here
-        // To ensure accuracy, we fetch the latest numbers or use the current state
-        const { data: currentInv } = await supabase
-          .from('inventory')
-          .select('stock, sold_weekly, sold_monthly, sold_yearly')
-          .eq('id', item.product_id)
-          .single();
+      const { error: rpcErr } = await supabase.rpc('process_inventory_sale', {
+        items_json: itemsPayloadForRPC,
+        target_branch_id: branch.id,
+      });
 
-        if (currentInv) {
-          const newStock = (Number(currentInv.stock) || 0) - soldQty;
-          const newWeekly = (Number(currentInv.sold_weekly) || 0) + soldQty;
-          const newMonthly = (Number(currentInv.sold_monthly) || 0) + soldQty;
-          const newYearly = (Number(currentInv.sold_yearly) || 0) + soldQty;
-
-          const { error: invErr } = await supabase
-            .from('inventory')
-            .update({
-              stock: newStock,
-              sold_weekly: newWeekly,
-              sold_monthly: newMonthly,
-              sold_yearly: newYearly,
-            })
-            .eq('id', item.product_id)
-            .eq('branch_id', branch.id);
-
-          if (invErr)
-            console.error(
-              `Metrics update failed for ${item.item_name}:`,
-              invErr.message
-            );
-        }
+      if (rpcErr) {
+        console.error('Inventory Update Failed:', rpcErr.message);
+        throw new Error(`Inventory Sync Error: ${rpcErr.message}`);
       }
 
       setShowSuccess(true);
@@ -504,7 +520,7 @@ export default function NewOrderPOS() {
 
       {/* SUCCESS MODAL */}
       {showSuccess && (
-        <div className="fixed inset-0 z-[2000] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z- flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
           <div className="bg-slate-900 border border-white/10 rounded-2xl w-full max-w-md p-8 shadow-2xl text-center">
             <div className="w-20 h-20 bg-emerald-500/20 rounded-full flex items-center justify-center mx-auto mb-6 border border-emerald-500/30">
               <CheckCircle2 size={40} className="text-emerald-500" />
@@ -513,8 +529,10 @@ export default function NewOrderPOS() {
               Order Recorded
             </h2>
             <p className="text-slate-400 mb-8 text-sm">
-              Reference{' '}
-              <span className="text-blue-500 font-bold">{nextSONumber}</span>{' '}
+              Reference {/* Swapped nextSONumber for confirmedSONumber */}
+              <span className="text-blue-500 font-bold">
+                {confirmedSONumber}
+              </span>{' '}
               saved successfully.
             </p>
             <div className="grid grid-cols-2 gap-3">
@@ -764,18 +782,42 @@ export default function NewOrderPOS() {
                         <input
                           type="number"
                           value={item.qty}
-                          onChange={(e) =>
+                          onChange={(e) => {
+                            const newQty = Math.max(1, Number(e.target.value));
                             setItems(
-                              items.map((i) =>
-                                i.id === item.id
-                                  ? {
-                                      ...i,
-                                      qty: Math.max(1, Number(e.target.value)),
-                                    }
-                                  : i
-                              )
-                            )
-                          }
+                              items.map((i) => {
+                                if (i.id === item.id) {
+                                  let updatedDiscount = i.discount_percent;
+
+                                  // Check if new quantity qualifies for a box discount
+                                  const isValidBox =
+                                    newQty % 30 === 0 ||
+                                    newQty % 50 === 0 ||
+                                    newQty % 100 === 0;
+
+                                  // Auto-reset 20% if not a valid box multiple
+                                  if (updatedDiscount === 20 && !isValidBox) {
+                                    updatedDiscount = 0;
+                                  }
+
+                                  // Auto-reset 5+1 if not a multiple of 6
+                                  if (
+                                    updatedDiscount === 16.666667 &&
+                                    (newQty < 6 || newQty % 6 !== 0)
+                                  ) {
+                                    updatedDiscount = 0;
+                                  }
+
+                                  return {
+                                    ...i,
+                                    qty: newQty,
+                                    discount_percent: updatedDiscount,
+                                  };
+                                }
+                                return i;
+                              })
+                            );
+                          }}
                           className="w-full bg-yellow-400 text-slate-950 font-bold text-center py-1.5 rounded-md outline-none text-xs"
                         />
                       </td>
@@ -824,27 +866,79 @@ export default function NewOrderPOS() {
                           />
                         </div>
                       </td>
-                      <td className="p-1.5">
-                        <input
-                          type="number"
+                      <td className="p-1.5 min-w-[120px]">
+                        <select
+                          disabled={item.type.toLowerCase() !== 'generic'}
                           value={item.discount_percent}
-                          onChange={(e) =>
+                          onChange={(e) => {
+                            const val = Number(e.target.value);
+                            const qty = Number(item.qty);
+
+                            // Rule: 20% must be multiples of 30, 50, OR 100
+                            const isBoxMultiple =
+                              qty % 30 === 0 ||
+                              qty % 50 === 0 ||
+                              qty % 100 === 0;
+
+                            if (val === 20 && !isBoxMultiple) {
+                              alert(
+                                '20% Discount is only for full boxes (multiples of 30, 50, or 100).'
+                              );
+                              return;
+                            }
+
+                            // Rule: 5+1 must be multiples of 6
+                            if (
+                              val === 16.666667 &&
+                              (qty < 6 || qty % 6 !== 0)
+                            ) {
+                              alert('5+1 Promo is only for multiples of 6.');
+                              return;
+                            }
+
                             setItems(
                               items.map((i) =>
                                 i.id === item.id
-                                  ? {
-                                      ...i,
-                                      discount_percent: Math.min(
-                                        100,
-                                        Number(e.target.value)
-                                      ),
-                                    }
+                                  ? { ...i, discount_percent: val }
                                   : i
                               )
-                            )
-                          }
-                          className="w-full bg-slate-800 text-blue-400 font-bold text-center py-1.5 rounded-md outline-none text-xs"
-                        />
+                            );
+                          }}
+                          className={`w-full bg-slate-800 text-blue-400 font-bold text-center py-1.5 rounded-md outline-none text-[10px] transition-all ${
+                            item.type.toLowerCase() === 'generic'
+                              ? 'border border-blue-500/20'
+                              : 'opacity-40 cursor-not-allowed'
+                          }`}
+                        >
+                          {item.type.toLowerCase() === 'generic' ? (
+                            <>
+                              <option value={0}>No Discount</option>
+                              <option
+                                value={20}
+                                disabled={
+                                  !(
+                                    Number(item.qty) % 30 === 0 ||
+                                    Number(item.qty) % 50 === 0 ||
+                                    Number(item.qty) % 100 === 0
+                                  )
+                                }
+                              >
+                                20% (Box Promo)
+                              </option>
+                              <option
+                                value={16.666667}
+                                disabled={
+                                  Number(item.qty) < 6 ||
+                                  Number(item.qty) % 6 !== 0
+                                }
+                              >
+                                Promo Pack
+                              </option>
+                            </>
+                          ) : (
+                            <option value={0}>Fixed (Branded)</option>
+                          )}
+                        </select>
                       </td>
                       <td className="p-1.5 text-right pr-8 font-bold text-white">
                         ₱{subtotal.toLocaleString()}
