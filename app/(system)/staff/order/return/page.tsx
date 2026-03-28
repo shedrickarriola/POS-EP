@@ -67,14 +67,68 @@ export default function ReturnOrder() {
     setSearchTerm('');
   };
 
-  const queueForReturn = (idx: number) => {
-    const itemToReturn = items[idx];
-    setReturnedItems([...returnedItems, itemToReturn]);
-    const remainingItems = [...items];
-    remainingItems.splice(idx, 1);
-    setItems(remainingItems);
-  };
+  const queueForReturn = (idx: number, returnQty: number) => {
+    const itemToReturn = { ...items[idx] };
 
+    // Calculate the value of just the returned portion
+    const unitPrice = itemToReturn.subtotal / itemToReturn.quantity;
+    const partialSubtotal = unitPrice * returnQty;
+
+    // Add to return queue with the specific quantity
+    setReturnedItems([
+      ...returnedItems,
+      {
+        ...itemToReturn,
+        quantity: returnQty,
+        subtotal: partialSubtotal,
+      },
+    ]);
+
+    // Update the original items list
+    const updatedItems = [...items];
+    if (itemToReturn.quantity === returnQty) {
+      // If returning everything, remove the row
+      updatedItems.splice(idx, 1);
+    } else {
+      // If partial, subtract the quantity and subtotal from the display
+      updatedItems[idx] = {
+        ...itemToReturn,
+        quantity: itemToReturn.quantity - returnQty,
+        subtotal: itemToReturn.subtotal - partialSubtotal,
+      };
+    }
+    setItems(updatedItems);
+  };
+  const cancelReturn = (idx: number) => {
+    const itemToRestore = returnedItems[idx];
+    const updatedItems = [...items];
+
+    // Check if the item already exists in the main list (partial return case)
+    const existingItemIdx = updatedItems.findIndex(
+      (i) => i.id === itemToRestore.id
+    );
+
+    if (existingItemIdx > -1) {
+      // If it exists, add the quantity and subtotal back to the existing row
+      updatedItems[existingItemIdx] = {
+        ...updatedItems[existingItemIdx],
+        quantity:
+          updatedItems[existingItemIdx].quantity + itemToRestore.quantity,
+        subtotal:
+          updatedItems[existingItemIdx].subtotal + itemToRestore.subtotal,
+      };
+    } else {
+      // If it was fully removed, push it back as a new row
+      updatedItems.push(itemToRestore);
+    }
+
+    setItems(updatedItems);
+
+    // Remove from the return queue
+    const updatedQueue = [...returnedItems];
+    updatedQueue.splice(idx, 1);
+    setReturnedItems(updatedQueue);
+  };
   const handleProcessReturn = async () => {
     if (isProcessing || returnedItems.length === 0) return;
     setIsProcessing(true);
@@ -86,7 +140,6 @@ export default function ReturnOrder() {
 
       for (const item of returnedItems) {
         const itemValue = Number(item.subtotal || 0);
-        // Normalize category check
         const category = (item.inventory?.category || 'Generic').toLowerCase();
 
         if (category === 'branded') {
@@ -96,7 +149,7 @@ export default function ReturnOrder() {
         }
         totalAdjustment += itemValue;
 
-        // 1. Update Stock
+        // 1. Update Stock in Inventory
         if (item.product_id) {
           const { data: inv } = await supabase
             .from('inventory')
@@ -110,11 +163,35 @@ export default function ReturnOrder() {
             .eq('id', item.product_id);
         }
 
-        // 2. Remove from order manifest
-        await supabase.from('order_items').delete().eq('id', item.id);
+        // 2. Updated Logic: Partial Reversal or Full Removal
+        // Fetch the current item state to ensure we have the latest DB values
+        const { data: currentDbItem } = await supabase
+          .from('order_items')
+          .select('quantity, subtotal')
+          .eq('id', item.id)
+          .single();
+
+        if (currentDbItem) {
+          const remainingQty = currentDbItem.quantity - item.quantity;
+          const remainingSubtotal = currentDbItem.subtotal - item.subtotal;
+
+          if (remainingQty > 0) {
+            // Update the existing record for partial returns
+            await supabase
+              .from('order_items')
+              .update({
+                quantity: remainingQty,
+                subtotal: remainingSubtotal,
+              })
+              .eq('id', item.id);
+          } else {
+            // If returning the last of the quantity, delete the row [cite: 23]
+            await supabase.from('order_items').delete().eq('id', item.id);
+          }
+        }
       }
 
-      // 3. Financial Recalculation
+      // 3. Financial Recalculation [cite: 24, 25, 26, 27]
       const newBranded = Math.max(
         0,
         Number(activeOrder.branded_amt || 0) - brandedAdjustment
@@ -351,15 +428,33 @@ export default function ReturnOrder() {
                             ₱{item.subtotal?.toLocaleString()}
                           </td>
                           <td className="p-6 text-center">
-                            <button
-                              onClick={() => queueForReturn(idx)}
-                              className="text-slate-600 hover:text-red-500 p-2 bg-white/5 rounded-lg transition-colors group"
-                            >
-                              <Trash2
-                                size={16}
-                                className="group-hover:scale-110 transition-transform"
+                            <div className="flex items-center justify-center gap-2">
+                              <input
+                                type="number"
+                                id={`qty-to-return-${idx}`}
+                                defaultValue={item.quantity}
+                                min={1}
+                                max={item.quantity}
+                                className="w-14 bg-slate-800 border border-white/10 rounded px-2 py-1 text-[10px] font-mono text-red-500 outline-none focus:border-red-500"
                               />
-                            </button>
+                              <button
+                                onClick={() => {
+                                  const input = document.getElementById(
+                                    `qty-to-return-${idx}`
+                                  ) as HTMLInputElement;
+                                  const val = parseInt(input.value);
+                                  if (val > 0 && val <= item.quantity) {
+                                    queueForReturn(idx, val);
+                                  }
+                                }}
+                                className="text-slate-600 hover:text-red-500 p-2 bg-white/5 rounded-lg transition-colors group"
+                              >
+                                <RotateCcw
+                                  size={16}
+                                  className="group-hover:rotate-[-45deg] transition-transform"
+                                />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))
@@ -387,14 +482,26 @@ export default function ReturnOrder() {
                   {returnedItems.map((item, idx) => (
                     <div
                       key={idx}
-                      className="bg-slate-900 border border-red-500/20 px-4 py-2 rounded-xl flex items-center gap-3"
+                      className="bg-slate-900 border border-red-500/20 px-4 py-2 rounded-xl flex items-center gap-3 group"
                     >
-                      <span className="text-[10px] font-black uppercase italic text-white">
-                        {item.inventory?.item_name}
-                      </span>
-                      <span className="text-[10px] font-mono text-red-500">
-                        -{item.quantity}
-                      </span>
+                      <div className="flex flex-col">
+                        <span className="text-[10px] font-black uppercase italic text-white leading-tight">
+                          {item.inventory?.item_name}
+                        </span>
+                        <span className="text-[9px] font-mono text-red-500">
+                          -{item.quantity} pcs | ₱
+                          {item.subtotal?.toLocaleString()}
+                        </span>
+                      </div>
+
+                      {/* CANCELLATION BUTTON */}
+                      <button
+                        onClick={() => cancelReturn(idx)}
+                        className="p-1.5 hover:bg-red-500/20 text-slate-500 hover:text-red-500 rounded-lg transition-all"
+                        title="Cancel return for this item"
+                      >
+                        <Trash2 size={14} />
+                      </button>
                     </div>
                   ))}
                 </div>
