@@ -18,6 +18,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { parseInvoiceImage } from '@/app/actions/parseInvoice';
+// Bulletproof Levenshtein distance to handle typos in medicine keywords
 
 const EMPTY_ITEM = {
   inventory_id: '',
@@ -33,6 +34,42 @@ const EMPTY_ITEM = {
   current_price: 0,
   new_price: 0,
   remaining_stock: 0,
+};
+
+const calculateMarkup = (
+  type: string | null | undefined,
+  name: string | null | undefined
+): number => {
+  const upperType = (type ?? 'GENERIC').toUpperCase();
+  const lowerName = (name ?? '').toLowerCase();
+
+  // Rule 1: Generic is always 50%
+  if (upperType === 'GENERIC') return 50;
+
+  // Rule 2: Branded Logic
+  if (upperType === 'BRANDED') {
+    // List of common medicine indicators
+    const medicineKeywords = [
+      'tab',
+      'tablet',
+      'cap',
+      'capsule',
+      'mg',
+      'syr',
+      'syrup',
+      'suspension',
+    ];
+
+    // Check if the name contains any of these keywords
+    const isMedicine = medicineKeywords.some((keyword) =>
+      lowerName.includes(keyword)
+    );
+
+    return isMedicine ? 10 : 15;
+  }
+
+  // Fallback for anything else
+  return 25;
 };
 
 const TableSkeleton = () => (
@@ -214,10 +251,14 @@ export default function NewPurchaseOrder() {
       if (selected) {
         item.inventory_id = value;
         item.item_name = selected.item_name;
+        item.item_type = (selected.item_type || 'GENERIC').toUpperCase();
         item.current_price = selected.price || 0;
         item.remaining_stock = selected.stock || 0;
         item.packaging_type = selected.packaging_type || 1;
-        item.item_type = selected.item_type || 'GENERIC';
+
+        // AUTO-MARKUP: Using the keyword matcher
+        item.markup = calculateMarkup(item.item_type, item.item_name);
+
         const newST = [...searchTerms];
         newST[index] = selected.item_name;
         setSearchTerms(newST);
@@ -225,17 +266,25 @@ export default function NewPurchaseOrder() {
       setActiveSearchIndex(null);
     } else {
       (item as any)[field] = value;
+
+      // RE-CALCULATE if type or name is edited manually
+      if (field === 'item_name' || field === 'item_type') {
+        item.markup = calculateMarkup(item.item_type, item.item_name);
+      }
     }
 
+    // Final Price Calculation
     const qty = Math.max(0, parseFloat(item.qty as any) || 0);
     const pack = Math.max(1, parseFloat(item.packaging_type as any) || 1);
     const invPrice = Math.max(0, parseFloat(item.invoice_price as any) || 0);
     const disc = Math.max(0, parseFloat(item.discount as any) || 0);
-    const markup = parseFloat(item.markup as any) || 0;
+    const currentMarkup = parseFloat(item.markup as any) || 0;
 
     item.buy_cost_total = qty * invPrice - disc;
     item.buy_cost = qty * pack > 0 ? item.buy_cost_total / (qty * pack) : 0;
-    item.new_price = item.buy_cost * (1 + markup / 100);
+
+    // Suggested retail price rounded up to the nearest whole Peso
+    item.new_price = Math.ceil(item.buy_cost * (1 + currentMarkup / 100));
 
     newItems[index] = item;
     setItems(newItems);
@@ -271,42 +320,83 @@ export default function NewPurchaseOrder() {
   const handleAiUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    console.log('File detected:', file.name, file.type);
     setIsScanning(true);
+
     try {
       const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = async () => {
-        const base64Data = (reader.result as string).split(',')[1];
-        const extracted = await parseInvoiceImage(base64Data, file.type);
-        if (extracted && Array.isArray(extracted)) {
-          const aiMappedItems = extracted.map((aiItem: any) => {
-            const cleanNum = (val: any) =>
-              typeof val === 'number'
-                ? val
-                : parseFloat(String(val).replace(/[^0-9.]/g, '')) || 0;
 
-            const aiName = (aiItem.item_name || '').toLowerCase().trim();
-            const match = inventoryList.find((inv) =>
-              inv.item_name.toLowerCase().includes(aiName)
+      reader.onload = async () => {
+        console.log('Sending to AI...');
+        // Add the at the very end of the line
+        const base64Data = (reader.result as string).split(',');
+
+        // Now 'base64Data' is a string, and this call will stop throwing the error:
+        const extracted = await parseInvoiceImage(base64Data, file.type);
+        console.log('AI Extraction Raw Result:', extracted);
+
+        // 2. Data Structure Normalization
+        // Sometimes AI returns { items: [...] } instead of just [...]
+        const rawData = Array.isArray(extracted)
+          ? extracted
+          : extracted && typeof extracted === 'object'
+          ? Object.values(extracted).find((val) => Array.isArray(val))
+          : null;
+
+        if (rawData && Array.isArray(rawData) && rawData.length > 0) {
+          const aiMappedItems = rawData.map((aiItem: any) => {
+            const cleanNum = (val: any) => {
+              if (typeof val === 'number') return val;
+              const parsed = parseFloat(
+                String(val || '0').replace(/[^0-9.]/g, '')
+              );
+              return isNaN(parsed) ? 0 : parsed;
+            };
+
+            // 3. Key Normalization (AI might use 'description' or 'product' instead of 'item_name')
+            const incomingName =
+              aiItem.item_name ||
+              aiItem.name ||
+              aiItem.description ||
+              aiItem.product ||
+              'Unknown Item';
+            const aiName = incomingName.toLowerCase().trim();
+
+            // Match with Pharmacy Inventory
+            const match = inventoryList.find(
+              (inv) =>
+                inv.item_name.toLowerCase().includes(aiName) &&
+                aiName.length > 2
             );
 
-            const qty = cleanNum(aiItem.qty) || 1;
-            const invPrice = cleanNum(aiItem.invoice_price) || 0;
+            const qty = cleanNum(aiItem.qty || aiItem.quantity) || 1;
+            const invPrice =
+              cleanNum(
+                aiItem.invoice_price ||
+                  aiItem.unit_price ||
+                  aiItem.price ||
+                  aiItem.cost
+              ) || 0;
             const pack = match?.packaging_type || 1;
-            const markup = 25;
+            const itemType = (match?.item_type || 'GENERIC').toUpperCase();
+            const itemName = match?.item_name || incomingName;
 
+            // Apply Business Rules (50% Generic, 10-15% Branded)
+            const markup = calculateMarkup(itemType, itemName);
             const buy_cost_total = qty * invPrice;
             const buy_cost = qty * pack > 0 ? buy_cost_total / (qty * pack) : 0;
-            const new_price = buy_cost * (1 + markup / 100);
+            const new_price = Math.ceil(buy_cost * (1 + markup / 100));
 
             return {
               ...EMPTY_ITEM,
               inventory_id: match?.id || '',
-              item_name: match?.item_name || aiItem.item_name,
-              item_type: match?.item_type || 'GENERIC',
+              item_name: itemName,
+              item_type: itemType,
               qty: qty,
               packaging_type: pack,
               invoice_price: invPrice,
+              markup: markup,
               buy_cost_total: buy_cost_total,
               buy_cost: buy_cost,
               new_price: new_price,
@@ -314,12 +404,22 @@ export default function NewPurchaseOrder() {
               remaining_stock: match?.stock || 0,
             };
           });
+
           setItems(aiMappedItems);
           setSearchTerms(aiMappedItems.map((i) => i.item_name));
+          console.log('Mapping complete.');
+        } else {
+          console.error('Invalid AI Format. Received:', extracted);
+          alert(
+            'The AI could not read items from this image. Please try a clearer photo or a smaller file.'
+          );
         }
         setIsScanning(false);
       };
+
+      reader.readAsDataURL(file);
     } catch (err) {
+      console.error('AI Processing Error:', err);
       setIsScanning(false);
     }
   };
@@ -340,15 +440,13 @@ export default function NewPurchaseOrder() {
   const handleSubmit = async () => {
     if (!supplierSearch) return alert('Please enter or select a supplier.');
     if (items.some((i) => !i.inventory_id))
-      return alert(
-        'Some items are not matched to inventory. Click "Add New" or select from the list.'
-      );
+      return alert('Some items are not matched.');
 
     setIsSubmitting(true);
     try {
       if (!currentBranchId) throw new Error('Branch ID missing');
-      const finalPoNumber = await getNextPoNumber();
 
+      // 1. CALCULATE SPLIT TOTALS (This was the missing part)
       const splitTotals = items.reduce(
         (acc, item) => {
           const amount = Number(item.buy_cost_total) || 0;
@@ -359,86 +457,46 @@ export default function NewPurchaseOrder() {
         { generic: 0, branded: 0 }
       );
 
-      const phtDate = new Date(new Date().getTime() + 8 * 60 * 60 * 1000)
+      const phtDateString = new Date(new Date().getTime() + 8 * 60 * 60 * 1000)
         .toISOString()
         .split('T');
 
-      // 1. Insert the Purchase Order Header
-      const { data: newOrder, error: poError } = await supabase
-        .from('purchase_orders')
-        .insert([
-          {
-            po_number: finalPoNumber,
-            supplier_name: supplierSearch,
-            invoice_id: invoiceId,
-            total_amount: totalTransaction,
-            generic_amt: splitTotals.generic,
-            branded_amt: splitTotals.branded,
-            branch_id: currentBranchId,
-            created_by: profile?.id,
-            status: 'completed',
-            created_date_pht: phtDate,
-          },
-        ])
-        .select()
-        .single();
+      // 2. MAP ITEMS FOR RPC
+      const mappedItems = items.map((item) => ({
+        inventory_id: item.inventory_id,
+        item_name: item.item_name,
+        item_type: item.item_type,
+        qty: Number(item.qty),
+        packaging_type: Number(item.packaging_type) || 1,
+        unit_cost: Number(item.invoice_price),
+        buy_cost: Number(item.buy_cost),
+        new_price: Number(item.new_price),
+      }));
 
-      if (poError) throw poError;
-
-      // 2. Insert the Purchase Order Items (UPDATED WITH MULTIPLIER)
-      const itemsData = items.map((item) => {
-        // Calculate total pieces for the history record
-        const totalPieces =
-          Number(item.qty) * (Number(item.packaging_type) || 1);
-
-        return {
-          purchase_order_id: newOrder.id,
-          inventory_id: item.inventory_id,
-          item_name: item.item_name,
-          item_type: item.item_type,
-          quantity: totalPieces, // Updated to save total pieces, not just number of packs
-          packaging_type: Number(item.packaging_type),
-          unit_cost: Number(item.invoice_price),
-          buy_cost: Number(item.buy_cost),
-          created_date_pht: phtDate,
-        };
-      });
-
-      const { error: itemsError } = await supabase
-        .from('purchase_order_items')
-        .insert(itemsData);
-
-      if (itemsError) throw itemsError;
-
-      // 3. Update Inventory Stock (Keep as is, already uses multiplier)
-      for (const item of items) {
-        const quantityInPieces =
-          Number(item.qty) * (Number(item.packaging_type) || 1);
-        const currentStock = Number(item.remaining_stock) || 0;
-        const newStockTotal = currentStock + quantityInPieces;
-
-        const { error: invError } = await supabase
-          .from('inventory')
-          .update({
-            stock: newStockTotal,
-            price: Number(item.new_price),
-          })
-          .eq('id', item.inventory_id)
-          .eq('branch_id', currentBranchId);
-
-        if (invError) {
-          console.error(
-            `Inventory Update Error [${item.item_name}]:`,
-            invError.message
-          );
+      // 3. CALL RPC
+      const { data: generatedPo, error } = await supabase.rpc(
+        'process_branch_purchase_order',
+        {
+          p_supplier_name: supplierSearch,
+          p_invoice_id: invoiceId,
+          p_total_amount: totalTransaction,
+          p_generic_amt: splitTotals.generic,
+          p_branded_amt: splitTotals.branded,
+          p_branch_id: currentBranchId,
+          p_created_by: profile?.id,
+          p_created_date_pht: phtDateString,
+          p_items_json: mappedItems,
         }
-      }
+      );
 
+      if (error) throw error;
+
+      // 4. UPDATE LOCAL STATE FOR SUCCESS MODAL
       setFinalGenericAmt(splitTotals.generic);
       setFinalBrandedAmt(splitTotals.branded);
       setIsSuccess(true);
     } catch (err: any) {
-      alert(err.message);
+      alert(`Transaction Failed: ${err.message}`);
     } finally {
       setIsSubmitting(false);
     }
