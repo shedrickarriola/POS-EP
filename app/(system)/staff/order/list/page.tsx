@@ -49,6 +49,11 @@ export default function SalesOrderList() {
   const [totalCount, setTotalCount] = useState(0);
   const [pageSize] = useState(12);
   const [searchTerm, setSearchTerm] = useState('');
+  const [searchTotals, setSearchTotals] = useState({
+    total: 0,
+    generic: 0,
+    branded: 0,
+  });
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [staffList, setStaffList] = useState<string[]>([]);
@@ -311,39 +316,46 @@ export default function SalesOrderList() {
       const from = currentPage * pageSize;
       const to = from + pageSize - 1;
 
-      let query = supabase
+      // Base query for both data and totals
+      let baseQuery = supabase
         .from('orders')
-        .select(`*, order_items (*, inventory!product_id (item_name))`, {
-          count: 'exact',
-        });
-
-      query = query.eq('branch_id', currentBranchId);
+        .select('total_amount, generic_amt, branded_amt', { count: 'exact' })
+        .eq('branch_id', currentBranchId);
 
       if (searchTerm) {
-        query = query.or(
+        baseQuery = baseQuery.or(
           `order_number.ilike.%${searchTerm}%,client_name.ilike.%${searchTerm}%`
         );
       }
+      if (startDate) baseQuery = baseQuery.gte('created_date_pht', startDate);
+      if (endDate) baseQuery = baseQuery.lte('created_date_pht', endDate);
+      if (selectedStaff) baseQuery = baseQuery.eq('created_by', selectedStaff);
 
-      // 1. USE created_date_pht FOR START DATE
-      if (startDate) query = query.gte('created_date_pht', startDate);
-
-      // 2. USE created_date_pht FOR END DATE (No timestamp needed)
-      if (endDate) query = query.lte('created_date_pht', endDate);
-
-      if (selectedStaff) query = query.eq('created_by', selectedStaff);
-
-      // 3. ORDER BY THE DATE STRING
-      const { data, error, count } = await query
-        .order('created_date_pht', { ascending: false }) // 1. Primary: Group by Day
-        .order('created_at', { ascending: false }) // 2. Secondary: Most recent time first
-        .order('order_number', { ascending: false })
+      // 1. Fetch the actual data for the current page
+      const { data, error, count } = await baseQuery
+        .select(`*, order_items (*, inventory!product_id (item_name))`)
+        .order('created_date_pht', { ascending: false })
         .range(from, to);
 
       if (!error) {
         setOrders(data || []);
         setTotalCount(count || 0);
       }
+
+      // 2. NEW: Fetch ALL filtered records to calculate global search totals
+      // Note: For very large datasets, consider using a Supabase RPC/Function
+      // to sum these up on the database side for better performance.
+      const { data: allMatchingData } = await baseQuery;
+
+      const totals = (allMatchingData || []).reduce(
+        (acc, o) => ({
+          total: acc.total + (o.total_amount || 0),
+          generic: acc.generic + (o.generic_amt || 0),
+          branded: acc.branded + (o.branded_amt || 0),
+        }),
+        { total: 0, generic: 0, branded: 0 }
+      );
+      setSearchTotals(totals);
     } catch (err) {
       console.error(err);
     } finally {
@@ -630,7 +642,7 @@ export default function SalesOrderList() {
               Generic
             </p>
             <p className="text-base font-black text-slate-100 font-mono">
-              ₱{pageMetrics.generic.toLocaleString()}
+              ₱{searchTotals.generic.toLocaleString()}
             </p>
           </div>
           <div className="bg-slate-900/50 border border-white/5 p-3 rounded-xl flex-1 lg:flex-none lg:min-w-[150px]">
@@ -638,7 +650,7 @@ export default function SalesOrderList() {
               Branded
             </p>
             <p className="text-base font-black text-slate-100 font-mono">
-              ₱{pageMetrics.branded.toLocaleString()}
+              ₱{searchTotals.branded.toLocaleString()}
             </p>
           </div>
           <div className="bg-emerald-500/5 border border-emerald-500/20 p-3 rounded-xl flex-1 lg:flex-none lg:min-w-[180px]">
@@ -646,7 +658,7 @@ export default function SalesOrderList() {
               <Calculator size={10} /> Grand Total
             </p>
             <p className="text-base font-black text-emerald-400 font-mono">
-              ₱{pageMetrics.total.toLocaleString()}
+              ₱{searchTotals.total.toLocaleString()}
             </p>
           </div>
         </div>
