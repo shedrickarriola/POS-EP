@@ -83,7 +83,12 @@ export default function StaffDashboard() {
   const [searchTerm, setSearchTerm] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<any>(null);
-  const [updatePrices, setUpdatePrices] = useState({ cost: 0, selling: 0 });
+  // Locate near line 339
+  const [updatePrices, setUpdatePrices] = useState({
+    cost: 0,
+    selling: 0,
+    type: '',
+  });
 
   const triggerToast = (msg: string, type: 'success' | 'error' = 'success') => {
     setToast({ show: true, msg, type });
@@ -489,6 +494,7 @@ export default function StaffDashboard() {
           price: Number(newProduct.selling),
           stock: 0,
           branch_id: selectedBranch.id,
+          item_type: newProduct.type, // ADD THIS LINE [cite: 338, 390]
         },
       ]);
       if (error) throw error;
@@ -500,16 +506,33 @@ export default function StaffDashboard() {
     }
   };
 
+  // Update the logic near line 392
   const handleUpdatePrice = async () => {
     if (!selectedProduct) return;
+
     setLogStatus('PUSHING_CALIBRATION...');
     try {
+      // If updatePrices.type is empty, fallback to the existing product type
+      const finalType = updatePrices.type || selectedProduct.type;
+
       const { error } = await supabase
         .from('inventory')
-        .update({ price: updatePrices.selling, buy_cost: updatePrices.cost })
+        .update({
+          price: updatePrices.selling,
+          buy_cost: updatePrices.cost,
+          item_type: finalType,
+        })
         .eq('id', selectedProduct.id);
+
       if (error) throw error;
-      triggerToast('Price Calibration Complete', 'success');
+
+      triggerToast('Product Calibration Complete', 'success');
+
+      // Reset states
+      setSelectedProduct(null);
+      setUpdatePrices({ cost: 0, selling: 0, type: '' });
+      setSearchTerm('');
+
       refreshInventoryState();
       setShowPriceModal(false);
     } catch (err: any) {
@@ -1571,6 +1594,7 @@ export default function StaffDashboard() {
                           setUpdatePrices({
                             cost: p.buy_cost,
                             selling: p.price,
+                            type: p.type || '',
                           });
                         }}
                         className="w-full px-4 py-3 text-left border-b border-white/5 hover:bg-blue-500/10 group"
@@ -1600,32 +1624,67 @@ export default function StaffDashboard() {
                         Change
                       </button>
                     </div>
+
                     <div className="grid grid-cols-2 gap-3">
-                      <input
-                        type="number"
-                        value={updatePrices.cost}
-                        onChange={(e) =>
-                          setUpdatePrices({
-                            ...updatePrices,
-                            cost: parseFloat(e.target.value) || 0,
-                          })
-                        }
-                        className="w-full bg-slate-950 border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none"
-                        placeholder="Cost"
-                      />
-                      <input
-                        type="number"
-                        value={updatePrices.selling}
-                        onChange={(e) =>
-                          setUpdatePrices({
-                            ...updatePrices,
-                            selling: parseFloat(e.target.value) || 0,
-                          })
-                        }
-                        className="w-full bg-slate-950 border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none"
-                        placeholder="Price"
-                      />
+                      <div className="space-y-1">
+                        <p className="text-[8px] text-slate-500 font-bold uppercase ml-1">
+                          Buy Cost
+                        </p>
+                        <input
+                          type="number"
+                          value={updatePrices.cost}
+                          onChange={(e) =>
+                            setUpdatePrices({
+                              ...updatePrices,
+                              cost: parseFloat(e.target.value) || 0,
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none"
+                          placeholder="Cost"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-[8px] text-slate-500 font-bold uppercase ml-1">
+                          Selling Price
+                        </p>
+                        <input
+                          type="number"
+                          value={updatePrices.selling}
+                          onChange={(e) =>
+                            setUpdatePrices({
+                              ...updatePrices,
+                              selling: parseFloat(e.target.value) || 0,
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none"
+                          placeholder="Price"
+                        />
+                      </div>
                     </div>
+
+                    {/* Classification Dropdown */}
+                    <div className="space-y-1">
+                      <p className="text-[8px] text-slate-500 font-bold uppercase ml-1">
+                        Classification
+                      </p>
+                      <select
+                        value={updatePrices.type}
+                        onChange={(e) =>
+                          setUpdatePrices({
+                            ...updatePrices,
+                            type: e.target.value,
+                          })
+                        }
+                        className="w-full bg-slate-950 border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none cursor-pointer"
+                      >
+                        <option value="" disabled>
+                          Select Type
+                        </option>
+                        <option value="GENERIC">Generic</option>
+                        <option value="BRANDED">Branded</option>
+                      </select>
+                    </div>
+
                     <button
                       onClick={handleUpdatePrice}
                       className="w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-xl text-xs font-black uppercase text-white transition-all"
