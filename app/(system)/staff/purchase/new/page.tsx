@@ -470,7 +470,11 @@ export default function NewPurchaseOrder() {
         packaging_type: Number(item.packaging_type) || 1,
         unit_cost: Number(item.invoice_price),
         buy_cost: Number(item.buy_cost),
-        new_price: Number(item.new_price),
+        // Only use the new suggested price if it is higher than the current price
+        new_price:
+          item.new_price > item.current_price
+            ? Number(item.new_price)
+            : Number(item.current_price),
       }));
 
       // 3. CALL RPC
