@@ -359,7 +359,6 @@ export default function NewPurchaseOrder() {
       alert(err.message);
     }
   };
-
   const handleAiUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -382,35 +381,58 @@ export default function NewPurchaseOrder() {
             const aiName = (extractedItem.item_name || '').trim();
 
             let bestMatch: any = null;
-            let minDistance = Infinity; // Better than 100
+            let minDistance = Infinity;
 
-            // 1. Safe & Optimized Matching with Levenshtein
             if (Array.isArray(inventoryList) && inventoryList.length > 0) {
               for (const inv of inventoryList) {
                 if (!inv?.item_name) continue;
 
-                const distance = getLevenshteinDistance(aiName, inv.item_name);
+                let distance = getLevenshteinDistance(aiName, inv.item_name);
+
+                // Bonus: If one name is mostly contained in the other (common in AI vs DB)
+                const aiLower = aiName.toLowerCase();
+                const invLower = inv.item_name.toLowerCase();
+
+                if (aiLower.includes(invLower) || invLower.includes(aiLower)) {
+                  distance = Math.min(
+                    distance,
+                    Math.floor(
+                      Math.max(aiName.length, inv.item_name.length) * 0.25
+                    )
+                  );
+                }
 
                 if (distance < minDistance) {
                   minDistance = distance;
                   bestMatch = inv;
                 }
 
-                // Early exit: Perfect match found → no need to check further
-                if (distance === 0) break;
+                if (distance === 0) break; // exact match
               }
             }
 
-            // 2. Threshold Logic (tuned for medicine names)
-            const isReliable = minDistance <= 6;
-            const matchedItem = isReliable ? bestMatch : null;
+            // === NEW THRESHOLD LOGIC (relative + absolute) ===
+            const longerLength = Math.max(
+              aiName.length,
+              bestMatch?.item_name?.length || 0
+            );
+            const relativeThreshold = Math.max(
+              5,
+              Math.floor(longerLength * 0.25)
+            ); // allow ~25% difference
+
+            const isGoodMatch =
+              minDistance <= 5 || minDistance <= relativeThreshold;
+            const isAcceptableMatch =
+              minDistance <= 10 ||
+              minDistance <= Math.floor(longerLength * 0.35);
+
+            const matchedItem = isAcceptableMatch ? bestMatch : null;
 
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
 
-            // 3. Fallback to AI name if no good match
             const finalName = matchedItem?.item_name || aiName;
-
             const markupVal = calculateMarkup(
               matchedItem?.item_type || 'GENERIC',
               finalName
@@ -421,11 +443,11 @@ export default function NewPurchaseOrder() {
               inventory_id: matchedItem?.id || '',
               item_name: finalName,
               item_type: (matchedItem?.item_type || 'GENERIC').toUpperCase(),
-              qty: qty,
+              qty,
               invoice_price: price,
               buy_cost: price,
               buy_cost_total: qty * price,
-              match_score: minDistance === Infinity ? 999 : minDistance, // 999 = no match
+              match_score: matchedItem ? minDistance : 999,
               markup: markupVal,
               new_price: Math.ceil(price * (1 + markupVal / 100)),
               current_price: matchedItem?.price || 0,
@@ -438,10 +460,9 @@ export default function NewPurchaseOrder() {
         }
       } catch (err) {
         console.error('AI Extraction Failed:', err);
-        alert('Error processing image. Please check console for details.');
+        alert('Error processing image. Check console for details.');
       } finally {
         setIsScanning(false);
-        // Reset file input so same file can be selected again
         if (e.target) e.target.value = '';
       }
     };
@@ -783,17 +804,17 @@ export default function NewPurchaseOrder() {
                       <td className="px-1 relative">
                         <input
                           className={`w-full bg-slate-950 border rounded-xl p-3 text-[12px] font-bold outline-none transition-all ${
-                            // RED: No database ID linked yet (User needs to select or Add New)
-                            !item.inventory_id && searchTerms[idx] !== ''
+                            // RED: No inventory_id linked (needs manual selection or + Add New)
+                            !item.inventory_id
                               ? 'border-red-500/50 bg-red-500/5'
-                              : // GREEN: High confidence match (Score 0-2)
-                              item.inventory_id && (item.match_score ?? 0) <= 2
+                              : // GREEN: Good / Close match
+                              (item.match_score ?? 999) <= 5
                               ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-50'
-                              : // ORANGE: Fuzzy match / Suggestion (Score 3-6)
-                              item.inventory_id && (item.match_score ?? 0) <= 6
+                              : // ORANGE: Fuzzy but acceptable match (Review)
+                              (item.match_score ?? 999) <= 10
                               ? 'border-amber-500/50 bg-amber-500/10 text-amber-50'
-                              : // DEFAULT
-                                'border-white/5 focus:border-indigo-500'
+                              : // RED: Poor or no meaningful match
+                                'border-red-500/50 bg-red-500/5'
                           }`}
                           placeholder="Type to find product..."
                           value={searchTerms[idx]}
@@ -813,20 +834,24 @@ export default function NewPurchaseOrder() {
                         {/* Status Badge for AI Matches */}
                         {item.inventory_id && (
                           <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none">
-                            {(item.match_score ?? 0) <= 2 ? (
-                              <span className="text-[8px] font-black text-emerald-500/40 uppercase tracking-tighter">
-                                Matched
+                            {(item.match_score ?? 999) <= 5 ? (
+                              <span className="text-[8px] font-black text-emerald-500/70 uppercase tracking-tighter">
+                                Good Match
                               </span>
-                            ) : (item.match_score ?? 0) <= 6 ? (
-                              <span className="text-[8px] font-black text-amber-500/40 uppercase tracking-tighter">
+                            ) : (item.match_score ?? 999) <= 10 ? (
+                              <span className="text-[8px] font-black text-amber-500/70 uppercase tracking-tighter">
                                 Review
                               </span>
-                            ) : null}
+                            ) : (
+                              <span className="text-[8px] font-black text-red-500/70 uppercase tracking-tighter">
+                                No Match
+                              </span>
+                            )}
                           </div>
                         )}
 
                         {activeSearchIndex === idx && (
-                          <div className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z- max-h-64 overflow-y-auto p-1 shadow-2xl">
+                          <div className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z-[60] max-h-64 overflow-y-auto p-1 shadow-2xl">
                             {inventoryList
                               .filter(
                                 (i) =>
@@ -866,6 +891,7 @@ export default function NewPurchaseOrder() {
                         )}
                       </td>
 
+                      {/* Rest of the columns remain unchanged */}
                       <td className="px-1 text-center">
                         <button
                           onClick={() =>
