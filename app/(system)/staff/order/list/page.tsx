@@ -26,6 +26,8 @@ import {
   PlusCircle,
   Sparkles,
   Check,
+  User,
+  ShieldAlert,
 } from 'lucide-react';
 
 export default function SalesOrderList() {
@@ -39,7 +41,8 @@ export default function SalesOrderList() {
   // Auth & Verification States (From Purchase Order Logic)
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [isVerifying, setIsVerifying] = useState<string | null>(null);
-
+  const [view, setView] = useState('day');
+  const [currentMonth, setCurrentMonth] = useState(new Date());
   // Branch State
   const [currentBranchId, setCurrentBranchId] = useState<string | null>(null);
   const [currentBranchName, setCurrentBranchName] = useState<string>('');
@@ -82,6 +85,72 @@ export default function SalesOrderList() {
   const [availableBranches, setAvailableBranches] = useState<any[]>([]);
   // This stores the branch ID while you are clicking the dropdown
   const [tempBranchId, setTempBranchId] = useState<string>('');
+  // 1. Add View State
+  const [viewMode, setViewMode] = useState<'orders' | 'days'>('orders');
+  const daySummary = useMemo(() => {
+    if (!orders || orders.length === 0) return [];
+
+    const groups = {};
+
+    orders.forEach((order) => {
+      const dateKey = order.created_date_pht || 'No Date';
+
+      if (!groups[dateKey]) {
+        groups[dateKey] = {
+          date: dateKey,
+          genericSales: 0,
+          brandedSales: 0,
+          totalSales: 0, // Gross Total
+          discount: 0, // Total Day Discount
+          actualSales: 0, // Net Total
+          needsVerification: 0,
+          orders: [],
+        };
+      }
+
+      // Track verification using the is_checked property
+      if (!order.is_checked) {
+        groups[dateKey].needsVerification += 1;
+      }
+
+      const items = order.order_items || [];
+
+      items.forEach((item) => {
+        // Calculate Gross: (Quantity * Unit Price)
+        const itemGross =
+          (Number(item.quantity) || 0) * (Number(item.unit_price) || 0);
+
+        // Get Actual: (Subtotal column from DB)
+        const itemActual = Number(item.subtotal || 0);
+
+        // Calculate Discount: (Gross - Actual)
+        const itemDiscount = itemGross - itemActual;
+
+        // Identify Category (Generic vs Branded)
+        const cat = (
+          item.type ||
+          item.inventory?.item_type ||
+          ''
+        ).toUpperCase();
+        if (cat === 'GENERIC') {
+          groups[dateKey].genericSales += itemGross;
+        } else {
+          groups[dateKey].brandedSales += itemGross;
+        }
+
+        // Aggregate into Day Totals
+        groups[dateKey].totalSales += itemGross;
+        groups[dateKey].discount += itemDiscount;
+        groups[dateKey].actualSales += itemActual;
+      });
+
+      groups[dateKey].orders.push(order);
+    });
+
+    return Object.values(groups).sort(
+      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+    );
+  }, [orders]);
 
   useEffect(() => {
     const fetchBranches = async () => {
@@ -307,66 +376,83 @@ export default function SalesOrderList() {
     }
     getStaff();
   }, [currentBranchId]);
+  // 1. Create a "sliced" version of your orders based on the current page
+  const paginatedOrders = useMemo(() => {
+    // If we are in 'day' view, we show EVERYTHING (the whole month)
+    // If we are in 'order' view, we show 10 per page
+    if (view === 'day') return orders;
 
-  // 3. FETCH DATA (Retained original query logic + is_checked support)
+    const startIndex = currentPage * 10;
+    return orders.slice(startIndex, startIndex + 10);
+  }, [orders, currentPage, view]);
+
+  // CRITICAL: Update your <tbody> to map over 'paginatedOrders' instead of 'orders'
   const fetchData = async () => {
     if (!currentBranchId) return;
-    try {
-      setLoading(true);
-      const from = currentPage * pageSize;
-      const to = from + pageSize - 1;
+    setLoading(true);
 
-      // Base query for both data and totals
-      let baseQuery = supabase
+    try {
+      let query = supabase
         .from('orders')
-        .select('total_amount, generic_amt, branded_amt', { count: 'exact' })
+        .select('*, order_items(*, inventory!product_id(item_name))')
         .eq('branch_id', currentBranchId);
 
-      if (searchTerm) {
-        baseQuery = baseQuery.or(
-          `order_number.ilike.%${searchTerm}%,client_name.ilike.%${searchTerm}%`
-        );
+      // --- APPLY DATE RANGE FILTERS (Universal) ---
+      if (startDate) {
+        query = query.gte('created_date_pht', startDate);
       }
-      if (startDate) baseQuery = baseQuery.gte('created_date_pht', startDate);
-      if (endDate) baseQuery = baseQuery.lte('created_date_pht', endDate);
-      if (selectedStaff) baseQuery = baseQuery.eq('created_by', selectedStaff);
-
-      // 1. Fetch the actual data for the current page
-      const { data, error, count } = await baseQuery
-        .select(`*, order_items (*, inventory!product_id (item_name))`)
-        .order('created_date_pht', { ascending: false })
-        .range(from, to);
-
-      if (!error) {
-        setOrders(data || []);
-        setTotalCount(count || 0);
+      if (endDate) {
+        query = query.lte('created_date_pht', endDate);
       }
 
-      // 2. NEW: Fetch ALL filtered records to calculate global search totals
-      // Note: For very large datasets, consider using a Supabase RPC/Function
-      // to sum these up on the database side for better performance.
-      const { data: allMatchingData } = await baseQuery;
+      if (view === 'order') {
+        if (searchTerm) {
+          query = query.or(
+            `order_number.ilike.%${searchTerm}%,client_name.ilike.%${searchTerm}%`
+          );
+        }
+        // Apply sorting but DO NOT add a strict limit if you want to see all filtered results
+        query = query.order('created_at', { ascending: false });
+      } else {
+        // DAY VIEW: If no date range is selected, default to the currentMonth view
+        if (!startDate && !endDate) {
+          const year = currentMonth.getFullYear();
+          const month = String(currentMonth.getMonth() + 1).padStart(2, '0');
+          const lastDay = new Date(
+            year,
+            currentMonth.getMonth() + 1,
+            0
+          ).getDate();
 
-      const totals = (allMatchingData || []).reduce(
-        (acc, o) => ({
-          total: acc.total + (o.total_amount || 0),
-          generic: acc.generic + (o.generic_amt || 0),
-          branded: acc.branded + (o.branded_amt || 0),
-        }),
-        { total: 0, generic: 0, branded: 0 }
-      );
-      setSearchTotals(totals);
+          query = query
+            .gte('created_date_pht', `${year}-${month}-01`)
+            .lte(
+              'created_date_pht',
+              `${year}-${month}-${String(lastDay).padStart(2, '0')}`
+            );
+        }
+        query = query.order('created_date_pht', { ascending: false });
+      }
+
+      const { data, error } = await query;
+      if (error) throw error;
+
+      setOrders(data || []);
+      setTotalCount(data?.length || 0);
+
+      // ... (rest of your totals calculation code)
     } catch (err) {
-      console.error(err);
+      console.error('Fetch Error:', err);
     } finally {
       setLoading(false);
     }
   };
-
   useEffect(() => {
     if (currentBranchId) fetchData();
   }, [
     currentPage,
+    view,
+    currentMonth,
     searchTerm,
     startDate,
     endDate,
@@ -740,594 +826,1091 @@ export default function SalesOrderList() {
           <XCircle size={14} /> Reset
         </button>
       </div>
+      {/* TABS NAVIGATION */}
+      <div className="flex gap-2 mb-6 bg-slate-950/30 p-1.5 rounded-2xl border border-white/5 w-fit">
+        <button
+          onClick={() => setViewMode('orders')}
+          className={`px-8 py-2.5 rounded-xl text-[10px] font-black tracking-[0.2em] uppercase transition-all flex items-center gap-2 ${
+            viewMode === 'orders'
+              ? 'bg-blue-600 text-white shadow-lg'
+              : 'text-slate-500 hover:text-slate-300'
+          }`}
+        >
+          <Hash size={14} /> Order View
+        </button>
+        <button
+          onClick={() => setViewMode('days')}
+          className={`px-8 py-2.5 rounded-xl text-[10px] font-black tracking-[0.2em] uppercase transition-all flex items-center gap-2 ${
+            viewMode === 'days'
+              ? 'bg-blue-600 text-white shadow-lg'
+              : 'text-slate-500 hover:text-slate-300'
+          }`}
+        >
+          <Calendar size={14} /> Day View
+        </button>
+      </div>
 
-      {/* MAIN TABLE */}
-      <div className="bg-slate-900/30 border border-white/5 rounded-2xl overflow-hidden shadow-xl mb-4">
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse">
-            <thead>
-              <tr className="border-b border-white/5 bg-white/5 text-left text-[9px] font-black uppercase text-slate-500 tracking-[0.2em]">
-                <th className="p-4 w-12">#</th>
-                <th className="p-4">Reference / Date</th>
-                <th className="p-4">Client Name</th>
-                <th className="p-4 text-center">Staff</th>
-                <th className="p-4 text-right">Total Amount</th>
-                <th className="p-4 text-center">Status</th>
-                <th className="p-4 w-12 text-center">Details</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/5">
-              {orders.length === 0 && !loading && (
-                <tr>
-                  <td
-                    colSpan={7}
-                    className="p-16 text-center text-slate-600 font-mono text-xs tracking-widest"
-                  >
-                    EMPTY_QUERY_RESULT
-                  </td>
-                </tr>
-              )}
-              {orders.map((order) => (
-                <React.Fragment key={order.id}>
-                  <tr
-                    onClick={() =>
-                      setExpandedRow(expandedRow === order.id ? null : order.id)
-                    }
-                    className={`cursor-pointer transition-all duration-150 group ${
-                      expandedRow === order.id
-                        ? 'bg-blue-600/5'
-                        : 'hover:bg-white/[0.02]'
-                    }`}
-                  >
-                    <td className="p-4 text-center">
-                      <Hash
-                        size={12}
-                        className={
-                          expandedRow === order.id
-                            ? 'text-blue-400'
-                            : 'text-slate-700'
-                        }
-                      />
-                    </td>
-                    <td className="p-4">
-                      <div className="flex flex-col font-mono leading-tight">
-                        <span className="text-blue-400 font-black text-xs">
-                          {order.order_number}
-                        </span>
-                        <span className="text-[9px] text-slate-500 uppercase mt-0.5">
-                          {new Date(
-                            order.created_date_pht
-                          ).toLocaleDateString()}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="p-4 font-black uppercase text-[10px] text-slate-300 tracking-tight">
-                      {order.client_name || 'Walk-in'}
-                    </td>
-                    <td className="p-4 text-center">
-                      <span className="bg-slate-800 text-slate-500 px-2 py-1 rounded text-[8px] font-black uppercase">
-                        {order.created_by?.split('@')[0] || 'SYS'}
-                      </span>
-                    </td>
-                    <td className="p-4 text-right font-black text-slate-100 font-mono text-sm tracking-tighter">
-                      ₱
-                      {order.total_amount?.toLocaleString(undefined, {
-                        minimumFractionDigits: 2,
-                      })}
-                    </td>
-
-                    {/* VERIFICATION STATUS CELL (Mirrored from pol3525.txt) */}
-                    <td className="p-4 text-center">
-                      {order.is_checked ? (
-                        <div className="flex flex-col items-center">
-                          <div className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded text-[8px] font-black uppercase flex items-center gap-1">
-                            <CheckCircle2 size={10} /> Checked
-                          </div>
-                          <span className="text-[7px] text-slate-600 uppercase mt-1 italic">
-                            {order.checked_by_name}
-                          </span>
-                        </div>
-                      ) : (
-                        <div className="bg-slate-800 text-slate-500 px-2 py-0.5 rounded text-[8px] font-black uppercase inline-flex items-center gap-1">
-                          <Clock size={10} /> Pending
-                        </div>
-                      )}
-                    </td>
-
-                    <td className="p-4 text-slate-700 group-hover:text-blue-500 transition-colors text-center">
-                      {expandedRow === order.id ? (
-                        <ChevronUp size={16} />
-                      ) : (
-                        <ChevronDown size={16} />
-                      )}
-                    </td>
+      {/* VIEW CONTENT */}
+      {viewMode === 'orders' ? (
+        <div className="rounded-xl border border-white/5 bg-slate-950/50 overflow-hidden">
+          <div className="bg-slate-900/30 border border-white/5 rounded-2xl overflow-hidden shadow-xl mb-4">
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse">
+                <thead>
+                  <tr className="border-b border-white/5 bg-white/5 text-left text-[9px] font-black uppercase text-slate-500 tracking-[0.2em]">
+                    <th className="p-4 w-12">#</th>
+                    <th className="p-4">Reference / Date</th>
+                    <th className="p-4">Client Name</th>
+                    <th className="p-4 text-center">Staff</th>
+                    <th className="p-4 text-right">Total Amount</th>
+                    <th className="p-4 text-center">Status</th>
+                    <th className="p-4 w-12 text-center">Details</th>
                   </tr>
-
-                  {/* EXPANDED SECTION WITH VERIFY BUTTON */}
-                  {expandedRow === order.id && (
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {orders.length === 0 && !loading && (
                     <tr>
                       <td
                         colSpan={7}
-                        className="bg-black/40 border-y border-blue-500/10 p-5"
+                        className="p-16 text-center text-slate-600 font-mono text-xs tracking-widest"
                       >
-                        <div className="flex flex-col gap-4">
-                          <div className="flex justify-between items-center border-b border-white/5 pb-2">
-                            <h3 className="text-[9px] font-black text-blue-500 uppercase tracking-widest flex items-center gap-2">
-                              <ShoppingCart size={12} /> Transaction Itemization
-                            </h3>
+                        EMPTY_QUERY_RESULT
+                      </td>
+                    </tr>
+                  )}
+                  {paginatedOrders.map((order) => (
+                    <React.Fragment key={order.id}>
+                      <tr
+                        onClick={() =>
+                          setExpandedRow(
+                            expandedRow === order.id ? null : order.id
+                          )
+                        }
+                        className={`cursor-pointer transition-all duration-150 group ${
+                          expandedRow === order.id
+                            ? 'bg-blue-600/5'
+                            : 'hover:bg-white/[0.02]'
+                        }`}
+                      >
+                        <td className="p-4 text-center">
+                          <Hash
+                            size={12}
+                            className={
+                              expandedRow === order.id
+                                ? 'text-blue-400'
+                                : 'text-slate-700'
+                            }
+                          />
+                        </td>
+                        <td className="p-4">
+                          <div className="flex flex-col font-mono leading-tight">
+                            <span className="text-blue-400 font-black text-xs">
+                              {order.order_number}
+                            </span>
+                            <span className="text-[9px] text-slate-500 uppercase mt-0.5">
+                              {new Date(
+                                order.created_date_pht
+                              ).toLocaleDateString()}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="p-4 font-black uppercase text-[10px] text-slate-300 tracking-tight">
+                          {order.client_name || 'Walk-in'}
+                        </td>
+                        <td className="p-4 text-center">
+                          <span className="bg-slate-800 text-slate-500 px-2 py-1 rounded text-[8px] font-black uppercase">
+                            {order.created_by?.split('@')[0] || 'SYS'}
+                          </span>
+                        </td>
+                        <td className="p-4 text-right font-black text-slate-100 font-mono text-sm tracking-tighter">
+                          ₱
+                          {order.total_amount?.toLocaleString(undefined, {
+                            minimumFractionDigits: 2,
+                          })}
+                        </td>
 
-                            {/* TRANSACTION ACTIONS CONTAINER */}
-                            <div className="flex items-center gap-3 flex-wrap mt-2 pt-2 border-t border-white/5">
-                              {/* VERIFY BUTTON RETAINED FROM ORIGINAL */}
-                              {canVerify &&
-                                !order.is_checked &&
-                                !isEditingDate &&
-                                !isEditingBranch && (
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleVerifyOrder(order.id);
-                                    }}
-                                    disabled={isVerifying === order.id}
-                                    className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest flex items-center gap-2 transition-all shadow-lg shadow-emerald-900/20"
-                                  >
-                                    {isVerifying === order.id ? (
-                                      <Loader2
-                                        size={12}
-                                        className="animate-spin"
-                                      />
-                                    ) : (
-                                      <ShieldCheck size={12} />
-                                    )}
-                                    Verify Transaction
-                                  </button>
-                                )}
+                        {/* VERIFICATION STATUS CELL (Mirrored from pol3525.txt) */}
+                        <td className="p-4 text-center">
+                          {order.is_checked ? (
+                            <div className="flex flex-col items-center">
+                              <div className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded text-[8px] font-black uppercase flex items-center gap-1">
+                                <CheckCircle2 size={10} /> Checked
+                              </div>
+                              <span className="text-[7px] text-slate-600 uppercase mt-1 italic">
+                                {order.checked_by_name}
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="bg-slate-800 text-slate-500 px-2 py-0.5 rounded text-[8px] font-black uppercase inline-flex items-center gap-1">
+                              <Clock size={10} /> Pending
+                            </div>
+                          )}
+                        </td>
 
-                              {currentUser?.role === 'branch_admin' && (
-                                <>
-                                  {/* MODERN DATE PICKER INLINE */}
-                                  <div className="flex items-center gap-2">
-                                    {isEditingDate === order.id ? (
-                                      <div className="flex items-center gap-2 bg-slate-900 border border-blue-500/50 p-1 rounded-xl shadow-[0_0_15px_rgba(59,130,246,0.2)] animate-in fade-in zoom-in duration-200">
-                                        <input
-                                          type="date"
-                                          max={todayPHT}
-                                          value={tempDate}
-                                          autoFocus
-                                          disabled={loading}
-                                          onClick={(e) => e.stopPropagation()}
-                                          onChange={(e) =>
-                                            setTempDate(e.target.value)
-                                          }
-                                          className="bg-transparent text-[10px] font-bold uppercase outline-none px-2 py-1 text-blue-400 disabled:opacity-50"
-                                        />
-                                        <button
-                                          disabled={loading}
-                                          onClick={async (e) => {
-                                            e.stopPropagation();
-                                            await handleChangeDate(
-                                              order,
-                                              tempDate
-                                            );
-                                          }}
-                                          className="p-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-all active:scale-90 disabled:bg-slate-700"
-                                        >
-                                          {loading ? (
-                                            <Loader2
-                                              size={14}
-                                              className="animate-spin"
-                                            />
-                                          ) : (
-                                            <CheckCircle2 size={14} />
-                                          )}
-                                        </button>
-                                        {!loading && (
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              setIsEditingDate(null);
-                                            }}
-                                            className="p-1 text-red-500 hover:bg-red-500/10 rounded-lg"
-                                          >
-                                            <XCircle size={14} />
-                                          </button>
-                                        )}
-                                      </div>
-                                    ) : (
+                        <td className="p-4 text-slate-700 group-hover:text-blue-500 transition-colors text-center">
+                          {expandedRow === order.id ? (
+                            <ChevronUp size={16} />
+                          ) : (
+                            <ChevronDown size={16} />
+                          )}
+                        </td>
+                      </tr>
+
+                      {/* EXPANDED SECTION WITH VERIFY BUTTON */}
+                      {expandedRow === order.id && (
+                        <tr>
+                          <td
+                            colSpan={7}
+                            className="bg-black/40 border-y border-blue-500/10 p-5"
+                          >
+                            <div className="flex flex-col gap-4">
+                              <div className="flex justify-between items-center border-b border-white/5 pb-2">
+                                <h3 className="text-[9px] font-black text-blue-500 uppercase tracking-widest flex items-center gap-2">
+                                  <ShoppingCart size={12} /> Transaction
+                                  Itemization
+                                </h3>
+
+                                {/* TRANSACTION ACTIONS CONTAINER */}
+                                <div className="flex items-center gap-3 flex-wrap mt-2 pt-2 border-t border-white/5">
+                                  {/* VERIFY BUTTON RETAINED FROM ORIGINAL */}
+                                  {canVerify &&
+                                    !order.is_checked &&
+                                    !isEditingDate &&
+                                    !isEditingBranch && (
                                       <button
                                         onClick={(e) => {
                                           e.stopPropagation();
-                                          setIsEditingDate(order.id);
-                                          setTempDate(order.created_date_pht);
+                                          handleVerifyOrder(order.id);
                                         }}
-                                        className={`group flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all duration-500 border 
+                                        disabled={isVerifying === order.id}
+                                        className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest flex items-center gap-2 transition-all shadow-lg shadow-emerald-900/20"
+                                      >
+                                        {isVerifying === order.id ? (
+                                          <Loader2
+                                            size={12}
+                                            className="animate-spin"
+                                          />
+                                        ) : (
+                                          <ShieldCheck size={12} />
+                                        )}
+                                        Verify Transaction
+                                      </button>
+                                    )}
+
+                                  {currentUser?.role === 'branch_admin' && (
+                                    <>
+                                      {/* MODERN DATE PICKER INLINE */}
+                                      <div className="flex items-center gap-2">
+                                        {isEditingDate === order.id ? (
+                                          <div className="flex items-center gap-2 bg-slate-900 border border-blue-500/50 p-1 rounded-xl shadow-[0_0_15px_rgba(59,130,246,0.2)] animate-in fade-in zoom-in duration-200">
+                                            <input
+                                              type="date"
+                                              max={todayPHT}
+                                              value={tempDate}
+                                              autoFocus
+                                              disabled={loading}
+                                              onClick={(e) =>
+                                                e.stopPropagation()
+                                              }
+                                              onChange={(e) =>
+                                                setTempDate(e.target.value)
+                                              }
+                                              className="bg-transparent text-[10px] font-bold uppercase outline-none px-2 py-1 text-blue-400 disabled:opacity-50"
+                                            />
+                                            <button
+                                              disabled={loading}
+                                              onClick={async (e) => {
+                                                e.stopPropagation();
+                                                await handleChangeDate(
+                                                  order,
+                                                  tempDate
+                                                );
+                                              }}
+                                              className="p-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-all active:scale-90 disabled:bg-slate-700"
+                                            >
+                                              {loading ? (
+                                                <Loader2
+                                                  size={14}
+                                                  className="animate-spin"
+                                                />
+                                              ) : (
+                                                <CheckCircle2 size={14} />
+                                              )}
+                                            </button>
+                                            {!loading && (
+                                              <button
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  setIsEditingDate(null);
+                                                }}
+                                                className="p-1 text-red-500 hover:bg-red-500/10 rounded-lg"
+                                              >
+                                                <XCircle size={14} />
+                                              </button>
+                                            )}
+                                          </div>
+                                        ) : (
+                                          <button
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setIsEditingDate(order.id);
+                                              setTempDate(
+                                                order.created_date_pht
+                                              );
+                                            }}
+                                            className={`group flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all duration-500 border 
         ${
           successId === `${order.id}-date`
             ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.2)]'
             : 'bg-slate-800/50 border-white/5 text-slate-400 hover:border-blue-500/30 hover:text-white'
         }`}
-                                      >
-                                        {successId === `${order.id}-date` ? (
-                                          <>
-                                            <CheckCircle2
-                                              size={12}
-                                              className="animate-bounce"
-                                            />
-                                            <span className="text-[9px] font-black uppercase tracking-tighter">
-                                              Updated!
-                                            </span>
-                                          </>
-                                        ) : (
-                                          <>
-                                            <Calendar
-                                              size={12}
-                                              className="text-blue-500 group-hover:scale-110 transition-transform"
-                                            />
-                                            <span className="text-[9px] font-black uppercase tracking-widest">
-                                              Change Date
-                                            </span>
-                                          </>
-                                        )}
-                                      </button>
-                                    )}
-                                  </div>
-
-                                  {/* MODERN BRANCH SELECT INLINE */}
-                                  <div className="flex items-center gap-2">
-                                    {isEditingBranch === order.id ? (
-                                      <div className="flex items-center gap-2 bg-slate-900 border border-blue-500/50 p-1 rounded-xl shadow-[0_0_15px_rgba(59,130,246,0.2)] animate-in fade-in zoom-in duration-200">
-                                        <select
-                                          value={tempBranchId}
-                                          disabled={loading}
-                                          onChange={(e) =>
-                                            setTempBranchId(e.target.value)
-                                          }
-                                          className="bg-transparent text-[10px] font-bold uppercase outline-none px-2 py-1 text-blue-400"
-                                        >
-                                          <option
-                                            value=""
-                                            disabled
-                                            className="bg-slate-900 text-slate-500"
                                           >
-                                            Select Branch
-                                          </option>
-                                          {/* Changed 'branches' to 'availableBranches' */}
-                                          {availableBranches.map((b) => (
-                                            <option
-                                              key={b.id}
-                                              value={b.id}
-                                              className="bg-slate-900 text-white"
-                                            >
-                                              {/* Changed 'b.name' to 'b.branch_name' to match your DB query */}
-                                              {b.branch_name}
-                                            </option>
-                                          ))}
-                                        </select>
-                                        <button
-                                          disabled={loading}
-                                          onClick={() =>
-                                            handleChangeBranch(
-                                              order,
-                                              tempBranchId
-                                            )
-                                          }
-                                          className="p-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-all active:scale-90"
-                                        >
-                                          {loading ? (
-                                            <Loader2
-                                              size={14}
-                                              className="animate-spin"
-                                            />
-                                          ) : (
-                                            <CheckCircle2 size={14} />
-                                          )}
-                                        </button>
-                                        <button
-                                          onClick={() =>
-                                            setIsEditingBranch(null)
-                                          }
-                                          className="p-1 text-red-500"
-                                        >
-                                          <XCircle size={14} />
-                                        </button>
+                                            {successId ===
+                                            `${order.id}-date` ? (
+                                              <>
+                                                <CheckCircle2
+                                                  size={12}
+                                                  className="animate-bounce"
+                                                />
+                                                <span className="text-[9px] font-black uppercase tracking-tighter">
+                                                  Updated!
+                                                </span>
+                                              </>
+                                            ) : (
+                                              <>
+                                                <Calendar
+                                                  size={12}
+                                                  className="text-blue-500 group-hover:scale-110 transition-transform"
+                                                />
+                                                <span className="text-[9px] font-black uppercase tracking-widest">
+                                                  Change Date
+                                                </span>
+                                              </>
+                                            )}
+                                          </button>
+                                        )}
                                       </div>
-                                    ) : (
-                                      <button
-                                        onClick={() => {
-                                          setIsEditingBranch(order.id);
-                                          setTempBranchId(order.branch_id);
-                                        }}
-                                        className={`group flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all duration-500 border 
+
+                                      {/* MODERN BRANCH SELECT INLINE */}
+                                      <div className="flex items-center gap-2">
+                                        {isEditingBranch === order.id ? (
+                                          <div className="flex items-center gap-2 bg-slate-900 border border-blue-500/50 p-1 rounded-xl shadow-[0_0_15px_rgba(59,130,246,0.2)] animate-in fade-in zoom-in duration-200">
+                                            <select
+                                              value={tempBranchId}
+                                              disabled={loading}
+                                              onChange={(e) =>
+                                                setTempBranchId(e.target.value)
+                                              }
+                                              className="bg-transparent text-[10px] font-bold uppercase outline-none px-2 py-1 text-blue-400"
+                                            >
+                                              <option
+                                                value=""
+                                                disabled
+                                                className="bg-slate-900 text-slate-500"
+                                              >
+                                                Select Branch
+                                              </option>
+                                              {/* Changed 'branches' to 'availableBranches' */}
+                                              {availableBranches.map((b) => (
+                                                <option
+                                                  key={b.id}
+                                                  value={b.id}
+                                                  className="bg-slate-900 text-white"
+                                                >
+                                                  {/* Changed 'b.name' to 'b.branch_name' to match your DB query */}
+                                                  {b.branch_name}
+                                                </option>
+                                              ))}
+                                            </select>
+                                            <button
+                                              disabled={loading}
+                                              onClick={() =>
+                                                handleChangeBranch(
+                                                  order,
+                                                  tempBranchId
+                                                )
+                                              }
+                                              className="p-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-all active:scale-90"
+                                            >
+                                              {loading ? (
+                                                <Loader2
+                                                  size={14}
+                                                  className="animate-spin"
+                                                />
+                                              ) : (
+                                                <CheckCircle2 size={14} />
+                                              )}
+                                            </button>
+                                            <button
+                                              onClick={() =>
+                                                setIsEditingBranch(null)
+                                              }
+                                              className="p-1 text-red-500"
+                                            >
+                                              <XCircle size={14} />
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <button
+                                            onClick={() => {
+                                              setIsEditingBranch(order.id);
+                                              setTempBranchId(order.branch_id);
+                                            }}
+                                            className={`group flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all duration-500 border 
         ${
           successId === `${order.id}-branch`
             ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.2)]'
             : 'bg-slate-800/50 border-white/5 text-slate-400 hover:border-blue-500/30 hover:text-white'
         }`}
-                                      >
-                                        {successId === `${order.id}-branch` ? (
-                                          <>
-                                            <CheckCircle2
-                                              size={12}
-                                              className="animate-bounce"
-                                            />
-                                            <span className="text-[9px] font-black uppercase tracking-tighter">
-                                              Updated!
-                                            </span>
-                                          </>
-                                        ) : (
-                                          <>
-                                            <MapPin
-                                              size={12}
-                                              className="text-blue-500"
-                                            />
-                                            <span className="text-[9px] font-black uppercase tracking-widest">
-                                              {order.branch_name ||
-                                                'Change Branch'}
-                                            </span>
-                                          </>
+                                          >
+                                            {successId ===
+                                            `${order.id}-branch` ? (
+                                              <>
+                                                <CheckCircle2
+                                                  size={12}
+                                                  className="animate-bounce"
+                                                />
+                                                <span className="text-[9px] font-black uppercase tracking-tighter">
+                                                  Updated!
+                                                </span>
+                                              </>
+                                            ) : (
+                                              <>
+                                                <MapPin
+                                                  size={12}
+                                                  className="text-blue-500"
+                                                />
+                                                <span className="text-[9px] font-black uppercase tracking-widest">
+                                                  {order.branch_name ||
+                                                    'Change Branch'}
+                                                </span>
+                                              </>
+                                            )}
+                                          </button>
                                         )}
-                                      </button>
-                                    )}
-                                  </div>
-                                </>
-                              )}
-                            </div>
-                          </div>
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
 
-                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
-                            {order.order_items?.map((item: any) => (
-                              <div
-                                key={item.id}
-                                className="flex flex-col gap-2"
-                              >
-                                <div
-                                  className={`flex justify-between items-center p-3 rounded-lg border transition-all duration-500 ${
-                                    justMappedId === item.id
-                                      ? 'bg-emerald-500/20 border-emerald-500/50 shadow-[0_0_15px_rgba(16,185,129,0.2)] scale-[1.01]'
-                                      : item.isTransferred === 'YES'
-                                      ? 'bg-red-500/10 border-red-500/40 shadow-[0_0_10px_rgba(239,68,68,0.1)]'
-                                      : 'bg-white/[0.02] border-white/5'
-                                  }`}
-                                >
-                                  <div className="flex flex-col text-left">
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-[10px] font-black text-slate-300 uppercase leading-tight">
-                                        {item.inventory?.item_name ||
-                                          'Unknown Item'}
-                                      </span>
-
-                                      {/* DYNAMIC STATUS BADGE */}
-                                      {justMappedId === item.id ? (
-                                        <span className="bg-emerald-600 text-[7px] px-1.5 py-0.5 rounded text-white font-black animate-in fade-in zoom-in tracking-tighter">
-                                          READY ✓
-                                        </span>
-                                      ) : (
-                                        item.isTransferred === 'YES' && (
-                                          <span className="bg-red-600 text-[7px] px-1 rounded text-white font-black animate-pulse tracking-tighter">
-                                            NEEDS MAPPING
-                                          </span>
-                                        )
-                                      )}
-                                    </div>
-                                    <span
-                                      className={`text-[8px] font-black uppercase ${
-                                        item.type === 'branded'
-                                          ? 'text-purple-500/60'
-                                          : 'text-blue-500/60'
+                              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                                {order.order_items?.map((item: any) => (
+                                  <div
+                                    key={item.id}
+                                    className="flex flex-col gap-2"
+                                  >
+                                    <div
+                                      className={`flex justify-between items-center p-3 rounded-lg border transition-all duration-500 ${
+                                        justMappedId === item.id
+                                          ? 'bg-emerald-500/20 border-emerald-500/50 shadow-[0_0_15px_rgba(16,185,129,0.2)] scale-[1.01]'
+                                          : item.isTransferred === 'YES'
+                                          ? 'bg-red-500/10 border-red-500/40 shadow-[0_0_10px_rgba(239,68,68,0.1)]'
+                                          : 'bg-white/[0.02] border-white/5'
                                       }`}
                                     >
-                                      {item.type || 'generic'}
-                                    </span>
-                                  </div>
+                                      <div className="flex flex-col text-left">
+                                        <div className="flex items-center gap-2">
+                                          <span className="text-[10px] font-black text-slate-300 uppercase leading-tight">
+                                            {item.inventory?.item_name ||
+                                              'Unknown Item'}
+                                          </span>
 
-                                  <div className="flex items-center gap-3">
-                                    <div className="text-right">
-                                      <span className="text-[9px] text-slate-600 font-mono block uppercase">
-                                        {item.quantity} PCS
-                                      </span>
-                                      <span className="text-xs font-black text-emerald-500/80 font-mono">
-                                        ₱{' '}
-                                        {(
-                                          item.quantity * item.unit_price
-                                        ).toLocaleString()}
-                                      </span>
-                                    </div>
-
-                                    {/* NEW: Explicit Success Feedback replacing the button */}
-                                    {justMappedId === item.id ? (
-                                      <div className="flex items-center gap-1.5 bg-emerald-500/20 text-emerald-400 px-3 py-1.5 rounded-lg border border-emerald-500/50 animate-bounce shadow-[0_0_15px_rgba(16,185,129,0.3)]">
-                                        <Check size={12} strokeWidth={3} />
-                                        <span className="text-[10px] font-black uppercase tracking-tighter">
-                                          Mapped
+                                          {/* DYNAMIC STATUS BADGE */}
+                                          {justMappedId === item.id ? (
+                                            <span className="bg-emerald-600 text-[7px] px-1.5 py-0.5 rounded text-white font-black animate-in fade-in zoom-in tracking-tighter">
+                                              READY ✓
+                                            </span>
+                                          ) : (
+                                            item.isTransferred === 'YES' && (
+                                              <span className="bg-red-600 text-[7px] px-1 rounded text-white font-black animate-pulse tracking-tighter">
+                                                NEEDS MAPPING
+                                              </span>
+                                            )
+                                          )}
+                                        </div>
+                                        <span
+                                          className={`text-[8px] font-black uppercase ${
+                                            item.type === 'branded'
+                                              ? 'text-purple-500/60'
+                                              : 'text-blue-500/60'
+                                          }`}
+                                        >
+                                          {item.type || 'generic'}
                                         </span>
                                       </div>
-                                    ) : (
-                                      item.isTransferred === 'YES' && (
-                                        <button
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            if (!mappingSuggestions[item.id]) {
-                                              fetchSuggestions(
-                                                item,
-                                                order.branch_id
-                                              );
-                                            } else {
-                                              setMappingSuggestions((prev) => {
-                                                const next = { ...prev };
-                                                delete next[item.id];
-                                                return next;
-                                              });
-                                            }
-                                          }}
-                                          className="p-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg transition-all active:scale-90"
-                                        >
-                                          {isSearchingSuggestions ===
-                                          item.id ? (
-                                            <Loader2
-                                              size={12}
-                                              className="animate-spin"
-                                            />
-                                          ) : (
-                                            <Search size={12} />
-                                          )}
-                                        </button>
-                                      )
-                                    )}
-                                  </div>
-                                </div>
 
-                                {/* SUGGESTIONS PANEL */}
-                                {item.isTransferred === 'YES' &&
-                                  justMappedId !== item.id &&
-                                  mappingSuggestions[item.id] && (
-                                    <div className="mx-2 p-2 bg-slate-900 border border-white/10 rounded-b-lg shadow-xl animate-in slide-in-from-top-2">
-                                      <p className="text-[8px] font-black text-slate-500 uppercase mb-2">
-                                        Similar Items in this Branch:
-                                      </p>
-                                      <div className="flex flex-col gap-1">
-                                        {mappingSuggestions[item.id].length >
-                                        0 ? (
-                                          mappingSuggestions[item.id].map(
-                                            (sug: any) => (
-                                              <button
-                                                key={sug.id}
-                                                disabled={loading}
-                                                onClick={() =>
-                                                  handleMapToDifferentId(
-                                                    order.id,
-                                                    item,
-                                                    sug.id
-                                                  )
-                                                }
-                                                className="flex justify-between items-center p-2 rounded hover:bg-emerald-500/20 border border-transparent hover:border-emerald-500/30 group transition-all"
-                                              >
-                                                <div className="text-left">
-                                                  <p className="text-[10px] font-bold text-slate-200">
-                                                    {sug.item_name}
-                                                  </p>
-                                                  <p className="text-[8px] text-slate-500 uppercase">
-                                                    Stock: {sug.stock}
-                                                  </p>
-                                                </div>
-                                                <span className="text-[9px] font-black text-emerald-500 opacity-0 group-hover:opacity-100 uppercase transition-opacity">
-                                                  {loading ? (
-                                                    <Loader2
-                                                      size={10}
-                                                      className="animate-spin"
-                                                    />
-                                                  ) : (
-                                                    'Map Item'
-                                                  )}
-                                                </span>
-                                              </button>
-                                            )
-                                          )
-                                        ) : (
-                                          <p className="text-[9px] text-slate-600 italic p-2 text-center">
-                                            No similar items found
-                                          </p>
-                                        )}
-
-                                        {/* QUICK REGISTER ACTION */}
-                                        <div className="mt-3 pt-3 border-t border-white/5">
-                                          <div className="bg-blue-500/5 rounded-xl border border-blue-500/20 p-3 overflow-hidden transition-all duration-300">
-                                            {confirmingCreate === item.id ? (
-                                              <div className="flex flex-col gap-2 animate-in fade-in zoom-in-95 duration-200">
-                                                <div className="text-center space-y-1">
-                                                  <p className="text-[10px] font-black text-blue-300 uppercase tracking-tighter">
-                                                    Confirm Registration?
-                                                  </p>
-                                                  <p className="text-[9px] text-slate-400 italic">
-                                                    Adding to this branch
-                                                  </p>
-                                                </div>
-                                                <div className="flex gap-2 mt-1">
-                                                  <button
-                                                    onClick={() =>
-                                                      setConfirmingCreate(null)
-                                                    }
-                                                    className="flex-1 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 text-[9px] font-black uppercase transition-colors"
-                                                  >
-                                                    Cancel
-                                                  </button>
-                                                  <button
-                                                    onClick={() =>
-                                                      handleCreateAndMapItem(
-                                                        order.id,
-                                                        item
-                                                      )
-                                                    }
-                                                    disabled={loading}
-                                                    className="flex-1 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[9px] font-black uppercase shadow-lg transition-all active:scale-95 flex items-center justify-center"
-                                                  >
-                                                    {loading ? (
-                                                      <Loader2
-                                                        size={10}
-                                                        className="animate-spin"
-                                                      />
-                                                    ) : (
-                                                      'Confirm'
-                                                    )}
-                                                  </button>
-                                                </div>
-                                              </div>
-                                            ) : (
-                                              <button
-                                                onClick={() =>
-                                                  setConfirmingCreate(item.id)
-                                                }
-                                                className="w-full py-2.5 px-3 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 rounded-lg text-[9px] font-black uppercase tracking-widest border border-blue-500/30 transition-all flex items-center justify-center gap-2 group"
-                                              >
-                                                <Sparkles
-                                                  size={12}
-                                                  className="group-hover:rotate-12 transition-transform"
-                                                />
-                                                <span>
-                                                  Quick Register & Map
-                                                </span>
-                                              </button>
-                                            )}
-                                          </div>
+                                      <div className="flex items-center gap-3">
+                                        <div className="text-right">
+                                          <span className="text-[9px] text-slate-600 font-mono block uppercase">
+                                            {item.quantity} PCS
+                                          </span>
+                                          <span className="text-xs font-black text-emerald-500/80 font-mono">
+                                            ₱{' '}
+                                            {(
+                                              item.quantity * item.unit_price
+                                            ).toLocaleString()}
+                                          </span>
                                         </div>
+
+                                        {/* NEW: Explicit Success Feedback replacing the button */}
+                                        {justMappedId === item.id ? (
+                                          <div className="flex items-center gap-1.5 bg-emerald-500/20 text-emerald-400 px-3 py-1.5 rounded-lg border border-emerald-500/50 animate-bounce shadow-[0_0_15px_rgba(16,185,129,0.3)]">
+                                            <Check size={12} strokeWidth={3} />
+                                            <span className="text-[10px] font-black uppercase tracking-tighter">
+                                              Mapped
+                                            </span>
+                                          </div>
+                                        ) : (
+                                          item.isTransferred === 'YES' && (
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                if (
+                                                  !mappingSuggestions[item.id]
+                                                ) {
+                                                  fetchSuggestions(
+                                                    item,
+                                                    order.branch_id
+                                                  );
+                                                } else {
+                                                  setMappingSuggestions(
+                                                    (prev) => {
+                                                      const next = { ...prev };
+                                                      delete next[item.id];
+                                                      return next;
+                                                    }
+                                                  );
+                                                }
+                                              }}
+                                              className="p-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg transition-all active:scale-90"
+                                            >
+                                              {isSearchingSuggestions ===
+                                              item.id ? (
+                                                <Loader2
+                                                  size={12}
+                                                  className="animate-spin"
+                                                />
+                                              ) : (
+                                                <Search size={12} />
+                                              )}
+                                            </button>
+                                          )
+                                        )}
                                       </div>
                                     </div>
-                                  )}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </React.Fragment>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
 
-      {/* FOOTER PAGINATION */}
-      <div className="flex flex-col sm:flex-row justify-between items-center px-2 gap-4">
-        <p className="text-[9px] font-black text-slate-700 uppercase tracking-widest leading-none">
-          {loading ? 'SYNCING...' : `REC_COUNT: ${totalCount}`}
+                                    {/* SUGGESTIONS PANEL */}
+                                    {item.isTransferred === 'YES' &&
+                                      justMappedId !== item.id &&
+                                      mappingSuggestions[item.id] && (
+                                        <div className="mx-2 p-2 bg-slate-900 border border-white/10 rounded-b-lg shadow-xl animate-in slide-in-from-top-2">
+                                          <p className="text-[8px] font-black text-slate-500 uppercase mb-2">
+                                            Similar Items in this Branch:
+                                          </p>
+                                          <div className="flex flex-col gap-1">
+                                            {mappingSuggestions[item.id]
+                                              .length > 0 ? (
+                                              mappingSuggestions[item.id].map(
+                                                (sug: any) => (
+                                                  <button
+                                                    key={sug.id}
+                                                    disabled={loading}
+                                                    onClick={() =>
+                                                      handleMapToDifferentId(
+                                                        order.id,
+                                                        item,
+                                                        sug.id
+                                                      )
+                                                    }
+                                                    className="flex justify-between items-center p-2 rounded hover:bg-emerald-500/20 border border-transparent hover:border-emerald-500/30 group transition-all"
+                                                  >
+                                                    <div className="text-left">
+                                                      <p className="text-[10px] font-bold text-slate-200">
+                                                        {sug.item_name}
+                                                      </p>
+                                                      <p className="text-[8px] text-slate-500 uppercase">
+                                                        Stock: {sug.stock}
+                                                      </p>
+                                                    </div>
+                                                    <span className="text-[9px] font-black text-emerald-500 opacity-0 group-hover:opacity-100 uppercase transition-opacity">
+                                                      {loading ? (
+                                                        <Loader2
+                                                          size={10}
+                                                          className="animate-spin"
+                                                        />
+                                                      ) : (
+                                                        'Map Item'
+                                                      )}
+                                                    </span>
+                                                  </button>
+                                                )
+                                              )
+                                            ) : (
+                                              <p className="text-[9px] text-slate-600 italic p-2 text-center">
+                                                No similar items found
+                                              </p>
+                                            )}
+
+                                            {/* QUICK REGISTER ACTION */}
+                                            <div className="mt-3 pt-3 border-t border-white/5">
+                                              <div className="bg-blue-500/5 rounded-xl border border-blue-500/20 p-3 overflow-hidden transition-all duration-300">
+                                                {confirmingCreate ===
+                                                item.id ? (
+                                                  <div className="flex flex-col gap-2 animate-in fade-in zoom-in-95 duration-200">
+                                                    <div className="text-center space-y-1">
+                                                      <p className="text-[10px] font-black text-blue-300 uppercase tracking-tighter">
+                                                        Confirm Registration?
+                                                      </p>
+                                                      <p className="text-[9px] text-slate-400 italic">
+                                                        Adding to this branch
+                                                      </p>
+                                                    </div>
+                                                    <div className="flex gap-2 mt-1">
+                                                      <button
+                                                        onClick={() =>
+                                                          setConfirmingCreate(
+                                                            null
+                                                          )
+                                                        }
+                                                        className="flex-1 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 text-[9px] font-black uppercase transition-colors"
+                                                      >
+                                                        Cancel
+                                                      </button>
+                                                      <button
+                                                        onClick={() =>
+                                                          handleCreateAndMapItem(
+                                                            order.id,
+                                                            item
+                                                          )
+                                                        }
+                                                        disabled={loading}
+                                                        className="flex-1 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[9px] font-black uppercase shadow-lg transition-all active:scale-95 flex items-center justify-center"
+                                                      >
+                                                        {loading ? (
+                                                          <Loader2
+                                                            size={10}
+                                                            className="animate-spin"
+                                                          />
+                                                        ) : (
+                                                          'Confirm'
+                                                        )}
+                                                      </button>
+                                                    </div>
+                                                  </div>
+                                                ) : (
+                                                  <button
+                                                    onClick={() =>
+                                                      setConfirmingCreate(
+                                                        item.id
+                                                      )
+                                                    }
+                                                    className="w-full py-2.5 px-3 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 rounded-lg text-[9px] font-black uppercase tracking-widest border border-blue-500/30 transition-all flex items-center justify-center gap-2 group"
+                                                  >
+                                                    <Sparkles
+                                                      size={12}
+                                                      className="group-hover:rotate-12 transition-transform"
+                                                    />
+                                                    <span>
+                                                      Quick Register & Map
+                                                    </span>
+                                                  </button>
+                                                )}
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      ) : (
+        //END OF ORDER VIEW
+        //START OF DAY VIEW
+        <div className="space-y-4">
+          {daySummary.map((day) => (
+            <div
+              key={day.date}
+              className="rounded-2xl border border-white/5 bg-slate-950/40 overflow-hidden shadow-xl"
+            >
+              {/* DAY SUMMARY HEADER */}
+              <button
+                onClick={() =>
+                  setExpandedRow(expandedRow === day.date ? null : day.date)
+                }
+                className="w-full grid grid-cols-2 md:grid-cols-6 p-5 items-center hover:bg-white/[0.02] transition-all group text-left"
+              >
+                <div className="flex items-center gap-3">
+                  <Calendar size={16} className="text-blue-500" />
+                  <span className="text-sm font-black text-slate-200 uppercase tracking-tighter">
+                    {day.date || 'Unknown Date'}
+                  </span>
+                </div>
+
+                {/* Generic Sales - Strictly from order_items */}
+                <div className="hidden md:block text-[9px] font-bold text-slate-500 uppercase text-center">
+                  Gen:{' '}
+                  <span className="text-slate-300">
+                    ₱{(day.genericSales ?? 0).toLocaleString()}
+                  </span>
+                </div>
+
+                {/* Branded Sales - Strictly from order_items */}
+                <div className="hidden md:block text-[9px] font-bold text-slate-500 uppercase text-center">
+                  Brand:{' '}
+                  <span className="text-slate-300">
+                    ₱{(day.brandedSales ?? 0).toLocaleString()}
+                  </span>
+                </div>
+
+                {/* Total Gross - Sum of (Gen + Brand) */}
+                <div className="hidden md:block text-[9px] font-bold text-slate-500 uppercase text-center">
+                  Gross:{' '}
+                  <span className="text-slate-300">
+                    ₱{(day.totalSales ?? 0).toLocaleString()}
+                  </span>
+                </div>
+
+                {/* Total Discounts for the day */}
+                <div className="hidden md:block text-[9px] font-bold text-red-500/70 uppercase text-center">
+                  Disc: -₱{(day.discount ?? 0).toLocaleString()}
+                </div>
+
+                <div className="text-right flex items-center justify-end gap-3">
+                  {/* Final Net Total: Gross - Discount */}
+                  <span className="text-emerald-400 font-mono font-bold text-sm">
+                    ₱{(day.actualSales ?? 0).toLocaleString()}
+                  </span>
+                  {expandedRow === day.date ? (
+                    <ChevronUp size={14} className="text-slate-700" />
+                  ) : (
+                    <ChevronDown size={14} className="text-slate-700" />
+                  )}
+                </div>
+              </button>
+
+              {/* EXPANDED SALES ORDERS */}
+              {expandedRow === day.date && (
+                <div className="border-t border-white/5 bg-black/20 p-4 overflow-x-auto">
+                  <table className="w-full border-separate border-spacing-y-1">
+                    <thead>
+                      <tr className="text-[9px] font-black text-slate-600 uppercase tracking-[0.2em] border-b border-white/5">
+                        <th className="text-left px-4 py-2">Item Name</th>
+                        <th className="text-center w-12">Qty</th>
+                        <th className="text-right w-20">Gross</th>
+                        <th className="text-right w-20">Discount</th>
+                        <th className="text-right w-24 text-emerald-500/80">
+                          Actual
+                        </th>
+                        <th className="text-left w-32 px-4">Client / Staff</th>
+                        <th className="text-center w-16">Status</th>
+                        <th className="text-right w-36">Order # / Time</th>
+                        <th className="text-right px-4 w-32">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {day.orders.map((so: any) => {
+                        const items = so.order_items || [];
+
+                        return (
+                          <React.Fragment key={so.id}>
+                            {items.map((item: any, idx: number) => {
+                              const actualTotal = item.subtotal || 0;
+                              const grossTotal =
+                                (item.quantity || 0) * (item.unit_price || 0);
+                              const itemDiscount = grossTotal - actualTotal;
+
+                              return (
+                                <tr
+                                  key={item.id}
+                                  className="bg-slate-900/30 hover:bg-slate-800/40 transition-colors group/row text-left"
+                                >
+                                  {/* 1. ITEM NAME */}
+                                  <td className="px-4 py-3 text-[11px] font-medium text-slate-300 border-l-2 border-transparent group-hover/row:border-blue-500">
+                                    <div className="flex flex-col">
+                                      <span className="text-[9px] font-bold text-blue-500/50 uppercase tracking-tighter">
+                                        {item.type || 'N/A'}
+                                      </span>
+                                      {item.inventory?.item_name ||
+                                        'UNKNOWN PRODUCT'}
+                                    </div>
+                                  </td>
+
+                                  {/* 2. QTY */}
+                                  <td className="text-center font-mono text-[11px] text-slate-500">
+                                    {item.quantity}
+                                  </td>
+
+                                  {/* 3. GROSS */}
+                                  <td className="text-right font-mono text-[11px] text-slate-500/60 line-through">
+                                    ₱{grossTotal.toLocaleString()}
+                                  </td>
+
+                                  {/* 4. ITEM DISCOUNT */}
+                                  <td className="text-right font-mono text-[11px] text-red-400 font-bold">
+                                    {itemDiscount > 0 ? (
+                                      `-₱${itemDiscount.toLocaleString()}`
+                                    ) : (
+                                      <span className="opacity-10">—</span>
+                                    )}
+                                  </td>
+
+                                  {/* 5. ACTUAL (Emerald Green) */}
+                                  <td className="text-right font-mono text-[11px] text-emerald-400 font-black">
+                                    ₱{actualTotal.toLocaleString()}
+                                  </td>
+
+                                  {/* 6. CLIENT NAME & STAFF (Order Level) */}
+                                  {idx === 0 && (
+                                    <td
+                                      rowSpan={items.length}
+                                      className="px-4 py-3 align-middle border-x border-white/5 bg-slate-950/20"
+                                    >
+                                      <div className="text-[11px] font-bold text-slate-200 truncate w-32">
+                                        {so.client_name || 'Walk-in Customer'}
+                                      </div>
+                                      <div className="text-[9px] text-slate-500 font-medium flex items-center gap-1 mt-0.5">
+                                        <User
+                                          size={10}
+                                          className="opacity-50"
+                                        />
+                                        <span
+                                          className="truncate w-24"
+                                          title={so.created_by}
+                                        >
+                                          {so.created_by || 'System'}
+                                        </span>
+                                      </div>
+                                    </td>
+                                  )}
+
+                                  {/* 7. VERIFICATION STATUS (Using is_checked) */}
+                                  {idx === 0 && (
+                                    <td
+                                      rowSpan={items.length}
+                                      className="text-center align-middle bg-slate-950/20 px-2"
+                                    >
+                                      {so.is_checked ? (
+                                        <div className="flex flex-col items-center gap-0.5 text-emerald-500">
+                                          <ShieldCheck
+                                            size={18}
+                                            weight="fill"
+                                          />
+                                          <span className="text-[7px] font-black uppercase tracking-widest">
+                                            Verified
+                                          </span>
+                                        </div>
+                                      ) : (
+                                        <div className="flex flex-col items-center gap-0.5 text-slate-600">
+                                          <ShieldAlert size={18} />
+                                          <span className="text-[7px] font-black uppercase tracking-widest">
+                                            Pending
+                                          </span>
+                                        </div>
+                                      )}
+                                    </td>
+                                  )}
+
+                                  {/* 8. ORDER NUMBER & TIME (Large Blue Font) */}
+                                  {idx === 0 && (
+                                    <td
+                                      rowSpan={items.length}
+                                      className="text-right px-4 bg-blue-500/5 align-middle border-x border-white/5"
+                                    >
+                                      <div className="text-blue-400 font-black text-[14px] leading-tight tracking-tight">
+                                        {so.order_number || 'N/A'}
+                                      </div>
+                                      <div className="text-slate-300 text-[11px] font-bold font-mono mt-1 uppercase tracking-wider">
+                                        {new Date(
+                                          so.created_at
+                                        ).toLocaleTimeString([], {
+                                          hour: '2-digit',
+                                          minute: '2-digit',
+                                        })}
+                                      </div>
+                                    </td>
+                                  )}
+
+                                  {/* 9. ACTIONS (Restricted by canVerify logic) */}
+                                  {idx === 0 && (
+                                    <td
+                                      rowSpan={items.length}
+                                      className="text-right px-4 py-3 bg-blue-500/5 border-r-2 border-blue-600 align-middle min-w-[160px]"
+                                    >
+                                      {/* Use the same canVerify check from your Order View */}
+                                      {[
+                                        'branch_admin',
+                                        'org_manager',
+                                        'super_admin',
+                                      ].includes(currentUser?.role) ? (
+                                        <div className="flex justify-end items-center gap-1.5 transition-all">
+                                          {/* 1. DATE EDIT MODE */}
+                                          {isEditingDate === so.id ? (
+                                            <div className="flex items-center gap-1 bg-slate-900 p-1.5 rounded-lg border border-blue-500/50">
+                                              <input
+                                                type="date"
+                                                value={tempDate}
+                                                onChange={(e) =>
+                                                  setTempDate(e.target.value)
+                                                }
+                                                className="bg-transparent text-blue-400 text-[10px] font-mono outline-none w-28 appearance-none"
+                                              />
+                                              <button
+                                                onClick={() => {
+                                                  handleChangeDate(
+                                                    so,
+                                                    tempDate
+                                                  );
+                                                  setIsEditingDate(null);
+                                                }}
+                                                className="text-emerald-500 hover:bg-emerald-500/20 p-1 rounded"
+                                              >
+                                                <Check
+                                                  size={16}
+                                                  strokeWidth={3}
+                                                />
+                                              </button>
+                                              <button
+                                                onClick={() =>
+                                                  setIsEditingDate(null)
+                                                }
+                                                className="text-red-500 p-1"
+                                              >
+                                                <XCircle size={16} />
+                                              </button>
+                                            </div>
+                                          ) : /* 2. BRANCH EDIT MODE */
+                                          isEditingBranch === so.id ? (
+                                            <div className="flex items-center gap-1 bg-slate-900 p-1.5 rounded-lg border border-amber-500/50 shadow-lg shadow-amber-500/10">
+                                              <select
+                                                value={
+                                                  tempBranchId
+                                                    ? String(tempBranchId)
+                                                    : ''
+                                                }
+                                                onChange={(e) =>
+                                                  setTempBranchId(
+                                                    e.target.value
+                                                  )
+                                                }
+                                                className="bg-slate-900 text-amber-400 text-[10px] outline-none w-28 cursor-pointer"
+                                              >
+                                                <option
+                                                  value=""
+                                                  className="bg-slate-900 text-slate-500"
+                                                >
+                                                  Select Branch...
+                                                </option>
+                                                {availableBranches?.map(
+                                                  (b: any) => (
+                                                    <option
+                                                      key={String(b.id)}
+                                                      value={String(b.id)}
+                                                      className="bg-slate-900 text-white"
+                                                    >
+                                                      {b.branch_name}
+                                                    </option>
+                                                  )
+                                                )}
+                                              </select>
+                                              <button
+                                                onClick={() => {
+                                                  handleChangeBranch(
+                                                    so,
+                                                    tempBranchId
+                                                  );
+                                                  setIsEditingBranch(null);
+                                                }}
+                                                className="text-emerald-500 p-1 hover:bg-emerald-500/20 rounded"
+                                              >
+                                                <Check
+                                                  size={16}
+                                                  strokeWidth={3}
+                                                />
+                                              </button>
+                                              <button
+                                                onClick={() =>
+                                                  setIsEditingBranch(null)
+                                                }
+                                                className="text-red-500 p-1"
+                                              >
+                                                <XCircle size={16} />
+                                              </button>
+                                            </div>
+                                          ) : (
+                                            /* 3. DEFAULT STATE (Icons) */
+                                            <div className="flex justify-end gap-1.5 opacity-40 group-hover/row:opacity-100 transition-opacity">
+                                              {!so.is_checked && (
+                                                <button
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    handleVerifyOrder(so.id);
+                                                  }}
+                                                  className="p-2 bg-slate-950 border border-white/5 rounded-lg hover:text-emerald-400"
+                                                >
+                                                  {isVerifying === so.id ? (
+                                                    <Loader2
+                                                      className="animate-spin"
+                                                      size={18}
+                                                    />
+                                                  ) : (
+                                                    <ShieldCheck size={18} />
+                                                  )}
+                                                </button>
+                                              )}
+
+                                              <button
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  setIsEditingDate(so.id);
+                                                  setTempDate(
+                                                    so.created_date_pht || ''
+                                                  );
+                                                }}
+                                                className="p-2 bg-slate-950 border border-white/5 rounded-lg hover:text-blue-400"
+                                              >
+                                                <Calendar size={18} />
+                                              </button>
+
+                                              <button
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  setIsEditingBranch(so.id);
+                                                  setTempBranchId(
+                                                    so.branch_id
+                                                      ? String(so.branch_id)
+                                                      : ''
+                                                  );
+                                                }}
+                                                className="p-2 bg-slate-950 border border-white/5 rounded-lg hover:text-amber-400"
+                                              >
+                                                <Store size={18} />
+                                              </button>
+                                            </div>
+                                          )}
+                                        </div>
+                                      ) : (
+                                        /* Fallback for Staff/Unauthorized users */
+                                        <div className="flex justify-end items-center gap-2 opacity-30">
+                                          <span className="text-[9px] font-black uppercase tracking-tighter text-slate-500">
+                                            {so.is_checked
+                                              ? 'Verified'
+                                              : 'Read Only'}
+                                          </span>
+                                          {so.is_checked ? (
+                                            <ShieldCheck
+                                              size={14}
+                                              className="text-emerald-500"
+                                            />
+                                          ) : (
+                                            <Clock
+                                              size={14}
+                                              className="text-slate-500"
+                                            />
+                                          )}
+                                        </div>
+                                      )}
+                                    </td>
+                                  )}
+                                </tr>
+                              );
+                            })}
+                          </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        //END OF DAY VIEW
+      )}
+
+      {/* FOOTER NAVIGATION */}
+      <div className="flex flex-col sm:flex-row justify-between items-center px-2 gap-4 mt-6">
+        <p className="text-[9px] font-black text-slate-700 uppercase tracking-widest">
+          {loading ? 'SYNCING...' : `TOTAL_SOs: ${orders.length}`}
         </p>
+
         <div className="flex items-center gap-2">
+          {/* PREVIOUS BUTTON */}
           <button
-            disabled={currentPage === 0 || loading}
-            onClick={() => setCurrentPage((prev) => prev - 1)}
-            className="p-2 bg-slate-900/50 border border-white/5 rounded-lg disabled:opacity-20 hover:bg-blue-600/20 text-blue-500 transition-all"
+            disabled={loading || (view === 'order' && currentPage === 0)}
+            onClick={() => {
+              if (view === 'order') {
+                setCurrentPage((p) => Math.max(0, p - 1));
+              } else {
+                // DAY VIEW: Safely calculate previous month
+                const baseDate = currentMonth || new Date();
+                setCurrentMonth(
+                  new Date(baseDate.getFullYear(), baseDate.getMonth() - 1, 1)
+                );
+                setCurrentPage(0);
+              }
+            }}
+            className="p-2 bg-slate-900/50 border border-white/5 rounded-lg disabled:opacity-20 text-blue-500"
           >
             <ChevronLeft size={16} />
           </button>
-          <div className="bg-slate-900/50 border border-white/5 px-4 py-1.5 rounded-lg font-mono text-[10px] font-black uppercase text-slate-400">
-            PAGE {currentPage + 1}{' '}
-            <span className="text-slate-800 mx-1">/</span>{' '}
-            {Math.ceil(totalCount / pageSize)}
+
+          <div className="flex flex-col items-center">
+            <div className="bg-slate-900/50 border border-white/5 px-4 py-1.5 rounded-lg font-mono text-[10px] font-black uppercase text-slate-400 min-w-[140px] text-center">
+              {view === 'order' ? (
+                <>
+                  PAGE {currentPage + 1} /{' '}
+                  {Math.max(1, Math.ceil(orders.length / 10))}
+                </>
+              ) : (
+                /* Safeguard UI with Optional Chaining and Fallback */
+                currentMonth?.toLocaleString('default', {
+                  month: 'long',
+                  year: 'numeric',
+                }) || 'LOADING...'
+              )}
+            </div>
+            {view === 'day' && (
+              <button
+                onClick={() => setCurrentMonth(new Date())}
+                className="text-[9px] text-blue-500 mt-1 uppercase font-black"
+              >
+                Jump to Today
+              </button>
+            )}
           </div>
+
+          {/* NEXT BUTTON */}
           <button
-            disabled={(currentPage + 1) * pageSize >= totalCount || loading}
-            onClick={() => setCurrentPage((prev) => prev + 1)}
-            className="p-2 bg-slate-900/50 border border-white/5 rounded-lg disabled:opacity-20 hover:bg-blue-600/20 text-blue-500 transition-all"
+            disabled={
+              loading ||
+              (view === 'order' && (currentPage + 1) * 10 >= orders.length)
+            }
+            onClick={() => {
+              if (view === 'order') {
+                setCurrentPage((p) => p + 1);
+              } else {
+                // DAY VIEW: Safely calculate next month
+                const baseDate = currentMonth || new Date();
+                setCurrentMonth(
+                  new Date(baseDate.getFullYear(), baseDate.getMonth() + 1, 1)
+                );
+                setCurrentPage(0);
+              }
+            }}
+            className="p-2 bg-slate-900/50 border border-white/5 rounded-lg disabled:opacity-20 text-blue-500"
           >
             <ChevronRight size={16} />
           </button>

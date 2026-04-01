@@ -280,16 +280,25 @@ export default function NewPurchaseOrder() {
     const disc = Math.max(0, parseFloat(item.discount as any) || 0);
     const currentMarkup = parseFloat(item.markup as any) || 0;
 
-    item.buy_cost_total = qty * invPrice - disc;
-    item.buy_cost = qty * pack > 0 ? item.buy_cost_total / (qty * pack) : 0;
+    // 1. Calculate Total Buy Cost and round to 2 decimal places
+    const rawTotal = qty * invPrice - disc;
+    item.buy_cost_total = Math.round(rawTotal * 100) / 100;
 
-    // Suggested retail price rounded up to the nearest whole Peso
+    // 2. Calculate Unit Buy Cost and round to 2 decimal places
+    const totalUnits = qty * pack;
+    if (totalUnits > 0) {
+      const rawUnitCost = item.buy_cost_total / totalUnits;
+      item.buy_cost = Math.round(rawUnitCost * 100) / 100;
+    } else {
+      item.buy_cost = 0;
+    }
+
+    // 3. Suggested retail price remains rounded up to the nearest whole Peso
     item.new_price = Math.ceil(item.buy_cost * (1 + currentMarkup / 100));
 
     newItems[index] = item;
     setItems(newItems);
   };
-
   const handleQuickAdd = async (index: number) => {
     const item = items[index];
     if (!item.item_name || !currentBranchId) return;
@@ -752,7 +761,7 @@ export default function NewPurchaseOrder() {
                     <tr
                       key={idx}
                       className={`group hover:bg-white/[0.02] transition-colors relative ${
-                        activeSearchIndex === idx ? 'z-[50]' : 'z-0'
+                        activeSearchIndex === idx ? 'z-' : 'z-0'
                       }`}
                     >
                       <td className="px-1 relative">
@@ -780,7 +789,7 @@ export default function NewPurchaseOrder() {
                         />
 
                         {activeSearchIndex === idx && (
-                          <div className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z-[100] max-h-64 overflow-y-auto p-1 shadow-2xl">
+                          <div className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z- max-h-64 overflow-y-auto p-1 shadow-2xl">
                             {inventoryList
                               .filter(
                                 (i) =>
@@ -879,17 +888,17 @@ export default function NewPurchaseOrder() {
                           }
                         />
                       </td>
+                      {/* Unit Buy Cost - Limited to 2 Decimal Places */}
                       <td className="px-1 text-right font-black text-indigo-300 text-[12px]">
-                        ₱{item.buy_cost.toFixed(2)}
+                        ₱{(item.buy_cost || 0).toFixed(2)}
                       </td>
+                      {/* Total Buy Cost - Limited to 2 Decimal Places */}
                       <td className="px-1 text-right font-black text-white text-[12px]">
-                        ₱
-                        {(item.buy_cost_total || 0).toLocaleString(undefined, {
-                          minimumFractionDigits: 2,
-                        })}
+                        ₱{(item.buy_cost_total || 0).toFixed(2)}
                       </td>
+                      {/* Current Price - Limited to 2 Decimal Places */}
                       <td className="px-1 text-right font-bold text-indigo-400/60 text-[12px]">
-                        ₱{item.current_price.toFixed(2)}
+                        ₱{(item.current_price || 0).toFixed(2)}
                       </td>
                       <td className="px-1">
                         <input
@@ -901,8 +910,9 @@ export default function NewPurchaseOrder() {
                           }
                         />
                       </td>
+                      {/* New Suggested Price - Limited to 2 Decimal Places */}
                       <td className="px-1 text-right font-black text-emerald-400 text-[12px]">
-                        ₱{item.new_price.toFixed(2)}
+                        ₱{(item.new_price || 0).toFixed(2)}
                       </td>
                       <td className="px-1 text-center text-slate-500 text-[11px] font-black">
                         {item.remaining_stock}
