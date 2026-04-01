@@ -327,108 +327,57 @@ export default function NewPurchaseOrder() {
   };
 
   const handleAiUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const file = e.target.files?.;
     if (!file) return;
-
-    console.log('File detected:', file.name, file.type);
+  
     setIsScanning(true);
-
+  
     try {
       const reader = new FileReader();
-
-      reader.onload = async () => {
-        console.log('Sending to AI...');
-        // Add the at the very end of the line
-        const base64Data = (reader.result as string).split(',');
-
-        // Now 'base64Data' is a string, and this call will stop throwing the error:
-        const extracted = await parseInvoiceImage(result, file.type);
-        console.log('AI Extraction Raw Result:', extracted);
-
-        // 2. Data Structure Normalization
-        // Sometimes AI returns { items: [...] } instead of just [...]
-        const rawData = Array.isArray(extracted)
-          ? extracted
-          : extracted && typeof extracted === 'object'
-          ? Object.values(extracted).find((val) => Array.isArray(val))
-          : null;
-
-        if (rawData && Array.isArray(rawData) && rawData.length > 0) {
-          const aiMappedItems = rawData.map((aiItem: any) => {
-            const cleanNum = (val: any) => {
-              if (typeof val === 'number') return val;
-              const parsed = parseFloat(
-                String(val || '0').replace(/[^0-9.]/g, '')
-              );
-              return isNaN(parsed) ? 0 : parsed;
-            };
-
-            // 3. Key Normalization (AI might use 'description' or 'product' instead of 'item_name')
-            const incomingName =
-              aiItem.item_name ||
-              aiItem.name ||
-              aiItem.description ||
-              aiItem.product ||
-              'Unknown Item';
-            const aiName = incomingName.toLowerCase().trim();
-
-            // Match with Pharmacy Inventory
-            const match = inventoryList.find(
-              (inv) =>
-                inv.item_name.toLowerCase().includes(aiName) &&
-                aiName.length > 2
-            );
-
-            const qty = cleanNum(aiItem.qty || aiItem.quantity) || 1;
-            const invPrice =
-              cleanNum(
-                aiItem.invoice_price ||
-                  aiItem.unit_price ||
-                  aiItem.price ||
-                  aiItem.cost
-              ) || 0;
-            const pack = match?.packaging_type || 1;
-            const itemType = (match?.item_type || 'GENERIC').toUpperCase();
-            const itemName = match?.item_name || incomingName;
-
-            // Apply Business Rules (50% Generic, 10-15% Branded)
-            const markup = calculateMarkup(itemType, itemName);
-            const buy_cost_total = qty * invPrice;
-            const buy_cost = qty * pack > 0 ? buy_cost_total / (qty * pack) : 0;
-            const new_price = Math.ceil(buy_cost * (1 + markup / 100));
-
-            return {
-              ...EMPTY_ITEM,
-              inventory_id: match?.id || '',
-              item_name: itemName,
-              item_type: itemType,
-              qty: qty,
-              packaging_type: pack,
-              invoice_price: invPrice,
-              markup: markup,
-              buy_cost_total: buy_cost_total,
-              buy_cost: buy_cost,
-              new_price: new_price,
-              current_price: match?.price || 0,
-              remaining_stock: match?.stock || 0,
-            };
-          });
-
-          setItems(aiMappedItems);
-          setSearchTerms(aiMappedItems.map((i) => i.item_name));
-          console.log('Mapping complete.');
-        } else {
-          console.error('Invalid AI Format. Received:', extracted);
-          alert(
-            'The AI could not read items from this image. Please try a clearer photo or a smaller file.'
-          );
+  
+      // This triggers once the file is fully read into memory
+      reader.onload = async (event) => {
+        // Use event.target.result to safely access the data
+        const fileData = event.target?.result;
+  
+        if (typeof fileData !== 'string') {
+          console.error('Data error: Result is not a string');
+          setIsScanning(false);
+          return;
         }
-        setIsScanning(false);
+  
+        try {
+          // Pass the full string (including 'data:image...') to your action
+          const extracted = await parseInvoiceImage(fileData, file.type);
+  
+          if (extracted && Array.isArray(extracted)) {
+            // Map AI response to your items state
+            const aiMappedItems = extracted.map((extractedItem: any) => ({
+              ...EMPTY_ITEM,
+              item_name: extractedItem.item_name || '',
+              qty: extractedItem.qty || 1,
+              invoice_price: extractedItem.invoice_price || 0,
+              // Trigger auto-markup logic based on the extracted name
+              markup: calculateMarkup('GENERIC', extractedItem.item_name),
+            }));
+  
+            setItems(aiMappedItems);
+            setSearchTerms(aiMappedItems.map((i) => i.item_name));
+          } else {
+            alert('The AI could not identify items in this image.');
+          }
+        } catch (err) {
+          console.error('AI Extraction Failed:', err);
+        } finally {
+          setIsScanning(false);
+        }
       };
-
+  
+      // Read the file - this starts the onload process
       reader.readAsDataURL(file);
+  
     } catch (err) {
-      console.error('AI Processing Error:', err);
+      console.error('File Reader Error:', err);
       setIsScanning(false);
     }
   };
