@@ -82,7 +82,7 @@ const TableSkeleton = () => (
         <td className="px-1">
           <div className="h-10 bg-white/5 rounded-lg w-full" />
         </td>
-        {[...Array(8)].map((_, j) => (
+        {[...Array(9)].map((_, j) => (
           <td key={j} className="px-1">
             <div className="h-8 bg-white/5 rounded-lg w-full mx-auto" />
           </td>
@@ -730,6 +730,9 @@ export default function NewPurchaseOrder() {
                   <th className="p-5 text-right w-[110px] text-indigo-300">
                     Net Cost
                   </th>
+                  <th className="p-5 text-right w-[120px] text-white font-black">
+                    Total
+                  </th>
                   <th className="p-5 text-right w-[110px] text-indigo-400">
                     Current
                   </th>
@@ -878,6 +881,12 @@ export default function NewPurchaseOrder() {
                       </td>
                       <td className="px-1 text-right font-black text-indigo-300 text-[12px]">
                         ₱{item.buy_cost.toFixed(2)}
+                      </td>
+                      <td className="px-1 text-right font-black text-white text-[12px]">
+                        ₱
+                        {(item.buy_cost_total || 0).toLocaleString(undefined, {
+                          minimumFractionDigits: 2,
+                        })}
                       </td>
                       <td className="px-1 text-right font-bold text-indigo-400/60 text-[12px]">
                         ₱{item.current_price.toFixed(2)}
