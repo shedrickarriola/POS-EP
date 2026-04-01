@@ -73,32 +73,30 @@ const calculateMarkup = (
 };
 
 const getLevenshteinDistance = (a: string, b: string): number => {
-  const alen = a.length;
-  const blen = b.length;
-  if (alen === 0) return blen;
-  if (blen === 0) return alen;
+  const s1 = a.toLowerCase();
+  const s2 = b.toLowerCase();
+  const len1 = s1.length;
+  const len2 = s2.length;
 
-  // Initialize a 2D array (matrix)
-  const matrix = Array.from({ length: alen + 1 }, () =>
-    new Array(blen + 1).fill(0)
+  // Initialize the matrix properly as a 2D array of numbers
+  const matrix = Array.from({ length: len1 + 1 }, () =>
+    new Array(len2 + 1).fill(0)
   );
 
-  // Fill first row and column
-  for (let i = 0; i <= alen; i++) matrix[i] = i;
-  for (let j = 0; j <= blen; j++) matrix[j] = j;
+  for (let i = 0; i <= len1; i++) matrix[i] = i;
+  for (let j = 0; j <= len2; j++) matrix[j] = j;
 
-  // Calculate distances
-  for (let i = 1; i <= alen; i++) {
-    for (let j = 1; j <= blen; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+  for (let i = 1; i <= len1; i++) {
+    for (let j = 1; j <= len2; j++) {
+      const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
       matrix[i][j] = Math.min(
-        matrix[i - 1][j] + 1, // Deletion
-        matrix[i][j - 1] + 1, // Insertion
-        matrix[i - 1][j - 1] + cost // Substitution
+        matrix[i - 1][j] + 1, // deletion
+        matrix[i][j - 1] + 1, // insertion
+        matrix[i - 1][j - 1] + cost // substitution
       );
     }
   }
-  return matrix[alen][blen];
+  return matrix[len1][len2];
 };
 const TableSkeleton = () => (
   <>
@@ -378,42 +376,42 @@ export default function NewPurchaseOrder() {
             let bestMatch = null;
             let minDistance = 100;
 
-            // Find the closest item in your local inventoryList
-            inventoryList.forEach((inv) => {
-              const distance = getLevenshteinDistance(
-                aiName.toLowerCase(),
-                inv.item_name.toLowerCase()
-              );
-              if (distance < minDistance) {
-                minDistance = distance;
-                bestMatch = inv;
-              }
-            });
+            // 1. Safe check for inventoryList
+            if (Array.isArray(inventoryList)) {
+              inventoryList.forEach((inv) => {
+                if (!inv.item_name) return;
+                const distance = getLevenshteinDistance(aiName, inv.item_name);
+                if (distance < minDistance) {
+                  minDistance = distance;
+                  bestMatch = inv;
+                }
+              });
+            }
 
-            // Threshold Logic:
-            // 0-2: High Confidence (Green)
-            // 3-6: Probable Match (Orange)
-            // 7+: No Match (Red)
+            // 2. Threshold Logic
             const isReliable = minDistance <= 6;
             const matchedItem = isReliable ? bestMatch : null;
 
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
+
+            // 3. Fallback to AI name if no match found
+            const finalName = matchedItem?.item_name || aiName;
             const markupVal = calculateMarkup(
               matchedItem?.item_type || 'GENERIC',
-              matchedItem?.item_name || aiName
+              finalName
             );
 
             return {
               ...EMPTY_ITEM,
               inventory_id: matchedItem?.id || '',
-              item_name: matchedItem?.item_name || aiName,
+              item_name: finalName,
               item_type: (matchedItem?.item_type || 'GENERIC').toUpperCase(),
               qty: qty,
               invoice_price: price,
               buy_cost: price,
               buy_cost_total: qty * price,
-              match_score: minDistance, // Store this to drive UI colors
+              match_score: minDistance, // Powers the Green/Orange/Red UI
               markup: markupVal,
               new_price: Math.ceil(price * (1 + markupVal / 100)),
               current_price: matchedItem?.price || 0,
@@ -426,6 +424,7 @@ export default function NewPurchaseOrder() {
         }
       } catch (err) {
         console.error('AI Extraction Failed:', err);
+        alert('Error processing image data. Please check console.');
       } finally {
         setIsScanning(false);
         if (e.target) e.target.value = '';
