@@ -1,14 +1,13 @@
 'use server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-// Server-side only: Key must be in Vercel Dashboard
 const getApiKey = () => process.env.GEMINI_API_KEY;
 
 export async function parseInvoiceImage(base64Data: string, mimeType: string) {
   const apiKey = getApiKey();
 
   if (!apiKey) {
-    console.error('SERVER ERROR: GEMINI_API_KEY is not defined in Vercel');
+    console.error('SERVER ERROR: API Key missing in Vercel environment');
     return null;
   }
 
@@ -22,39 +21,35 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
       },
     });
 
-    // 1. Ensure data is a pure string and NOT an array
-    const sanitizedData = base64Data.includes(',') 
-      ? base64Data.split(',') 
-      : base64Data;
+    // 1. HARD-STRIP THE BASE64: Ensure this is a PURE string.
+    // We use .pop() to guarantee we get the string, not an array.
+    const pureBase64 = base64Data.split(',').pop() || '';
 
-    // 2. Ensure MIME type is clean and supported (e.g. image/jpeg)
-    const sanitizedMimeType = mimeType.toLowerCase().trim();
+    // 2. STABILIZE MIME TYPE: API expects lowercase 'image/jpeg' etc.
+    const cleanMime = mimeType.toLowerCase().trim();
 
-    const prompt = `
-      Extract pharmacy invoice items: "item_name" (string), "qty" (number), "invoice_price" (number). 
-      Handle pharmaceutical shorthand. Return ONLY a JSON array.
-    `;
-
-    // 3. The "Legacy" Array Format: This is the most stable way to prevent "cannot start list"
+    // 3. THE "STRICT" PAYLOAD: Each part is a clearly defined object.
     const result = await model.generateContent([
-      prompt, // Pass as a direct string part
+      {
+        text: "Extract pharmacy items (item_name, qty, invoice_price) from this invoice. Return ONLY a JSON array."
+      },
       {
         inlineData: {
-          data: sanitizedData, 
-          mimeType: sanitizedMimeType,
+          data: pureBase64, // Must be a raw string
+          mimeType: cleanMime,
         },
-      },
+      }
     ]);
 
     const response = await result.response;
     const text = response.text();
 
-    // With responseMimeType set to application/json, parse directly
+    // Since we set responseMimeType: 'application/json', we parse directly.
     return JSON.parse(text);
 
   } catch (error: any) {
     console.error('IMAGE SCAN ERROR:', error.message);
-    // If the error persists, it's almost certainly the format of 'base64Data' string itself
+    // If you see "400" again, check if 'base64Data' is empty on the frontend.
     return null;
   }
 }
@@ -70,9 +65,9 @@ export async function parseInvoiceText(pastedText: string) {
       generationConfig: { responseMimeType: 'application/json' },
     });
 
-    const prompt = `Extract items from this text. Return ONLY a JSON array with keys "item_name" and "qty". Text: ${pastedText}`;
-
-    const result = await model.generateContent(prompt);
+    const result = await model.generateContent(
+      `Extract pharmacy items as JSON array (item_name, qty): ${pastedText}`
+    );
     const response = await result.response;
     return JSON.parse(response.text());
   } catch (error: any) {
