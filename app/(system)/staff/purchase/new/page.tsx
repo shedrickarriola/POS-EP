@@ -106,6 +106,26 @@ const getLevenshteinDistance = (a: string, b: string): number => {
 
   return matrix[s1.length][s2.length];
 };
+// Smart normalization for medicine names - keeps strength (mg/ml) but removes common noise
+const normalizeMedicineName = (name: string): string => {
+  if (!name) return '';
+
+  return (
+    name
+      .toLowerCase()
+      .trim()
+      // Remove common dosage forms and units that AI often adds
+      .replace(
+        /\b(tab|tablet|cap|capsule|syrup|susp|suspension|tab\.)s?\b/gi,
+        ''
+      )
+      .replace(/\b(mg|ml|gm|g|mcg|iu|amp| vial|strip|box)\b/gi, ' $1 ') // keep mg/ml but normalize spacing
+      // Remove extra punctuation and collapse spaces
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  );
+};
 const findBestInventoryMatch = (aiName: string, inventoryList: any[]) => {
   if (!aiName || !Array.isArray(inventoryList) || inventoryList.length === 0) {
     return { bestMatch: null, score: 999 };
@@ -431,6 +451,7 @@ export default function NewPurchaseOrder() {
         if (extracted && Array.isArray(extracted)) {
           const aiMappedItems = extracted.map((extractedItem: any) => {
             const aiName = (extractedItem.item_name || '').trim();
+            const normalizedAi = normalizeMedicineName(aiName);
 
             let bestMatch: any = null;
             let bestScore = 999;
@@ -439,21 +460,19 @@ export default function NewPurchaseOrder() {
               for (const inv of inventoryList) {
                 if (!inv?.item_name) continue;
 
-                let distance = getLevenshteinDistance(aiName, inv.item_name);
+                const normalizedDb = normalizeMedicineName(inv.item_name);
 
-                const aiLower = aiName.toLowerCase();
-                const dbLower = inv.item_name.toLowerCase();
+                let distance = getLevenshteinDistance(
+                  normalizedAi,
+                  normalizedDb
+                );
 
-                // Smart bonuses for common pharmacy name variations
-                if (aiLower.includes(dbLower) || dbLower.includes(aiLower)) {
-                  distance = Math.min(distance, 5);
-                }
-
-                // Very tolerant if they are almost the same after removing spaces
+                // Bonus if one normalized name is mostly contained in the other
                 if (
-                  aiLower.replace(/\s+/g, '') === dbLower.replace(/\s+/g, '')
+                  normalizedAi.includes(normalizedDb) ||
+                  normalizedDb.includes(normalizedAi)
                 ) {
-                  distance = Math.min(distance, 3);
+                  distance = Math.min(distance, 4);
                 }
 
                 if (distance < bestScore) {
@@ -461,15 +480,15 @@ export default function NewPurchaseOrder() {
                   bestMatch = inv;
                 }
 
-                if (distance === 0) break;
+                if (distance === 0) break; // perfect match
               }
             }
 
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
 
-            // More lenient threshold - most real cases should now match
-            const matchedItem = bestScore <= 18 ? bestMatch : null;
+            // Lenient but safer threshold after normalization
+            const matchedItem = bestScore <= 12 ? bestMatch : null;
 
             const finalName = matchedItem?.item_name || aiName;
             const markupVal = calculateMarkup(
