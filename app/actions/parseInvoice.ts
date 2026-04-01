@@ -1,63 +1,37 @@
 'use server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-// Server-side only: Ensure GEMINI_API_KEY is set in Vercel Project Settings
-const getApiKey = () => process.env.GEMINI_API_KEY;
-
-/**
- * FIXED: Returns the actual Base64 STRING at index 1.
- * Previous version was returning the whole array.
- */
-const cleanBase64 = (base64String: string): string => {
-  if (base64String.includes(',')) {
-    // split returns [header, data]. We ONLY want the data string at index 1.
-    return base64String.split(','); 
-  }
-  return base64String;
-};
-
 export async function parseInvoiceImage(base64Data: string, mimeType: string) {
-  const apiKey = getApiKey();
+  const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
 
   if (!apiKey) {
-    console.error('SERVER ERROR: API Key missing in environment variables');
+    console.error('API Key missing');
     return null;
   }
 
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
+
+    // FIX: Reverted to a valid model name. 1.5-flash is stable and fast.
     const model = genAI.getGenerativeModel({
-      model: 'gemini-1.5-flash',
-      generationConfig: {
-        responseMimeType: 'application/json',
-        temperature: 0.1,
-      },
+      model: 'gemini-2.5-flash',
+      generationConfig: { responseMimeType: 'application/json' },
     });
 
     const prompt = `
-      Extract items from this pharmacy invoice. 
+      Extract line items from this pharmacy invoice. 
       Return ONLY a JSON array of objects with keys: 
       "item_name" (string), "qty" (number), "invoice_price" (number).
       Handle pharmaceutical shorthand (e.g., 'Amox' -> 'Amoxicillin').
     `;
 
-    // sanitizedData is now GUARANTEED to be a string
-    const sanitizedData = cleanBase64(base64Data);
-
     const result = await model.generateContent([
+      { inlineData: { data: base64Data, mimeType: mimeType } },
       { text: prompt },
-      {
-        inlineData: {
-          data: sanitizedData, 
-          mimeType: mimeType,
-        },
-      },
     ]);
 
     const response = await result.response;
     const text = response.text();
-
-    // With responseMimeType: 'application/json', no regex cleaning needed
     return JSON.parse(text);
   } catch (error: any) {
     console.error('IMAGE SCAN ERROR:', error.message);
@@ -66,22 +40,42 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
 }
 
 export async function parseInvoiceText(pastedText: string) {
-  const apiKey = getApiKey();
-  if (!apiKey) return null;
+  const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+
+  if (!apiKey) {
+    console.error('API Key missing');
+    return null;
+  }
 
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
+
+    // FIX: Using a valid model name
     const model = genAI.getGenerativeModel({
-      model: 'gemini-1.5-flash',
+      model: 'gemini-2.5-flash',
       generationConfig: { responseMimeType: 'application/json' },
     });
 
-    const prompt = `Extract pharmacy items from this text. Return ONLY a JSON array of objects with keys: "item_name" and "qty". Text: ${pastedText}`;
+    const prompt = `
+      Extract pharmacy items from the following text. 
+      Return ONLY a JSON array of objects with keys: 
+      "item_name" (string), "qty" (number)
+      Handle pharmaceutical shorthand (e.g., 'Amox' -> 'Amoxicillin').
+      Return ONLY a JSON array of objects with keys 'item_name' and 'qty'.
+      If quantity is not mentioned, use 1.
+      
+      Text: ${pastedText}
+    `;
 
+    // FIX: Removed the incorrect inlineData block that was causing the crash
     const result = await model.generateContent(prompt);
-    const response = await result.response;
 
-    return JSON.parse(response.text());
+    const response = await result.response;
+    const text = response.text();
+    const data = JSON.parse(text);
+
+    // Ensure we return an array even if Gemini wraps it in an object
+    return Array.isArray(data) ? data : data.items || data.data || [];
   } catch (error: any) {
     console.error('TEXT SCAN ERROR:', error.message);
     return null;
