@@ -110,20 +110,26 @@ const getLevenshteinDistance = (a: string, b: string): number => {
 const normalizeMedicineName = (name: string): string => {
   if (!name) return '';
 
-  return (
-    name
-      .toLowerCase()
-      .trim()
-      // Remove common forms that AI adds
-      .replace(
-        /\b(tab|tablet|cap|capsule|syrup|susp|suspension|tab\.|strip|box|vial)\b/gi,
-        ''
-      )
-      .replace(/\b(mg|ml|gm|g|mcg)\b/gi, ' $1 ') // keep strength with space
-      .replace(/[^a-z0-9\s]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
+  let text = name.toLowerCase().trim();
+
+  // Step 1: Remove common dosage forms
+  text = text.replace(
+    /\b(tab|tablet|cap|capsule|syrup|susp|suspension|tab\.|strip|box|vial|amp|pill)\b/gi,
+    ''
   );
+
+  // Step 2: Keep ONLY numbers that are attached to mg or ml (e.g. 500mg, 10ml)
+  // Remove all other standalone numbers
+  text = text.replace(/\b(\d+)\b(?!\s*(mg|ml))/gi, ''); // Remove numbers not followed by mg/ml
+
+  // Step 3: Keep mg and ml with their numbers
+  text = text.replace(/\b(\d+)\s*(mg|ml)\b/gi, '$1$2'); // Normalize "500 mg" → "500mg"
+
+  // Step 4: Clean punctuation and collapse spaces
+  text = text.replace(/[^a-z0-9\s]/g, ' ');
+  text = text.replace(/\s+/g, ' ').trim();
+
+  return text;
 };
 const findBestInventoryMatch = (aiName: string, inventoryList: any[]) => {
   if (!aiName || !Array.isArray(inventoryList) || inventoryList.length === 0) {
@@ -466,20 +472,12 @@ export default function NewPurchaseOrder() {
                   normalizedDb
                 );
 
-                // Substring bonus (still useful)
+                // Bonus for substring match after normalization
                 if (
                   normalizedAi.includes(normalizedDb) ||
                   normalizedDb.includes(normalizedAi)
                 ) {
                   distance = Math.min(distance, 3);
-                }
-
-                // Extra penalty if lengths differ too much (prevents wrong drug matching)
-                const lenDiff = Math.abs(
-                  normalizedAi.length - normalizedDb.length
-                );
-                if (lenDiff > 8) {
-                  distance += 3;
                 }
 
                 if (distance < bestScore) {
@@ -494,8 +492,8 @@ export default function NewPurchaseOrder() {
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
 
-            // STRICT thresholds as you requested (3-5 range for green)
-            const matchedItem = bestScore <= 8 ? bestMatch : null;
+            // Strict threshold after better normalization
+            const matchedItem = bestScore <= 7 ? bestMatch : null;
 
             const finalName = matchedItem?.item_name || aiName;
             const markupVal = calculateMarkup(
