@@ -326,8 +326,19 @@ export default function NewPurchaseOrder() {
     }
   };
 
+  const file = e.target.files?.[1];
+
+  if (file) {
+    console.log('✅ File Accessed Successfully:');
+    console.log('Name:', file.name); // e.g., "pharmacy_invoice.jpg"
+    console.log('Size:', file.size); // Size in bytes
+    console.log('Type:', file.type); // e.g., "image/jpeg"
+  } else {
+    console.log('❌ No file was selected.');
+  }
   const handleAiUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    // 1. Fixed syntax: Safely access the first file
+    const file = e.target.files?.[1];
     if (!file) return;
 
     setIsScanning(true);
@@ -335,9 +346,7 @@ export default function NewPurchaseOrder() {
     try {
       const reader = new FileReader();
 
-      // This triggers once the file is fully read into memory
       reader.onload = async (event) => {
-        // Use event.target.result to safely access the data
         const fileData = event.target?.result;
 
         if (typeof fileData !== 'string') {
@@ -347,33 +356,57 @@ export default function NewPurchaseOrder() {
         }
 
         try {
-          // Pass the full string (including 'data:image...') to your action
+          // Pass the full string to your server action
           const extracted = await parseInvoiceImage(fileData, file.type);
 
-          if (extracted && Array.isArray(extracted)) {
-            // Map AI response to your items state
-            const aiMappedItems = extracted.map((extractedItem: any) => ({
-              ...EMPTY_ITEM,
-              item_name: extractedItem.item_name || '',
-              qty: extractedItem.qty || 1,
-              invoice_price: extractedItem.invoice_price || 0,
-              // Trigger auto-markup logic based on the extracted name
-              markup: calculateMarkup('GENERIC', extractedItem.item_name),
-            }));
+          if (extracted && Array.isArray(extracted) && extracted.length > 0) {
+            // 2. Map AI response with data cleaning
+            const aiMappedItems = extracted.map((extractedItem: any) => {
+              const name = (extractedItem.item_name || '').trim();
+              const qty = Math.max(1, Number(extractedItem.qty) || 1);
+              const price = Math.max(
+                0,
+                Number(extractedItem.invoice_price) || 0
+              );
 
+              // Determine markup based on item name
+              const markupVal = calculateMarkup('GENERIC', name);
+
+              return {
+                ...EMPTY_ITEM,
+                item_name: name,
+                qty: qty,
+                invoice_price: price,
+                buy_cost: price,
+                buy_cost_total: qty * price,
+                markup: markupVal,
+                // Auto-calculate suggested price rounded up to the nearest peso
+                new_price: Math.ceil(price * (1 + markupVal / 100)),
+              };
+            });
+
+            // 3. Update both states simultaneously
             setItems(aiMappedItems);
             setSearchTerms(aiMappedItems.map((i) => i.item_name));
+
+            console.log(
+              `✅ Successfully scanned ${aiMappedItems.length} items.`
+            );
           } else {
-            alert('The AI could not identify items in this image.');
+            alert(
+              'The AI could not identify any items. Please try a clearer photo.'
+            );
           }
-        } catch (err) {
-          console.error('AI Extraction Failed:', err);
+        } catch (err: any) {
+          console.error('AI Extraction Failed:', err.message);
+          alert('Scanning failed. Check your API connection.');
         } finally {
           setIsScanning(false);
+          // Reset the input so the user can upload the same file again if needed
+          e.target.value = '';
         }
       };
 
-      // Read the file - this starts the onload process
       reader.readAsDataURL(file);
     } catch (err) {
       console.error('File Reader Error:', err);
