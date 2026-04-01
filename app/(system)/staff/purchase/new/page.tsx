@@ -290,9 +290,13 @@ export default function NewPurchaseOrder() {
         item.remaining_stock = selected.stock || 0;
         item.packaging_type = selected.packaging_type || 1;
 
-        // AUTO-MARKUP: Using the keyword matcher
+        // AUTO-MARKUP
         item.markup = calculateMarkup(item.item_type, item.item_name);
 
+        // IMPORTANT: Reset match_score to indicate a manual good match
+        item.match_score = 0; // ← This forces GREEN
+
+        // Also sync the search term
         const newST = [...searchTerms];
         newST[index] = selected.item_name;
         setSearchTerms(newST);
@@ -301,24 +305,22 @@ export default function NewPurchaseOrder() {
     } else {
       (item as any)[field] = value;
 
-      // RE-CALCULATE if type or name is edited manually
+      // Re-calculate markup if type or name changed manually
       if (field === 'item_name' || field === 'item_type') {
         item.markup = calculateMarkup(item.item_type, item.item_name);
       }
     }
 
-    // Final Price Calculation
+    // === FINAL PRICE CALCULATIONS (unchanged) ===
     const qty = Math.max(0, parseFloat(item.qty as any) || 0);
     const pack = Math.max(1, parseFloat(item.packaging_type as any) || 1);
     const invPrice = Math.max(0, parseFloat(item.invoice_price as any) || 0);
     const disc = Math.max(0, parseFloat(item.discount as any) || 0);
     const currentMarkup = parseFloat(item.markup as any) || 0;
 
-    // 1. Calculate Total Buy Cost and round to 2 decimal places
     const rawTotal = qty * invPrice - disc;
     item.buy_cost_total = Math.round(rawTotal * 100) / 100;
 
-    // 2. Calculate Unit Buy Cost and round to 2 decimal places
     const totalUnits = qty * pack;
     if (totalUnits > 0) {
       const rawUnitCost = item.buy_cost_total / totalUnits;
@@ -327,12 +329,12 @@ export default function NewPurchaseOrder() {
       item.buy_cost = 0;
     }
 
-    // 3. Suggested retail price remains rounded up to the nearest whole Peso
     item.new_price = Math.ceil(item.buy_cost * (1 + currentMarkup / 100));
 
     newItems[index] = item;
     setItems(newItems);
   };
+
   const handleQuickAdd = async (index: number) => {
     const item = items[index];
     if (!item.item_name || !currentBranchId) return;
@@ -794,215 +796,222 @@ export default function NewPurchaseOrder() {
                 {isScanning ? (
                   <TableSkeleton />
                 ) : (
-                  items.map((item, idx) => (
-                    <tr
-                      key={idx}
-                      className={`group hover:bg-white/[0.02] transition-colors relative ${
-                        activeSearchIndex === idx ? 'z-50' : 'z-0'
-                      }`}
-                    >
-                      <td className="px-1 relative">
-                        <input
-                          className={`w-full bg-slate-950 border rounded-xl p-3 text-[12px] font-bold outline-none transition-all ${
-                            // RED: No inventory_id linked (needs manual selection or + Add New)
-                            !item.inventory_id
-                              ? 'border-red-500/50 bg-red-500/5'
-                              : // GREEN: Good / Close match
-                              (item.match_score ?? 999) <= 5
-                              ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-50'
-                              : // ORANGE: Fuzzy but acceptable match (Review)
-                              (item.match_score ?? 999) <= 10
-                              ? 'border-amber-500/50 bg-amber-500/10 text-amber-50'
-                              : // RED: Poor or no meaningful match
-                                'border-red-500/50 bg-red-500/5'
-                          }`}
-                          placeholder="Type to find product..."
-                          value={searchTerms[idx]}
-                          onFocus={() => setActiveSearchIndex(idx)}
-                          onBlur={() =>
-                            setTimeout(() => setActiveSearchIndex(null), 250)
-                          }
-                          onChange={(e) => {
-                            const newVal = e.target.value;
-                            const t = [...searchTerms];
-                            t[idx] = newVal;
-                            setSearchTerms(t);
-                            fetchInventory(currentBranchId, newVal);
-                          }}
-                        />
+                  items.map((item, idx) => {
+                    const matchScore = item.match_score ?? 999;
+                    const hasInventoryId = !!item.inventory_id;
 
-                        {/* Status Badge for AI Matches */}
-                        {item.inventory_id && (
-                          <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none">
-                            {(item.match_score ?? 999) <= 5 ? (
-                              <span className="text-[8px] font-black text-emerald-500/70 uppercase tracking-tighter">
-                                Good Match
-                              </span>
-                            ) : (item.match_score ?? 999) <= 10 ? (
-                              <span className="text-[8px] font-black text-amber-500/70 uppercase tracking-tighter">
-                                Review
-                              </span>
-                            ) : (
-                              <span className="text-[8px] font-black text-red-500/70 uppercase tracking-tighter">
-                                No Match
-                              </span>
-                            )}
-                          </div>
-                        )}
+                    return (
+                      <tr
+                        key={idx}
+                        className={`group hover:bg-white/[0.02] transition-colors relative ${
+                          activeSearchIndex === idx ? 'z-50' : 'z-0'
+                        }`}
+                      >
+                        <td className="px-1 relative">
+                          <input
+                            className={`w-full bg-slate-950 border rounded-xl p-3 text-[12px] font-bold outline-none transition-all ${
+                              // RED: No inventory linked yet
+                              !hasInventoryId && searchTerms[idx] !== ''
+                                ? 'border-red-500/50 bg-red-500/5'
+                                : // GREEN: Good match (manual selection or strong AI match)
+                                hasInventoryId && matchScore <= 5
+                                ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-50'
+                                : // ORANGE: Acceptable fuzzy match
+                                hasInventoryId && matchScore <= 10
+                                ? 'border-amber-500/50 bg-amber-500/10 text-amber-50'
+                                : // RED: Poor or no match
+                                  'border-red-500/50 bg-red-500/5'
+                            }`}
+                            placeholder="Type to find product..."
+                            value={searchTerms[idx]}
+                            onFocus={() => setActiveSearchIndex(idx)}
+                            onBlur={() =>
+                              setTimeout(() => setActiveSearchIndex(null), 250)
+                            }
+                            onChange={(e) => {
+                              const newVal = e.target.value;
+                              const t = [...searchTerms];
+                              t[idx] = newVal;
+                              setSearchTerms(t);
+                              fetchInventory(currentBranchId, newVal);
+                            }}
+                          />
 
-                        {activeSearchIndex === idx && (
-                          <div className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z-[60] max-h-64 overflow-y-auto p-1 shadow-2xl">
-                            {inventoryList
-                              .filter(
-                                (i) =>
-                                  i.branch_id === currentBranchId &&
-                                  i.item_name
-                                    .toLowerCase()
-                                    .includes(
-                                      (searchTerms[idx] || '').toLowerCase()
-                                    )
-                              )
-                              .map((inv) => (
-                                <div
-                                  key={inv.id}
-                                  className="px-3 py-2 hover:bg-indigo-600 rounded-xl cursor-pointer text-[11px] font-black uppercase border-b border-white/5 last:border-0 transition-colors"
-                                  onMouseDown={() =>
-                                    updateItem(idx, 'inventory_id', inv.id)
-                                  }
-                                >
-                                  <div className="flex justify-between items-center">
-                                    <span>{inv.item_name}</span>
-                                    <span className="text-[9px] opacity-60">
-                                      Stock: {inv.stock}
-                                    </span>
+                          {/* Status Badge */}
+                          {hasInventoryId && (
+                            <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none">
+                              {matchScore <= 5 ? (
+                                <span className="text-[8px] font-black text-emerald-500/70 uppercase tracking-tighter">
+                                  Good Match
+                                </span>
+                              ) : matchScore <= 10 ? (
+                                <span className="text-[8px] font-black text-amber-500/70 uppercase tracking-tighter">
+                                  Review
+                                </span>
+                              ) : (
+                                <span className="text-[8px] font-black text-red-500/70 uppercase tracking-tighter">
+                                  No Match
+                                </span>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Dropdown Search Results */}
+                          {activeSearchIndex === idx && (
+                            <div className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z-[60] max-h-64 overflow-y-auto p-1 shadow-2xl">
+                              {inventoryList
+                                .filter(
+                                  (i) =>
+                                    i.branch_id === currentBranchId &&
+                                    i.item_name
+                                      .toLowerCase()
+                                      .includes(
+                                        (searchTerms[idx] || '').toLowerCase()
+                                      )
+                                )
+                                .map((inv) => (
+                                  <div
+                                    key={inv.id}
+                                    className="px-3 py-2 hover:bg-indigo-600 rounded-xl cursor-pointer text-[11px] font-black uppercase border-b border-white/5 last:border-0 transition-colors"
+                                    onMouseDown={() =>
+                                      updateItem(idx, 'inventory_id', inv.id)
+                                    }
+                                  >
+                                    <div className="flex justify-between items-center">
+                                      <span>{inv.item_name}</span>
+                                      <span className="text-[9px] opacity-60">
+                                        Stock: {inv.stock}
+                                      </span>
+                                    </div>
                                   </div>
-                                </div>
-                              ))}
-                          </div>
-                        )}
+                                ))}
+                            </div>
+                          )}
 
-                        {!item.inventory_id && searchTerms[idx] !== '' && (
+                          {/* + Add New Button */}
+                          {!hasInventoryId && searchTerms[idx] !== '' && (
+                            <button
+                              onClick={() => handleQuickAdd(idx)}
+                              className="absolute right-6 top-1/2 -translate-y-1/2 text-[9px] font-black uppercase text-emerald-400 bg-emerald-400/10 px-2 py-1 rounded hover:bg-emerald-400 hover:text-white transition-all"
+                            >
+                              + Add New
+                            </button>
+                          )}
+                        </td>
+
+                        {/* ==================== REST OF THE COLUMNS (unchanged) ==================== */}
+                        <td className="px-1 text-center">
                           <button
-                            onClick={() => handleQuickAdd(idx)}
-                            className="absolute right-6 top-1/2 -translate-y-1/2 text-[9px] font-black uppercase text-emerald-400 bg-emerald-400/10 px-2 py-1 rounded hover:bg-emerald-400 hover:text-white transition-all"
-                          >
-                            + Add New
-                          </button>
-                        )}
-                      </td>
-
-                      {/* Rest of the columns remain unchanged */}
-                      <td className="px-1 text-center">
-                        <button
-                          onClick={() =>
-                            updateItem(
-                              idx,
-                              'item_type',
+                            onClick={() =>
+                              updateItem(
+                                idx,
+                                'item_type',
+                                item.item_type === 'GENERIC'
+                                  ? 'BRANDED'
+                                  : 'GENERIC'
+                              )
+                            }
+                            className={`w-full py-2.5 rounded-lg text-[9px] font-black uppercase border transition-all ${
                               item.item_type === 'GENERIC'
-                                ? 'BRANDED'
-                                : 'GENERIC'
-                            )
-                          }
-                          className={`w-full py-2.5 rounded-lg text-[9px] font-black uppercase border transition-all ${
-                            item.item_type === 'GENERIC'
-                              ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400'
-                              : 'bg-amber-500/10 border-amber-500/30 text-amber-400'
-                          }`}
-                        >
-                          {item.item_type}
-                        </button>
-                      </td>
+                                ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400'
+                                : 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+                            }`}
+                          >
+                            {item.item_type}
+                          </button>
+                        </td>
 
-                      <td className="px-1">
-                        <input
-                          type="number"
-                          className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
-                          value={item.qty}
-                          onChange={(e) =>
-                            updateItem(idx, 'qty', e.target.value)
-                          }
-                        />
-                      </td>
+                        <td className="px-1">
+                          <input
+                            type="number"
+                            className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
+                            value={item.qty}
+                            onChange={(e) =>
+                              updateItem(idx, 'qty', e.target.value)
+                            }
+                          />
+                        </td>
 
-                      <td className="px-1">
-                        <input
-                          type="number"
-                          className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
-                          value={item.packaging_type}
-                          onChange={(e) =>
-                            updateItem(idx, 'packaging_type', e.target.value)
-                          }
-                        />
-                      </td>
+                        <td className="px-1">
+                          <input
+                            type="number"
+                            className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
+                            value={item.packaging_type}
+                            onChange={(e) =>
+                              updateItem(idx, 'packaging_type', e.target.value)
+                            }
+                          />
+                        </td>
 
-                      <td className="px-1">
-                        <input
-                          type="number"
-                          className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-right text-[12px] font-bold outline-none"
-                          value={item.invoice_price}
-                          onChange={(e) =>
-                            updateItem(idx, 'invoice_price', e.target.value)
-                          }
-                        />
-                      </td>
+                        <td className="px-1">
+                          <input
+                            type="number"
+                            className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-right text-[12px] font-bold outline-none"
+                            value={item.invoice_price}
+                            onChange={(e) =>
+                              updateItem(idx, 'invoice_price', e.target.value)
+                            }
+                          />
+                        </td>
 
-                      <td className="px-1">
-                        <input
-                          type="number"
-                          className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-right text-[12px] font-bold outline-none"
-                          value={item.discount}
-                          onChange={(e) =>
-                            updateItem(idx, 'discount', e.target.value)
-                          }
-                        />
-                      </td>
+                        <td className="px-1">
+                          <input
+                            type="number"
+                            className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-right text-[12px] font-bold outline-none"
+                            value={item.discount}
+                            onChange={(e) =>
+                              updateItem(idx, 'discount', e.target.value)
+                            }
+                          />
+                        </td>
 
-                      <td className="px-1 text-right font-black text-indigo-300 text-[12px]">
-                        ₱{(item.buy_cost || 0).toFixed(2)}
-                      </td>
+                        <td className="px-1 text-right font-black text-indigo-300 text-[12px]">
+                          ₱{(item.buy_cost || 0).toFixed(2)}
+                        </td>
 
-                      <td className="px-1 text-right font-black text-white text-[12px]">
-                        ₱{(item.buy_cost_total || 0).toFixed(2)}
-                      </td>
+                        <td className="px-1 text-right font-black text-white text-[12px]">
+                          ₱{(item.buy_cost_total || 0).toFixed(2)}
+                        </td>
 
-                      <td className="px-1 text-right font-bold text-indigo-400/60 text-[12px]">
-                        ₱{(item.current_price || 0).toFixed(2)}
-                      </td>
+                        <td className="px-1 text-right font-bold text-indigo-400/60 text-[12px]">
+                          ₱{(item.current_price || 0).toFixed(2)}
+                        </td>
 
-                      <td className="px-1">
-                        <input
-                          type="number"
-                          className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
-                          value={item.markup}
-                          onChange={(e) =>
-                            updateItem(idx, 'markup', e.target.value)
-                          }
-                        />
-                      </td>
+                        <td className="px-1">
+                          <input
+                            type="number"
+                            className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
+                            value={item.markup}
+                            onChange={(e) =>
+                              updateItem(idx, 'markup', e.target.value)
+                            }
+                          />
+                        </td>
 
-                      <td className="px-1 text-right font-black text-emerald-400 text-[12px]">
-                        ₱{(item.new_price || 0).toFixed(2)}
-                      </td>
+                        <td className="px-1 text-right font-black text-emerald-400 text-[12px]">
+                          ₱{(item.new_price || 0).toFixed(2)}
+                        </td>
 
-                      <td className="px-1 text-center text-slate-500 text-[11px] font-black">
-                        {item.remaining_stock}
-                      </td>
+                        <td className="px-1 text-center text-slate-500 text-[11px] font-black">
+                          {item.remaining_stock}
+                        </td>
 
-                      <td className="px-1 text-center sticky right-0 bg-slate-900 border-l border-white/10 group-hover:bg-slate-800 transition-colors">
-                        <button
-                          onClick={() => {
-                            setItems(items.filter((_, i) => i !== idx));
-                            setSearchTerms(
-                              searchTerms.filter((_, i) => i !== idx)
-                            );
-                          }}
-                          className="p-2 text-slate-600 hover:text-red-500 transition-all"
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </td>
-                    </tr>
-                  ))
+                        <td className="px-1 text-center sticky right-0 bg-slate-900 border-l border-white/10 group-hover:bg-slate-800 transition-colors">
+                          <button
+                            onClick={() => {
+                              setItems(items.filter((_, i) => i !== idx));
+                              setSearchTerms(
+                                searchTerms.filter((_, i) => i !== idx)
+                              );
+                            }}
+                            className="p-2 text-slate-600 hover:text-red-500 transition-all"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
