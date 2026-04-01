@@ -35,7 +35,7 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
 
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
-      model: 'gemini-flash-latest',
+      model: 'gemini-2.0-flash',
       generationConfig: {
         responseMimeType: 'application/json',
         temperature: 0.1,
@@ -78,7 +78,7 @@ export async function parseInvoiceText(pastedText: string) {
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
-      model: 'gemini-flash-latest',
+      model: 'gemini-2.0-flash',
       generationConfig: { responseMimeType: 'application/json' },
     });
 
