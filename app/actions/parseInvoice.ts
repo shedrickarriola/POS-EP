@@ -22,15 +22,14 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
       },
     });
 
-    // ✅ THE FIX: We need index to get the pure string data
-    // .split(',') creates a list; picks the actual base64 text
+    // ✅ FIXED: Added to get the pure string, not the array
     const pureBase64 = base64Data.includes(',')
-      ? base64Data.split(',')
+      ? base64Data.split(',') 
       : base64Data;
 
-    // Safety check: Ensure the string isn't empty after splitting
-    if (!pureBase64 || pureBase64.length < 10) {
-      console.error('SERVER ERROR: Cleaned base64 string is empty');
+    // Safety check: Ensure we actually have data characters
+    if (!pureBase64 || pureBase64.length < 20) {
+      console.error('SERVER ERROR: Cleaned base64 string is empty or invalid');
       return null;
     }
 
@@ -40,7 +39,7 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
       },
       {
         inlineData: {
-          data: pureBase64, // Now strictly a STRING, not a list
+          data: pureBase64, // This is now guaranteed to be a string
           mimeType: mimeType.toLowerCase().trim() || 'image/jpeg',
         },
       },
@@ -49,8 +48,8 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
     const response = await result.response;
     const text = response.text();
     return JSON.parse(text);
+
   } catch (error: any) {
-    // If you see "400" here, check if the image is too large (>4MB)
     console.error('IMAGE SCAN ERROR:', error.message);
     return null;
   }

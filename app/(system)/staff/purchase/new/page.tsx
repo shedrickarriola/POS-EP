@@ -329,51 +329,63 @@ export default function NewPurchaseOrder() {
   const handleAiUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
+  
     setIsScanning(true);
-
+  
     try {
       const reader = new FileReader();
-
-      // This triggers once the file is fully read into memory
+  
       reader.onload = async (event) => {
-        // Use event.target.result to safely access the data
         const fileData = event.target?.result;
-
+  
         if (typeof fileData !== 'string') {
           console.error('Data error: Result is not a string');
           setIsScanning(false);
           return;
         }
-
+  
         try {
-          // Pass the full string (including 'data:image...') to your action
           const extracted = await parseInvoiceImage(fileData, file.type);
-
-          if (extracted && Array.isArray(extracted)) {
-            // Map AI response to your items state
-            const aiMappedItems = extracted.map((extractedItem: any) => ({
-              ...EMPTY_ITEM,
-              item_name: extractedItem.item_name || '',
-              qty: extractedItem.qty || 1,
-              invoice_price: extractedItem.invoice_price || 0,
-              // Trigger auto-markup logic based on the extracted name
-              markup: calculateMarkup('GENERIC', extractedItem.item_name),
-            }));
-
+  
+          if (extracted && Array.isArray(extracted) && extracted.length > 0) {
+            const aiMappedItems = extracted.map((extractedItem: any) => {
+              // Clean and normalize incoming AI data
+              const name = (extractedItem.item_name || '').trim();
+              const qty = Math.max(1, Number(extractedItem.qty) || 1);
+              const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
+              
+              // Re-use your existing business logic
+              const markupVal = calculateMarkup('GENERIC', name);
+  
+              return {
+                ...EMPTY_ITEM,
+                item_name: name,
+                qty: qty,
+                invoice_price: price,
+                buy_cost: price,
+                buy_cost_total: qty * price,
+                markup: markupVal,
+                // Auto-calculate suggested price (Ceil to nearest peso)
+                new_price: Math.ceil(price * (1 + markupVal / 100)),
+              };
+            });
+  
             setItems(aiMappedItems);
-            setSearchTerms(aiMappedItems.map((i) => i.item_name));
+            // Sync search terms so the "Map to Inventory" dropdowns pre-fill
+            setSearchTerms(aiMappedItems.map((i: any) => i.item_name));
           } else {
-            alert('The AI could not identify items in this image.');
+            alert('The AI could not identify items. Please try a clearer photo or a different file.');
           }
         } catch (err) {
           console.error('AI Extraction Failed:', err);
+          alert('An error occurred during the scan. Please check your connection.');
         } finally {
           setIsScanning(false);
+          // CRITICAL: Reset input so user can upload the same file again if they edit it
+          if (e.target) e.target.value = '';
         }
       };
-
-      // Read the file - this starts the onload process
+  
       reader.readAsDataURL(file);
     } catch (err) {
       console.error('File Reader Error:', err);
