@@ -1,14 +1,16 @@
 'use server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
+// Server-side only: Ensure GEMINI_API_KEY is set in Vercel Project Settings
 const getApiKey = () => process.env.GEMINI_API_KEY;
 
 /**
- * FIXED: Returns the STRING after the comma, not an array.
+ * FIXED: Returns the actual Base64 STRING, not an array.
  */
-const cleanBase64 = (base64String: string) => {
+const cleanBase64 = (base64String: string): string => {
   if (base64String.includes(',')) {
-    return base64String.split(','); // Get the 2nd element (the actual data)
+    // split() returns [header, data]. We need.
+    return base64String.split(','); 
   }
   return base64String;
 };
@@ -38,14 +40,15 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
       Handle pharmaceutical shorthand (e.g., 'Amox' -> 'Amoxicillin').
     `;
 
-    // Ensure we are passing a single string for data
-    const imageData = cleanBase64(base64Data);
+    // Process the image data to ensure it's a raw string
+    const sanitizedData = cleanBase64(base64Data);
 
+    // Call the model with explicit Part objects
     const result = await model.generateContent([
       { text: prompt },
       {
         inlineData: {
-          data: imageData,
+          data: sanitizedData,
           mimeType: mimeType,
         },
       },
@@ -54,9 +57,15 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
     const response = await result.response;
     const text = response.text();
 
+    // With responseMimeType: 'application/json', result is usually clean JSON
     return JSON.parse(text);
+
   } catch (error: any) {
     console.error('IMAGE SCAN ERROR:', error.message);
+    // Log details if it's still a 400 to see if the payload structure changed
+    if (error.message.includes('400')) {
+       console.error('Payload Issue: Ensure mimeType matches the file (e.g., image/jpeg)');
+    }
     return null;
   }
 }
