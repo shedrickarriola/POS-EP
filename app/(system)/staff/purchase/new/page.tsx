@@ -342,7 +342,7 @@ export default function NewPurchaseOrder() {
         const base64Data = (reader.result as string).split(',');
 
         // Now 'base64Data' is a string, and this call will stop throwing the error:
-        const extracted = await parseInvoiceImage(base64Data, file.type);
+        const extracted = await parseInvoiceImage(result, file.type);
         console.log('AI Extraction Raw Result:', extracted);
 
         // 2. Data Structure Normalization

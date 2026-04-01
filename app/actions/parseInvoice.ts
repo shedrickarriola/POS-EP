@@ -5,9 +5,14 @@ const getApiKey = () => process.env.GEMINI_API_KEY;
 
 export async function parseInvoiceImage(base64Data: string, mimeType: string) {
   const apiKey = getApiKey();
+  if (!apiKey) return null;
 
-  if (!apiKey) {
-    console.error('SERVER ERROR: API Key missing in Vercel environment');
+  // 1. TYPE GUARD: Prevents "e.split is not a function"
+  if (typeof base64Data !== 'string') {
+    console.error(
+      'FRONTEND ERROR: base64Data must be a string. Received:',
+      typeof base64Data
+    );
     return null;
   }
 
@@ -21,39 +26,30 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
       },
     });
 
-    // 1. HARD-STRIP THE BASE64: Ensure this is a PURE string.
-    // We use .pop() to guarantee we get the string, not an array.
-    const pureBase64 = base64Data.split(',').pop() || '';
+    // 2. CLEAN DATA: Get the raw string after the comma
+    const pureBase64 = base64Data.includes(',')
+      ? base64Data.split(',')
+      : base64Data;
 
-    // 2. STABILIZE MIME TYPE: API expects lowercase 'image/jpeg' etc.
-    const cleanMime = mimeType.toLowerCase().trim();
-
-    // 3. THE "STRICT" PAYLOAD: Each part is a clearly defined object.
     const result = await model.generateContent([
       {
-        text: "Extract pharmacy items (item_name, qty, invoice_price) from this invoice. Return ONLY a JSON array."
+        text: 'Extract pharmacy items: item_name, qty, invoice_price. Return JSON array.',
       },
       {
         inlineData: {
-          data: pureBase64, // Must be a raw string
-          mimeType: cleanMime,
+          data: pureBase64,
+          mimeType: mimeType.toLowerCase().trim(),
         },
-      }
+      },
     ]);
 
     const response = await result.response;
-    const text = response.text();
-
-    // Since we set responseMimeType: 'application/json', we parse directly.
-    return JSON.parse(text);
-
+    return JSON.parse(response.text());
   } catch (error: any) {
     console.error('IMAGE SCAN ERROR:', error.message);
-    // If you see "400" again, check if 'base64Data' is empty on the frontend.
     return null;
   }
 }
-
 export async function parseInvoiceText(pastedText: string) {
   const apiKey = getApiKey();
   if (!apiKey) return null;
