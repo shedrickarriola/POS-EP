@@ -1,15 +1,14 @@
 'use server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-// In 'use server', we only need the private GEMINI_API_KEY from Vercel env
 const getApiKey = () => process.env.GEMINI_API_KEY;
 
 /**
- * Utility to strip the Data URL prefix if it exists
+ * FIXED: Returns the STRING after the comma, not an array.
  */
 const cleanBase64 = (base64String: string) => {
   if (base64String.includes(',')) {
-    return base64String.split(',');
+    return base64String.split(','); // Get the 2nd element (the actual data)
   }
   return base64String;
 };
@@ -39,13 +38,14 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
       Handle pharmaceutical shorthand (e.g., 'Amox' -> 'Amoxicillin').
     `;
 
-    // CRITICAL: We pass the prompt as a string and the image as a Part object.
-    // We also ensure the base64 is cleaned of any "data:image/..." headers.
+    // Ensure we are passing a single string for data
+    const imageData = cleanBase64(base64Data);
+
     const result = await model.generateContent([
-      prompt,
+      { text: prompt },
       {
         inlineData: {
-          data: cleanBase64(base64Data),
+          data: imageData,
           mimeType: mimeType,
         },
       },
@@ -54,16 +54,9 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
     const response = await result.response;
     const text = response.text();
 
-    // Since we set responseMimeType to application/json, 
-    // the model should return raw JSON without markdown backticks.
     return JSON.parse(text);
-
   } catch (error: any) {
     console.error('IMAGE SCAN ERROR:', error.message);
-    // If it's still a 400 error, log the full detail for debugging
-    if (error.message.includes('400')) {
-      console.error('Check if base64Data is valid and API key has access to 1.5-flash');
-    }
     return null;
   }
 }
@@ -84,7 +77,6 @@ export async function parseInvoiceText(pastedText: string) {
     const result = await model.generateContent(prompt);
     const response = await result.response;
     
-    // No need to replace backticks if using responseMimeType: 'application/json'
     return JSON.parse(response.text());
   } catch (error: any) {
     console.error('TEXT SCAN ERROR:', error.message);
