@@ -432,16 +432,47 @@ export default function NewPurchaseOrder() {
           const aiMappedItems = extracted.map((extractedItem: any) => {
             const aiName = (extractedItem.item_name || '').trim();
 
-            const { bestMatch, score: matchScore } = findBestInventoryMatch(
-              aiName,
-              inventoryList
-            );
+            let bestMatch: any = null;
+            let bestScore = 999;
+
+            if (Array.isArray(inventoryList) && inventoryList.length > 0) {
+              for (const inv of inventoryList) {
+                if (!inv?.item_name) continue;
+
+                let distance = getLevenshteinDistance(aiName, inv.item_name);
+
+                // Smart bonuses for common pharmacy patterns
+                const aiLower = aiName.toLowerCase();
+                const dbLower = inv.item_name.toLowerCase();
+
+                if (aiLower.includes(dbLower) || dbLower.includes(aiLower)) {
+                  distance = Math.min(distance, 6); // Big bonus for substring
+                }
+
+                // Extra tolerance for number/unit differences (e.g. 500mg vs 500 mg)
+                if (
+                  aiLower.replace(/\s+/g, '') === dbLower.replace(/\s+/g, '')
+                ) {
+                  distance = Math.min(distance, 3);
+                }
+
+                // Final score (lower = better)
+                const finalScore = distance;
+
+                if (finalScore < bestScore) {
+                  bestScore = finalScore;
+                  bestMatch = inv;
+                }
+
+                if (distance === 0) break; // perfect match
+              }
+            }
 
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
 
-            // Match if score is reasonably good (you can tweak 15 if needed)
-            const matchedItem = matchScore <= 15 ? bestMatch : null;
+            // More lenient thresholds
+            const matchedItem = bestScore <= 12 ? bestMatch : null;
 
             const finalName = matchedItem?.item_name || aiName;
             const markupVal = calculateMarkup(
@@ -458,7 +489,7 @@ export default function NewPurchaseOrder() {
               invoice_price: price,
               buy_cost: price,
               buy_cost_total: qty * price,
-              match_score: matchedItem ? Math.round(matchScore) : 999,
+              match_score: matchedItem ? bestScore : 999,
               markup: markupVal,
               new_price: Math.ceil(price * (1 + markupVal / 100)),
               current_price: matchedItem?.price || 0,
@@ -471,7 +502,7 @@ export default function NewPurchaseOrder() {
         }
       } catch (err) {
         console.error('AI Extraction Failed:', err);
-        alert('Error processing image. Check console.');
+        alert('Error processing image. Check console for details.');
       } finally {
         setIsScanning(false);
         if (e.target) e.target.value = '';
