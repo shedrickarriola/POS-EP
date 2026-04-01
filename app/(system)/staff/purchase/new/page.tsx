@@ -73,22 +73,29 @@ const calculateMarkup = (
 };
 
 const getLevenshteinDistance = (a: string, b: string): number => {
-  const s1 = a.toLowerCase();
-  const s2 = b.toLowerCase();
-  const len1 = s1.length;
-  const len2 = s2.length;
+  const s1 = a.toLowerCase().trim();
+  const s2 = b.toLowerCase().trim();
 
-  // Initialize the matrix properly as a 2D array of numbers
-  const matrix = Array.from({ length: len1 + 1 }, () =>
-    new Array(len2 + 1).fill(0)
+  if (s1 === s2) return 0;
+  if (s1.length === 0) return s2.length;
+  if (s2.length === 0) return s1.length;
+
+  const matrix: number[][] = Array.from({ length: s1.length + 1 }, () =>
+    new Array(s2.length + 1).fill(0)
   );
 
-  for (let i = 0; i <= len1; i++) matrix[i] = i;
-  for (let j = 0; j <= len2; j++) matrix[j] = j;
+  // Initialize first row and first column
+  for (let i = 0; i <= s1.length; i++) {
+    matrix[i][0] = i;
+  }
+  for (let j = 0; j <= s2.length; j++) {
+    matrix[0][j] = j;
+  }
 
-  for (let i = 1; i <= len1; i++) {
-    for (let j = 1; j <= len2; j++) {
+  for (let i = 1; i <= s1.length; i++) {
+    for (let j = 1; j <= s2.length; j++) {
       const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
+
       matrix[i][j] = Math.min(
         matrix[i - 1][j] + 1, // deletion
         matrix[i][j - 1] + 1, // insertion
@@ -96,7 +103,8 @@ const getLevenshteinDistance = (a: string, b: string): number => {
       );
     }
   }
-  return matrix[len1][len2];
+
+  return matrix[s1.length][s2.length];
 };
 const TableSkeleton = () => (
   <>
@@ -373,30 +381,36 @@ export default function NewPurchaseOrder() {
           const aiMappedItems = extracted.map((extractedItem: any) => {
             const aiName = (extractedItem.item_name || '').trim();
 
-            let bestMatch = null;
-            let minDistance = 100;
+            let bestMatch: any = null;
+            let minDistance = Infinity; // Better than 100
 
-            // 1. Safe check for inventoryList
-            if (Array.isArray(inventoryList)) {
-              inventoryList.forEach((inv) => {
-                if (!inv.item_name) return;
+            // 1. Safe & Optimized Matching with Levenshtein
+            if (Array.isArray(inventoryList) && inventoryList.length > 0) {
+              for (const inv of inventoryList) {
+                if (!inv?.item_name) continue;
+
                 const distance = getLevenshteinDistance(aiName, inv.item_name);
+
                 if (distance < minDistance) {
                   minDistance = distance;
                   bestMatch = inv;
                 }
-              });
+
+                // Early exit: Perfect match found → no need to check further
+                if (distance === 0) break;
+              }
             }
 
-            // 2. Threshold Logic
+            // 2. Threshold Logic (tuned for medicine names)
             const isReliable = minDistance <= 6;
             const matchedItem = isReliable ? bestMatch : null;
 
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
 
-            // 3. Fallback to AI name if no match found
+            // 3. Fallback to AI name if no good match
             const finalName = matchedItem?.item_name || aiName;
+
             const markupVal = calculateMarkup(
               matchedItem?.item_type || 'GENERIC',
               finalName
@@ -411,7 +425,7 @@ export default function NewPurchaseOrder() {
               invoice_price: price,
               buy_cost: price,
               buy_cost_total: qty * price,
-              match_score: minDistance, // Powers the Green/Orange/Red UI
+              match_score: minDistance === Infinity ? 999 : minDistance, // 999 = no match
               markup: markupVal,
               new_price: Math.ceil(price * (1 + markupVal / 100)),
               current_price: matchedItem?.price || 0,
@@ -420,16 +434,18 @@ export default function NewPurchaseOrder() {
           });
 
           setItems(aiMappedItems);
-          setSearchTerms(aiMappedItems.map((i: any) => i.item_name));
+          setSearchTerms(aiMappedItems.map((i: any) => i.item_name || ''));
         }
       } catch (err) {
         console.error('AI Extraction Failed:', err);
-        alert('Error processing image data. Please check console.');
+        alert('Error processing image. Please check console for details.');
       } finally {
         setIsScanning(false);
+        // Reset file input so same file can be selected again
         if (e.target) e.target.value = '';
       }
     };
+
     reader.readAsDataURL(file);
   };
 
