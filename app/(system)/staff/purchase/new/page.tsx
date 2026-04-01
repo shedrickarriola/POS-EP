@@ -72,6 +72,20 @@ const calculateMarkup = (
   return 25;
 };
 
+const getLevenshteinDistance = (a: string, b: string): number => {
+  const matrix = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; matrix[j] = j++);
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      matrix[i][j] =
+        a[i - 1] === b[j - 1]
+          ? matrix[i - 1][j - 1]
+          : Math.min(matrix[i - 1][j - 1], matrix[i][j - 1], matrix[i - 1][j]) +
+            1;
+    }
+  }
+  return matrix[a.length][b.length];
+};
 const TableSkeleton = () => (
   <>
     {[...Array(5)].map((_, i) => (
@@ -329,68 +343,81 @@ export default function NewPurchaseOrder() {
   const handleAiUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-  
+
     setIsScanning(true);
-  
-    try {
-      const reader = new FileReader();
-  
-      reader.onload = async (event) => {
-        const fileData = event.target?.result;
-  
-        if (typeof fileData !== 'string') {
-          console.error('Data error: Result is not a string');
-          setIsScanning(false);
-          return;
-        }
-  
-        try {
-          const extracted = await parseInvoiceImage(fileData, file.type);
-  
-          if (extracted && Array.isArray(extracted) && extracted.length > 0) {
-            const aiMappedItems = extracted.map((extractedItem: any) => {
-              // Clean and normalize incoming AI data
-              const name = (extractedItem.item_name || '').trim();
-              const qty = Math.max(1, Number(extractedItem.qty) || 1);
-              const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
-              
-              // Re-use your existing business logic
-              const markupVal = calculateMarkup('GENERIC', name);
-  
-              return {
-                ...EMPTY_ITEM,
-                item_name: name,
-                qty: qty,
-                invoice_price: price,
-                buy_cost: price,
-                buy_cost_total: qty * price,
-                markup: markupVal,
-                // Auto-calculate suggested price (Ceil to nearest peso)
-                new_price: Math.ceil(price * (1 + markupVal / 100)),
-              };
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const fileData = event.target?.result;
+      if (typeof fileData !== 'string') {
+        setIsScanning(false);
+        return;
+      }
+
+      try {
+        const extracted = await parseInvoiceImage(fileData, file.type);
+
+        if (extracted && Array.isArray(extracted)) {
+          const aiMappedItems = extracted.map((extractedItem: any) => {
+            const aiName = (extractedItem.item_name || '').trim();
+
+            let bestMatch = null;
+            let minDistance = 100;
+
+            // Find the closest item in your local inventoryList
+            inventoryList.forEach((inv) => {
+              const distance = getLevenshteinDistance(
+                aiName.toLowerCase(),
+                inv.item_name.toLowerCase()
+              );
+              if (distance < minDistance) {
+                minDistance = distance;
+                bestMatch = inv;
+              }
             });
-  
-            setItems(aiMappedItems);
-            // Sync search terms so the "Map to Inventory" dropdowns pre-fill
-            setSearchTerms(aiMappedItems.map((i: any) => i.item_name));
-          } else {
-            alert('The AI could not identify items. Please try a clearer photo or a different file.');
-          }
-        } catch (err) {
-          console.error('AI Extraction Failed:', err);
-          alert('An error occurred during the scan. Please check your connection.');
-        } finally {
-          setIsScanning(false);
-          // CRITICAL: Reset input so user can upload the same file again if they edit it
-          if (e.target) e.target.value = '';
+
+            // Threshold Logic:
+            // 0-2: High Confidence (Green)
+            // 3-6: Probable Match (Orange)
+            // 7+: No Match (Red)
+            const isReliable = minDistance <= 6;
+            const matchedItem = isReliable ? bestMatch : null;
+
+            const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
+            const qty = Math.max(1, Number(extractedItem.qty) || 1);
+            const markupVal = calculateMarkup(
+              matchedItem?.item_type || 'GENERIC',
+              matchedItem?.item_name || aiName
+            );
+
+            return {
+              ...EMPTY_ITEM,
+              inventory_id: matchedItem?.id || '',
+              item_name: matchedItem?.item_name || aiName,
+              item_type: (matchedItem?.item_type || 'GENERIC').toUpperCase(),
+              qty: qty,
+              invoice_price: price,
+              buy_cost: price,
+              buy_cost_total: qty * price,
+              match_score: minDistance, // Store this to drive UI colors
+              markup: markupVal,
+              new_price: Math.ceil(price * (1 + markupVal / 100)),
+              current_price: matchedItem?.price || 0,
+              remaining_stock: matchedItem?.stock || 0,
+            };
+          });
+
+          setItems(aiMappedItems);
+          setSearchTerms(aiMappedItems.map((i: any) => i.item_name));
         }
-      };
-  
-      reader.readAsDataURL(file);
-    } catch (err) {
-      console.error('File Reader Error:', err);
-      setIsScanning(false);
-    }
+      } catch (err) {
+        console.error('AI Extraction Failed:', err);
+      } finally {
+        setIsScanning(false);
+        if (e.target) e.target.value = '';
+      }
+    };
+    reader.readAsDataURL(file);
   };
 
   const totalTransaction = useMemo(
@@ -714,186 +741,195 @@ export default function NewPurchaseOrder() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
-                {isScanning ? (
-                  <TableSkeleton />
-                ) : (
-                  items.map((item, idx) => (
-                    <tr
-                      key={idx}
-                      className={`group hover:bg-white/[0.02] transition-colors relative ${
-                        activeSearchIndex === idx ? 'z-' : 'z-0'
-                      }`}
-                    >
-                      <td className="px-1 relative">
-                        <input
-                          className={`w-full bg-slate-950 border rounded-xl p-3 text-[12px] font-bold outline-none transition-all ${
-                            !item.inventory_id && searchTerms[idx] !== ''
-                              ? 'border-red-500/50 bg-red-500/5'
-                              : 'border-white/5 focus:border-indigo-500'
-                          }`}
-                          placeholder="Type to find product..."
-                          value={searchTerms[idx]}
-                          onFocus={() => setActiveSearchIndex(idx)}
-                          onBlur={() =>
-                            setTimeout(() => setActiveSearchIndex(null), 250)
-                          }
-                          onChange={(e) => {
-                            const newVal = e.target.value;
-                            const t = [...searchTerms];
-                            t[idx] = newVal;
-                            setSearchTerms(t);
+  {isScanning ? (
+    <TableSkeleton />
+  ) : (
+    items.map((item, idx) => (
+      <tr
+        key={idx}
+        className={`group hover:bg-white/[0.02] transition-colors relative ${
+          activeSearchIndex === idx ? 'z-50' : 'z-0'
+        }`}
+      >
+        <td className="px-1 relative">
+          <input
+            className={`w-full bg-slate-950 border rounded-xl p-3 text-[12px] font-bold outline-none transition-all ${
+              // RED: No database ID linked yet (User needs to select or Add New)
+              !item.inventory_id && searchTerms[idx] !== ''
+                ? 'border-red-500/50 bg-red-500/5'
+                // GREEN: High confidence match (Score 0-2)
+                : item.inventory_id && (item.match_score ?? 0) <= 2
+                ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-50'
+                // ORANGE: Fuzzy match / Suggestion (Score 3-6)
+                : item.inventory_id && (item.match_score ?? 0) <= 6
+                ? 'border-amber-500/50 bg-amber-500/10 text-amber-50'
+                // DEFAULT
+                : 'border-white/5 focus:border-indigo-500'
+            }`}
+            placeholder="Type to find product..."
+            value={searchTerms[idx]}
+            onFocus={() => setActiveSearchIndex(idx)}
+            onBlur={() =>
+              setTimeout(() => setActiveSearchIndex(null), 250)
+            }
+            onChange={(e) => {
+              const newVal = e.target.value;
+              const t = [...searchTerms];
+              t[idx] = newVal;
+              setSearchTerms(t);
+              fetchInventory(currentBranchId, newVal);
+            }}
+          />
 
-                            // Re-fetch filtered results from the database
-                            fetchInventory(currentBranchId, newVal);
-                          }}
-                        />
+          {/* Status Badge for AI Matches */}
+          {item.inventory_id && (
+            <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none">
+              {(item.match_score ?? 0) <= 2 ? (
+                <span className="text-[8px] font-black text-emerald-500/40 uppercase tracking-tighter">Matched</span>
+              ) : (item.match_score ?? 0) <= 6 ? (
+                <span className="text-[8px] font-black text-amber-500/40 uppercase tracking-tighter">Review</span>
+              ) : null}
+            </div>
+          )}
 
-                        {activeSearchIndex === idx && (
-                          <div className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z- max-h-64 overflow-y-auto p-1 shadow-2xl">
-                            {inventoryList
-                              .filter(
-                                (i) =>
-                                  i.branch_id === currentBranchId &&
-                                  i.item_name
-                                    .toLowerCase()
-                                    .includes(
-                                      (searchTerms[idx] || '').toLowerCase()
-                                    )
-                              )
-                              .map((inv) => (
-                                <div
-                                  key={inv.id}
-                                  className="px-1 hover:bg-indigo-600 rounded-xl cursor-pointer text-[11px] font-black uppercase border-b border-white/5 last:border-0 transition-colors"
-                                  onMouseDown={() =>
-                                    updateItem(idx, 'inventory_id', inv.id)
-                                  }
-                                >
-                                  <div className="flex justify-between items-center">
-                                    <span>{inv.item_name}</span>
-                                    <span className="text-[9px] opacity-60">
-                                      Stock: {inv.stock}
-                                    </span>
-                                  </div>
-                                </div>
-                              ))}
-                          </div>
-                        )}
+          {activeSearchIndex === idx && (
+            <div className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z- max-h-64 overflow-y-auto p-1 shadow-2xl">
+              {inventoryList
+                .filter(
+                  (i) =>
+                    i.branch_id === currentBranchId &&
+                    i.item_name
+                      .toLowerCase()
+                      .includes((searchTerms[idx] || '').toLowerCase())
+                )
+                .map((inv) => (
+                  <div
+                    key={inv.id}
+                    className="px-3 py-2 hover:bg-indigo-600 rounded-xl cursor-pointer text-[11px] font-black uppercase border-b border-white/5 last:border-0 transition-colors"
+                    onMouseDown={() =>
+                      updateItem(idx, 'inventory_id', inv.id)
+                    }
+                  >
+                    <div className="flex justify-between items-center">
+                      <span>{inv.item_name}</span>
+                      <span className="text-[9px] opacity-60">
+                        Stock: {inv.stock}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          )}
 
-                        {!item.inventory_id && searchTerms[idx] !== '' && (
-                          <button
-                            onClick={() => handleQuickAdd(idx)}
-                            className="absolute right-6 top-7 text-[9px] font-black uppercase text-emerald-400 bg-emerald-400/10 px-2 py-1 rounded hover:bg-emerald-400 hover:text-white transition-all"
-                          >
-                            + Add New
-                          </button>
-                        )}
-                      </td>
-                      <td className="px-1 text-center">
-                        <button
-                          onClick={() =>
-                            updateItem(
-                              idx,
-                              'item_type',
-                              item.item_type === 'GENERIC'
-                                ? 'BRANDED'
-                                : 'GENERIC'
-                            )
-                          }
-                          className={`w-full py-2.5 rounded-lg text-[9px] font-black uppercase border transition-all ${
-                            item.item_type === 'GENERIC'
-                              ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400'
-                              : 'bg-amber-500/10 border-amber-500/30 text-amber-400'
-                          }`}
-                        >
-                          {item.item_type}
-                        </button>
-                      </td>
-                      <td className="px-1">
-                        <input
-                          type="number"
-                          className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
-                          value={item.qty}
-                          onChange={(e) =>
-                            updateItem(idx, 'qty', e.target.value)
-                          }
-                        />
-                      </td>
-                      <td className="px-1">
-                        <input
-                          type="number"
-                          className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
-                          value={item.packaging_type}
-                          onChange={(e) =>
-                            updateItem(idx, 'packaging_type', e.target.value)
-                          }
-                        />
-                      </td>
-                      <td className="px-1">
-                        <input
-                          type="number"
-                          className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-right text-[12px] font-bold outline-none"
-                          value={item.invoice_price}
-                          onChange={(e) =>
-                            updateItem(idx, 'invoice_price', e.target.value)
-                          }
-                        />
-                      </td>
-                      <td className="px-1">
-                        <input
-                          type="number"
-                          className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-right text-[12px] font-bold outline-none"
-                          value={item.discount}
-                          onChange={(e) =>
-                            updateItem(idx, 'discount', e.target.value)
-                          }
-                        />
-                      </td>
-                      {/* Unit Buy Cost - Limited to 2 Decimal Places */}
-                      <td className="px-1 text-right font-black text-indigo-300 text-[12px]">
-                        ₱{(item.buy_cost || 0).toFixed(2)}
-                      </td>
-                      {/* Total Buy Cost - Limited to 2 Decimal Places */}
-                      <td className="px-1 text-right font-black text-white text-[12px]">
-                        ₱{(item.buy_cost_total || 0).toFixed(2)}
-                      </td>
-                      {/* Current Price - Limited to 2 Decimal Places */}
-                      <td className="px-1 text-right font-bold text-indigo-400/60 text-[12px]">
-                        ₱{(item.current_price || 0).toFixed(2)}
-                      </td>
-                      <td className="px-1">
-                        <input
-                          type="number"
-                          className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
-                          value={item.markup}
-                          onChange={(e) =>
-                            updateItem(idx, 'markup', e.target.value)
-                          }
-                        />
-                      </td>
-                      {/* New Suggested Price - Limited to 2 Decimal Places */}
-                      <td className="px-1 text-right font-black text-emerald-400 text-[12px]">
-                        ₱{(item.new_price || 0).toFixed(2)}
-                      </td>
-                      <td className="px-1 text-center text-slate-500 text-[11px] font-black">
-                        {item.remaining_stock}
-                      </td>
-                      <td className="px-1 text-center sticky right-0 bg-slate-900 border-l border-white/10 group-hover:bg-slate-800 transition-colors">
-                        <button
-                          onClick={() => {
-                            setItems(items.filter((_, i) => i !== idx));
-                            setSearchTerms(
-                              searchTerms.filter((_, i) => i !== idx)
-                            );
-                          }}
-                          className="p-2 text-slate-600 hover:text-red-500 transition-all"
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
+          {!item.inventory_id && searchTerms[idx] !== '' && (
+            <button
+              onClick={() => handleQuickAdd(idx)}
+              className="absolute right-6 top-1/2 -translate-y-1/2 text-[9px] font-black uppercase text-emerald-400 bg-emerald-400/10 px-2 py-1 rounded hover:bg-emerald-400 hover:text-white transition-all"
+            >
+              + Add New
+            </button>
+          )}
+        </td>
+
+        <td className="px-1 text-center">
+          <button
+            onClick={() =>
+              updateItem(
+                idx,
+                'item_type',
+                item.item_type === 'GENERIC' ? 'BRANDED' : 'GENERIC'
+              )
+            }
+            className={`w-full py-2.5 rounded-lg text-[9px] font-black uppercase border transition-all ${
+              item.item_type === 'GENERIC'
+                ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400'
+                : 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+            }`}
+          >
+            {item.item_type}
+          </button>
+        </td>
+
+        <td className="px-1">
+          <input
+            type="number"
+            className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
+            value={item.qty}
+            onChange={(e) => updateItem(idx, 'qty', e.target.value)}
+          />
+        </td>
+
+        <td className="px-1">
+          <input
+            type="number"
+            className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
+            value={item.packaging_type}
+            onChange={(e) => updateItem(idx, 'packaging_type', e.target.value)}
+          />
+        </td>
+
+        <td className="px-1">
+          <input
+            type="number"
+            className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-right text-[12px] font-bold outline-none"
+            value={item.invoice_price}
+            onChange={(e) => updateItem(idx, 'invoice_price', e.target.value)}
+          />
+        </td>
+
+        <td className="px-1">
+          <input
+            type="number"
+            className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-right text-[12px] font-bold outline-none"
+            value={item.discount}
+            onChange={(e) => updateItem(idx, 'discount', e.target.value)}
+          />
+        </td>
+
+        <td className="px-1 text-right font-black text-indigo-300 text-[12px]">
+          ₱{(item.buy_cost || 0).toFixed(2)}
+        </td>
+
+        <td className="px-1 text-right font-black text-white text-[12px]">
+          ₱{(item.buy_cost_total || 0).toFixed(2)}
+        </td>
+
+        <td className="px-1 text-right font-bold text-indigo-400/60 text-[12px]">
+          ₱{(item.current_price || 0).toFixed(2)}
+        </td>
+
+        <td className="px-1">
+          <input
+            type="number"
+            className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
+            value={item.markup}
+            onChange={(e) => updateItem(idx, 'markup', e.target.value)}
+          />
+        </td>
+
+        <td className="px-1 text-right font-black text-emerald-400 text-[12px]">
+          ₱{(item.new_price || 0).toFixed(2)}
+        </td>
+
+        <td className="px-1 text-center text-slate-500 text-[11px] font-black">
+          {item.remaining_stock}
+        </td>
+
+        <td className="px-1 text-center sticky right-0 bg-slate-900 border-l border-white/10 group-hover:bg-slate-800 transition-colors">
+          <button
+            onClick={() => {
+              setItems(items.filter((_, i) => i !== idx));
+              setSearchTerms(searchTerms.filter((_, i) => i !== idx));
+            }}
+            className="p-2 text-slate-600 hover:text-red-500 transition-all"
+          >
+            <Trash2 size={16} />
+          </button>
+        </td>
+      </tr>
+    ))
+  )}
+</tbody>
             </table>
           </div>
           <button
