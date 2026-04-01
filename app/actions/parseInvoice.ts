@@ -2,27 +2,29 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 export async function parseInvoiceImage(base64Data: string, mimeType: string) {
+  // 1. Force the use of the Vercel key
   const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
 
   if (!apiKey) {
-    console.error('API Key missing');
+    console.error('SERVER ERROR: NEXT_PUBLIC_GEMINI_API_KEY is undefined');
     return null;
   }
 
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
-
-    // FIX: Reverted to a valid model name. 1.5-flash is stable and fast.
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
-      generationConfig: { responseMimeType: 'application/json' },
+      model: 'gemini-1.5-flash',
+      generationConfig: {
+        responseMimeType: 'application/json',
+        temperature: 0.1, // Makes the AI more consistent
+      },
     });
 
     const prompt = `
-      Extract line items from this pharmacy invoice. 
+      Extract items from this invoice. 
       Return ONLY a JSON array of objects with keys: 
       "item_name" (string), "qty" (number), "invoice_price" (number).
-      Handle pharmaceutical shorthand (e.g., 'Amox' -> 'Amoxicillin').
+      Do not include any text other than the JSON.
     `;
 
     const result = await model.generateContent([
@@ -32,9 +34,16 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
 
     const response = await result.response;
     const text = response.text();
-    return JSON.parse(text);
+
+    // 2. CLEANING STEP: Remove markdown blocks that break parsing
+    const cleanJson = text.replace(/```json|```/g, '').trim();
+
+    console.log('AI Raw Output:', cleanJson); // This shows in Vercel Logs
+
+    return JSON.parse(cleanJson);
   } catch (error: any) {
-    console.error('IMAGE SCAN ERROR:', error.message);
+    // 3. LOGGING: This tells us exactly why it failed (e.g. 403 Forbidden, 429 Quota)
+    console.error('AI SERVER ERROR:', error.message);
     return null;
   }
 }
