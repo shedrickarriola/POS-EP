@@ -106,6 +106,47 @@ const getLevenshteinDistance = (a: string, b: string): number => {
 
   return matrix[s1.length][s2.length];
 };
+const findBestInventoryMatch = (aiName: string, inventoryList: any[]) => {
+  if (!aiName || !Array.isArray(inventoryList) || inventoryList.length === 0) {
+    return { bestMatch: null, score: 999 };
+  }
+
+  const aiClean = aiName.toLowerCase().trim();
+  let bestMatch: any = null;
+  let bestScore = 999;
+
+  for (const inv of inventoryList) {
+    if (!inv?.item_name) continue;
+
+    const dbClean = inv.item_name.toLowerCase().trim();
+
+    // Exact match = instant win
+    if (aiClean === dbClean) {
+      return { bestMatch: inv, score: 0 };
+    }
+
+    let distance = getLevenshteinDistance(aiClean, dbClean);
+
+    // Huge bonus if one name is basically a substring of the other (very common with AI)
+    if (aiClean.includes(dbClean) || dbClean.includes(aiClean)) {
+      distance = Math.min(distance, 4);
+    }
+
+    // Length-aware penalty (prevents very different length matches)
+    const maxLen = Math.max(aiClean.length, dbClean.length) || 1;
+    const relativeScore = distance / maxLen;
+
+    // Final smart score (lower = better)
+    let finalScore = distance + relativeScore * 12;
+
+    if (finalScore < bestScore) {
+      bestScore = finalScore;
+      bestMatch = inv;
+    }
+  }
+
+  return { bestMatch, score: bestScore };
+};
 const TableSkeleton = () => (
   <>
     {[...Array(5)].map((_, i) => (
@@ -290,37 +331,45 @@ export default function NewPurchaseOrder() {
         item.remaining_stock = selected.stock || 0;
         item.packaging_type = selected.packaging_type || 1;
 
-        // AUTO-MARKUP
+        // AUTO-MARKUP based on type and name
         item.markup = calculateMarkup(item.item_type, item.item_name);
 
-        // IMPORTANT: Reset match_score to indicate a manual good match
-        item.match_score = 0; // ← This forces GREEN
+        // Force GREEN for manual selection (this was missing or not reliable before)
+        item.match_score = 0;
 
-        // Also sync the search term
+        // Sync search term so the input shows the correct name
         const newST = [...searchTerms];
         newST[index] = selected.item_name;
         setSearchTerms(newST);
       }
       setActiveSearchIndex(null);
     } else {
+      // Update any other field
       (item as any)[field] = value;
 
-      // Re-calculate markup if type or name changed manually
+      // Re-calculate markup only when type or name changes manually
       if (field === 'item_name' || field === 'item_type') {
         item.markup = calculateMarkup(item.item_type, item.item_name);
+
+        // If user manually edits name, we treat it as a custom entry (orange/red)
+        if (field === 'item_name') {
+          item.match_score = 999; // Reset to "No Match" until they re-select from dropdown
+        }
       }
     }
 
-    // === FINAL PRICE CALCULATIONS (unchanged) ===
+    // ====================== FINAL CALCULATIONS ======================
     const qty = Math.max(0, parseFloat(item.qty as any) || 0);
     const pack = Math.max(1, parseFloat(item.packaging_type as any) || 1);
     const invPrice = Math.max(0, parseFloat(item.invoice_price as any) || 0);
     const disc = Math.max(0, parseFloat(item.discount as any) || 0);
     const currentMarkup = parseFloat(item.markup as any) || 0;
 
+    // 1. Total Buy Cost
     const rawTotal = qty * invPrice - disc;
     item.buy_cost_total = Math.round(rawTotal * 100) / 100;
 
+    // 2. Unit Buy Cost
     const totalUnits = qty * pack;
     if (totalUnits > 0) {
       const rawUnitCost = item.buy_cost_total / totalUnits;
@@ -329,6 +378,7 @@ export default function NewPurchaseOrder() {
       item.buy_cost = 0;
     }
 
+    // 3. Suggested New Price (rounded up to nearest whole number)
     item.new_price = Math.ceil(item.buy_cost * (1 + currentMarkup / 100));
 
     newItems[index] = item;
@@ -382,57 +432,16 @@ export default function NewPurchaseOrder() {
           const aiMappedItems = extracted.map((extractedItem: any) => {
             const aiName = (extractedItem.item_name || '').trim();
 
-            let bestMatch: any = null;
-            let minDistance = Infinity;
-
-            if (Array.isArray(inventoryList) && inventoryList.length > 0) {
-              for (const inv of inventoryList) {
-                if (!inv?.item_name) continue;
-
-                let distance = getLevenshteinDistance(aiName, inv.item_name);
-
-                // Bonus: If one name is mostly contained in the other (common in AI vs DB)
-                const aiLower = aiName.toLowerCase();
-                const invLower = inv.item_name.toLowerCase();
-
-                if (aiLower.includes(invLower) || invLower.includes(aiLower)) {
-                  distance = Math.min(
-                    distance,
-                    Math.floor(
-                      Math.max(aiName.length, inv.item_name.length) * 0.25
-                    )
-                  );
-                }
-
-                if (distance < minDistance) {
-                  minDistance = distance;
-                  bestMatch = inv;
-                }
-
-                if (distance === 0) break; // exact match
-              }
-            }
-
-            // === NEW THRESHOLD LOGIC (relative + absolute) ===
-            const longerLength = Math.max(
-              aiName.length,
-              bestMatch?.item_name?.length || 0
+            const { bestMatch, score: matchScore } = findBestInventoryMatch(
+              aiName,
+              inventoryList
             );
-            const relativeThreshold = Math.max(
-              5,
-              Math.floor(longerLength * 0.25)
-            ); // allow ~25% difference
-
-            const isGoodMatch =
-              minDistance <= 5 || minDistance <= relativeThreshold;
-            const isAcceptableMatch =
-              minDistance <= 10 ||
-              minDistance <= Math.floor(longerLength * 0.35);
-
-            const matchedItem = isAcceptableMatch ? bestMatch : null;
 
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
+
+            // Match if score is reasonably good (you can tweak 15 if needed)
+            const matchedItem = matchScore <= 15 ? bestMatch : null;
 
             const finalName = matchedItem?.item_name || aiName;
             const markupVal = calculateMarkup(
@@ -449,7 +458,7 @@ export default function NewPurchaseOrder() {
               invoice_price: price,
               buy_cost: price,
               buy_cost_total: qty * price,
-              match_score: matchedItem ? minDistance : 999,
+              match_score: matchedItem ? Math.round(matchScore) : 999,
               markup: markupVal,
               new_price: Math.ceil(price * (1 + markupVal / 100)),
               current_price: matchedItem?.price || 0,
@@ -462,7 +471,7 @@ export default function NewPurchaseOrder() {
         }
       } catch (err) {
         console.error('AI Extraction Failed:', err);
-        alert('Error processing image. Check console for details.');
+        alert('Error processing image. Check console.');
       } finally {
         setIsScanning(false);
         if (e.target) e.target.value = '';
@@ -810,16 +819,16 @@ export default function NewPurchaseOrder() {
                         <td className="px-1 relative">
                           <input
                             className={`w-full bg-slate-950 border rounded-xl p-3 text-[12px] font-bold outline-none transition-all ${
-                              // RED: No inventory linked yet
+                              // Red = Needs manual mapping
                               !hasInventoryId && searchTerms[idx] !== ''
                                 ? 'border-red-500/50 bg-red-500/5'
-                                : // GREEN: Good match (manual selection or strong AI match)
-                                hasInventoryId && matchScore <= 5
+                                : // Green = Good / Strong match
+                                hasInventoryId && matchScore <= 8
                                 ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-50'
-                                : // ORANGE: Acceptable fuzzy match
-                                hasInventoryId && matchScore <= 10
+                                : // Orange = Acceptable fuzzy match
+                                hasInventoryId && matchScore <= 15
                                 ? 'border-amber-500/50 bg-amber-500/10 text-amber-50'
-                                : // RED: Poor or no match
+                                : // Red = Poor / No match
                                   'border-red-500/50 bg-red-500/5'
                             }`}
                             placeholder="Type to find product..."
@@ -840,11 +849,11 @@ export default function NewPurchaseOrder() {
                           {/* Status Badge */}
                           {hasInventoryId && (
                             <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none">
-                              {matchScore <= 5 ? (
+                              {matchScore <= 8 ? (
                                 <span className="text-[8px] font-black text-emerald-500/70 uppercase tracking-tighter">
                                   Good Match
                                 </span>
-                              ) : matchScore <= 10 ? (
+                              ) : matchScore <= 15 ? (
                                 <span className="text-[8px] font-black text-amber-500/70 uppercase tracking-tighter">
                                   Review
                                 </span>
@@ -856,7 +865,7 @@ export default function NewPurchaseOrder() {
                             </div>
                           )}
 
-                          {/* Dropdown Search Results */}
+                          {/* Dropdown when typing */}
                           {activeSearchIndex === idx && (
                             <div className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z-[60] max-h-64 overflow-y-auto p-1 shadow-2xl">
                               {inventoryList
@@ -888,7 +897,7 @@ export default function NewPurchaseOrder() {
                             </div>
                           )}
 
-                          {/* + Add New Button */}
+                          {/* + Add New button */}
                           {!hasInventoryId && searchTerms[idx] !== '' && (
                             <button
                               onClick={() => handleQuickAdd(idx)}
@@ -899,7 +908,7 @@ export default function NewPurchaseOrder() {
                           )}
                         </td>
 
-                        {/* ==================== REST OF THE COLUMNS (unchanged) ==================== */}
+                        {/* === ALL OTHER COLUMNS REMAIN EXACTLY THE SAME AS YOU POSTED === */}
                         <td className="px-1 text-center">
                           <button
                             onClick={() =>
