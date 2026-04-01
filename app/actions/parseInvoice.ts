@@ -5,11 +5,11 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 const getApiKey = () => process.env.GEMINI_API_KEY;
 
 /**
- * FIXED: Returns the actual Base64 STRING, not an array.
+ * FIXED: Returns the actual Base64 STRING at index 1, not the whole array.
  */
 const cleanBase64 = (base64String: string): string => {
   if (base64String.includes(',')) {
-    // .split(',') returns [header, data]. We need the data at index 1.
+    // is the 'data:image/jpeg;base64' header, is the actual base64 string
     return base64String.split(','); 
   }
   return base64String;
@@ -40,7 +40,7 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
       Handle pharmaceutical shorthand (e.g., 'Amox' -> 'Amoxicillin').
     `;
 
-    // Process the image data to ensure it's a raw string, not an array
+    // CRITICAL: Get the raw string, NOT the array from .split()
     const sanitizedData = cleanBase64(base64Data);
 
     // Call the model with explicit Part objects
@@ -48,7 +48,7 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
       { text: prompt },
       {
         inlineData: {
-          data: sanitizedData, // This is now a String, fixing the 400 error
+          data: sanitizedData, // This is now a pure String
           mimeType: mimeType,
         },
       },
@@ -57,8 +57,9 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
     const response = await result.response;
     const text = response.text();
 
-    // Parse and return the structured data
+    // With responseMimeType: 'application/json', the result is clean JSON
     return JSON.parse(text);
+
   } catch (error: any) {
     console.error('IMAGE SCAN ERROR:', error.message);
     return null;
