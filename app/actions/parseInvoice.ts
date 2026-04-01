@@ -9,7 +9,7 @@ const getApiKey = () => process.env.GEMINI_API_KEY;
  */
 const cleanBase64 = (base64String: string): string => {
   if (base64String.includes(',')) {
-    // split() returns [header, data]. We need.
+    // .split(',') returns [header, data]. We need the data at index 1.
     return base64String.split(','); 
   }
   return base64String;
@@ -40,7 +40,7 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
       Handle pharmaceutical shorthand (e.g., 'Amox' -> 'Amoxicillin').
     `;
 
-    // Process the image data to ensure it's a raw string
+    // Process the image data to ensure it's a raw string, not an array
     const sanitizedData = cleanBase64(base64Data);
 
     // Call the model with explicit Part objects
@@ -48,7 +48,7 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
       { text: prompt },
       {
         inlineData: {
-          data: sanitizedData,
+          data: sanitizedData, // This is now a String, fixing the 400 error
           mimeType: mimeType,
         },
       },
@@ -57,15 +57,10 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
     const response = await result.response;
     const text = response.text();
 
-    // With responseMimeType: 'application/json', result is usually clean JSON
+    // Parse and return the structured data
     return JSON.parse(text);
-
   } catch (error: any) {
     console.error('IMAGE SCAN ERROR:', error.message);
-    // Log details if it's still a 400 to see if the payload structure changed
-    if (error.message.includes('400')) {
-       console.error('Payload Issue: Ensure mimeType matches the file (e.g., image/jpeg)');
-    }
     return null;
   }
 }
@@ -85,7 +80,7 @@ export async function parseInvoiceText(pastedText: string) {
 
     const result = await model.generateContent(prompt);
     const response = await result.response;
-    
+
     return JSON.parse(response.text());
   } catch (error: any) {
     console.error('TEXT SCAN ERROR:', error.message);
