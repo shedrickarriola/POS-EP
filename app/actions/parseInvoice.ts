@@ -1,30 +1,32 @@
 'use server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
+// Helper to get API Key safely
+const getApiKey = () => process.env.NEXT_PUBLIC_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+
 export async function parseInvoiceImage(base64Data: string, mimeType: string) {
-  // 1. Force the use of the Vercel key
-  const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+  const apiKey = getApiKey();
 
   if (!apiKey) {
-    console.error('SERVER ERROR: NEXT_PUBLIC_GEMINI_API_KEY is undefined');
+    console.error('SERVER ERROR: API Key missing');
     return null;
   }
 
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
-      model: 'gemini-1.5-flash',
-      generationConfig: {
+      model: 'gemini-1.5-flash', // Correct stable model
+      generationConfig: { 
         responseMimeType: 'application/json',
-        temperature: 0.1, // Makes the AI more consistent
+        temperature: 0.1 
       },
     });
 
     const prompt = `
-      Extract items from this invoice. 
+      Extract items from this pharmacy invoice. 
       Return ONLY a JSON array of objects with keys: 
       "item_name" (string), "qty" (number), "invoice_price" (number).
-      Do not include any text other than the JSON.
+      Handle pharmaceutical shorthand (e.g., 'Amox' -> 'Amoxicillin').
     `;
 
     const result = await model.generateContent([
@@ -34,57 +36,57 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
 
     const response = await result.response;
     const text = response.text();
-
-    // 2. CLEANING STEP: Remove markdown blocks that break parsing
+    
+    // Robust cleaning: removes markdown and any leading/trailing whitespace
     const cleanJson = text.replace(/```json|```/g, '').trim();
-
-    console.log('AI Raw Output:', cleanJson); // This shows in Vercel Logs
+    console.log('AI Image Scan Raw Output:', cleanJson);
 
     return JSON.parse(cleanJson);
   } catch (error: any) {
-    // 3. LOGGING: This tells us exactly why it failed (e.g. 403 Forbidden, 429 Quota)
-    console.error('AI SERVER ERROR:', error.message);
+    console.error('IMAGE SCAN ERROR:', error.message);
     return null;
   }
 }
 
 export async function parseInvoiceText(pastedText: string) {
-  const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+  const apiKey = getApiKey();
 
   if (!apiKey) {
-    console.error('API Key missing');
+    console.error('SERVER ERROR: API Key missing');
     return null;
   }
 
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
 
-    // FIX: Using a valid model name
+    // FIX: Changed from 2.5-flash to 1.5-flash
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
-      generationConfig: { responseMimeType: 'application/json' },
+      model: 'gemini-1.5-flash', 
+      generationConfig: { 
+        responseMimeType: 'application/json',
+        temperature: 0.1
+      },
     });
 
     const prompt = `
       Extract pharmacy items from the following text. 
-      Return ONLY a JSON array of objects with keys: 
-      "item_name" (string), "qty" (number)
+      Return ONLY a JSON array of objects with keys: "item_name" and "qty".
       Handle pharmaceutical shorthand (e.g., 'Amox' -> 'Amoxicillin').
-      Return ONLY a JSON array of objects with keys 'item_name' and 'qty'.
       If quantity is not mentioned, use 1.
       
       Text: ${pastedText}
     `;
 
-    // FIX: Removed the incorrect inlineData block that was causing the crash
     const result = await model.generateContent(prompt);
-
     const response = await result.response;
     const text = response.text();
-    const data = JSON.parse(text);
-
-    // Ensure we return an array even if Gemini wraps it in an object
+    
+    const cleanJson = text.replace(/```json|```/g, '').trim();
+    console.log('AI Text Scan Raw Output:', cleanJson);
+    
+    const data = JSON.parse(cleanJson);
     return Array.isArray(data) ? data : data.items || data.data || [];
+
   } catch (error: any) {
     console.error('TEXT SCAN ERROR:', error.message);
     return null;
