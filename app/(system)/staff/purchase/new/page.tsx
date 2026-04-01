@@ -327,7 +327,7 @@ export default function NewPurchaseOrder() {
   };
 
   const handleAiUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[1];
+    const file = e.target.files?.[0];
     if (!file) return;
 
     setIsScanning(true);
