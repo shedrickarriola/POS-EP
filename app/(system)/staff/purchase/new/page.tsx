@@ -114,13 +114,12 @@ const normalizeMedicineName = (name: string): string => {
     name
       .toLowerCase()
       .trim()
-      // Remove common dosage forms and units that AI often adds
+      // Remove common forms that AI adds
       .replace(
-        /\b(tab|tablet|cap|capsule|syrup|susp|suspension|tab\.)s?\b/gi,
+        /\b(tab|tablet|cap|capsule|syrup|susp|suspension|tab\.|strip|box|vial)\b/gi,
         ''
       )
-      .replace(/\b(mg|ml|gm|g|mcg|iu|amp| vial|strip|box)\b/gi, ' $1 ') // keep mg/ml but normalize spacing
-      // Remove extra punctuation and collapse spaces
+      .replace(/\b(mg|ml|gm|g|mcg)\b/gi, ' $1 ') // keep strength with space
       .replace(/[^a-z0-9\s]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
@@ -467,12 +466,20 @@ export default function NewPurchaseOrder() {
                   normalizedDb
                 );
 
-                // Bonus if one normalized name is mostly contained in the other
+                // Substring bonus (still useful)
                 if (
                   normalizedAi.includes(normalizedDb) ||
                   normalizedDb.includes(normalizedAi)
                 ) {
-                  distance = Math.min(distance, 4);
+                  distance = Math.min(distance, 3);
+                }
+
+                // Extra penalty if lengths differ too much (prevents wrong drug matching)
+                const lenDiff = Math.abs(
+                  normalizedAi.length - normalizedDb.length
+                );
+                if (lenDiff > 8) {
+                  distance += 3;
                 }
 
                 if (distance < bestScore) {
@@ -480,15 +487,15 @@ export default function NewPurchaseOrder() {
                   bestMatch = inv;
                 }
 
-                if (distance === 0) break; // perfect match
+                if (distance === 0) break;
               }
             }
 
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
 
-            // Lenient but safer threshold after normalization
-            const matchedItem = bestScore <= 12 ? bestMatch : null;
+            // STRICT thresholds as you requested (3-5 range for green)
+            const matchedItem = bestScore <= 8 ? bestMatch : null;
 
             const finalName = matchedItem?.item_name || aiName;
             const markupVal = calculateMarkup(
@@ -869,13 +876,13 @@ export default function NewPurchaseOrder() {
                               // Red: No inventory linked yet
                               !hasInventoryId && searchTerms[idx] !== ''
                                 ? 'border-red-500/50 bg-red-500/5'
-                                : // Green: Strong / Good match
-                                hasInventoryId && matchScore <= 10
+                                : // Green: Very good / Close match (strict 3-5 range)
+                                hasInventoryId && matchScore <= 5
                                 ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-50'
-                                : // Orange: Acceptable fuzzy match (most common case now)
-                                hasInventoryId && matchScore <= 25
+                                : // Orange: Acceptable but needs review (up to 8-10)
+                                hasInventoryId && matchScore <= 10
                                 ? 'border-amber-500/50 bg-amber-500/10 text-amber-50'
-                                : // Red: Poor or no match
+                                : // Red: Poor or wrong match
                                   'border-red-500/50 bg-red-500/5'
                             }`}
                             placeholder="Type to find product..."
@@ -893,14 +900,14 @@ export default function NewPurchaseOrder() {
                             }}
                           />
 
-                          {/* Status Badge - More forgiving */}
+                          {/* Status Badge - Strict */}
                           {hasInventoryId && (
                             <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none">
-                              {matchScore <= 10 ? (
+                              {matchScore <= 5 ? (
                                 <span className="text-[8px] font-black text-emerald-500/70 uppercase tracking-tighter">
                                   Good Match
                                 </span>
-                              ) : matchScore <= 25 ? (
+                              ) : matchScore <= 10 ? (
                                 <span className="text-[8px] font-black text-amber-500/70 uppercase tracking-tighter">
                                   Review
                                 </span>
@@ -912,7 +919,7 @@ export default function NewPurchaseOrder() {
                             </div>
                           )}
 
-                          {/* Dropdown Search Results */}
+                          {/* Dropdown when typing */}
                           {activeSearchIndex === idx && (
                             <div className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z-[60] max-h-64 overflow-y-auto p-1 shadow-2xl">
                               {inventoryList
