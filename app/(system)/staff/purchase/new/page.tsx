@@ -441,38 +441,35 @@ export default function NewPurchaseOrder() {
 
                 let distance = getLevenshteinDistance(aiName, inv.item_name);
 
-                // Smart bonuses for common pharmacy patterns
                 const aiLower = aiName.toLowerCase();
                 const dbLower = inv.item_name.toLowerCase();
 
+                // Smart bonuses for common pharmacy name variations
                 if (aiLower.includes(dbLower) || dbLower.includes(aiLower)) {
-                  distance = Math.min(distance, 6); // Big bonus for substring
+                  distance = Math.min(distance, 5);
                 }
 
-                // Extra tolerance for number/unit differences (e.g. 500mg vs 500 mg)
+                // Very tolerant if they are almost the same after removing spaces
                 if (
                   aiLower.replace(/\s+/g, '') === dbLower.replace(/\s+/g, '')
                 ) {
                   distance = Math.min(distance, 3);
                 }
 
-                // Final score (lower = better)
-                const finalScore = distance;
-
-                if (finalScore < bestScore) {
-                  bestScore = finalScore;
+                if (distance < bestScore) {
+                  bestScore = distance;
                   bestMatch = inv;
                 }
 
-                if (distance === 0) break; // perfect match
+                if (distance === 0) break;
               }
             }
 
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
 
-            // More lenient thresholds
-            const matchedItem = bestScore <= 12 ? bestMatch : null;
+            // More lenient threshold - most real cases should now match
+            const matchedItem = bestScore <= 18 ? bestMatch : null;
 
             const finalName = matchedItem?.item_name || aiName;
             const markupVal = calculateMarkup(
@@ -489,7 +486,7 @@ export default function NewPurchaseOrder() {
               invoice_price: price,
               buy_cost: price,
               buy_cost_total: qty * price,
-              match_score: matchedItem ? bestScore : 999,
+              match_score: matchedItem ? Math.round(bestScore) : 999,
               markup: markupVal,
               new_price: Math.ceil(price * (1 + markupVal / 100)),
               current_price: matchedItem?.price || 0,
@@ -502,7 +499,7 @@ export default function NewPurchaseOrder() {
         }
       } catch (err) {
         console.error('AI Extraction Failed:', err);
-        alert('Error processing image. Check console for details.');
+        alert('Error processing image. Check console.');
       } finally {
         setIsScanning(false);
         if (e.target) e.target.value = '';
@@ -850,16 +847,16 @@ export default function NewPurchaseOrder() {
                         <td className="px-1 relative">
                           <input
                             className={`w-full bg-slate-950 border rounded-xl p-3 text-[12px] font-bold outline-none transition-all ${
-                              // Red = Needs manual mapping
+                              // Red: No inventory linked yet
                               !hasInventoryId && searchTerms[idx] !== ''
                                 ? 'border-red-500/50 bg-red-500/5'
-                                : // Green = Good / Strong match
-                                hasInventoryId && matchScore <= 8
+                                : // Green: Strong / Good match
+                                hasInventoryId && matchScore <= 10
                                 ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-50'
-                                : // Orange = Acceptable fuzzy match
-                                hasInventoryId && matchScore <= 15
+                                : // Orange: Acceptable fuzzy match (most common case now)
+                                hasInventoryId && matchScore <= 25
                                 ? 'border-amber-500/50 bg-amber-500/10 text-amber-50'
-                                : // Red = Poor / No match
+                                : // Red: Poor or no match
                                   'border-red-500/50 bg-red-500/5'
                             }`}
                             placeholder="Type to find product..."
@@ -877,14 +874,14 @@ export default function NewPurchaseOrder() {
                             }}
                           />
 
-                          {/* Status Badge */}
+                          {/* Status Badge - More forgiving */}
                           {hasInventoryId && (
                             <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none">
-                              {matchScore <= 8 ? (
+                              {matchScore <= 10 ? (
                                 <span className="text-[8px] font-black text-emerald-500/70 uppercase tracking-tighter">
                                   Good Match
                                 </span>
-                              ) : matchScore <= 15 ? (
+                              ) : matchScore <= 25 ? (
                                 <span className="text-[8px] font-black text-amber-500/70 uppercase tracking-tighter">
                                   Review
                                 </span>
@@ -896,7 +893,7 @@ export default function NewPurchaseOrder() {
                             </div>
                           )}
 
-                          {/* Dropdown when typing */}
+                          {/* Dropdown Search Results */}
                           {activeSearchIndex === idx && (
                             <div className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z-[60] max-h-64 overflow-y-auto p-1 shadow-2xl">
                               {inventoryList
@@ -928,7 +925,7 @@ export default function NewPurchaseOrder() {
                             </div>
                           )}
 
-                          {/* + Add New button */}
+                          {/* + Add New Button */}
                           {!hasInventoryId && searchTerms[idx] !== '' && (
                             <button
                               onClick={() => handleQuickAdd(idx)}
@@ -939,7 +936,7 @@ export default function NewPurchaseOrder() {
                           )}
                         </td>
 
-                        {/* === ALL OTHER COLUMNS REMAIN EXACTLY THE SAME AS YOU POSTED === */}
+                        {/* === REST OF THE COLUMNS (unchanged) === */}
                         <td className="px-1 text-center">
                           <button
                             onClick={() =>
