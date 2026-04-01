@@ -1,27 +1,21 @@
 'use server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-// Server-side only: Ensure GEMINI_API_KEY is set in Vercel Project Settings
 const getApiKey = () => process.env.GEMINI_API_KEY;
 
 /**
- * FIXED: Returns the actual Base64 STRING, not an array.
- * We must select index after the split.
+ * THE FIX: .pop() ensures we get the LAST element (the data)
+ * and specifically returns it as a STRING, not an array.
  */
 const cleanBase64 = (base64String: string): string => {
-  if (base64String.includes(',')) {
-    // split() returns ["data:image/png;base64", "actual_base64_data"]
-    // We only want the second part (index 1)
-    return base64String.split(','); 
-  }
-  return base64String;
+  if (typeof base64String !== 'string') return '';
+  return base64String.split(',').pop() || '';
 };
 
 export async function parseInvoiceImage(base64Data: string, mimeType: string) {
   const apiKey = getApiKey();
-
   if (!apiKey) {
-    console.error('SERVER ERROR: API Key missing in environment variables');
+    console.error('SERVER ERROR: API Key missing');
     return null;
   }
 
@@ -35,31 +29,23 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
       },
     });
 
-    const prompt = `
-      Extract items from this pharmacy invoice. 
-      Return ONLY a JSON array of objects with keys: 
-      "item_name" (string), "qty" (number), "invoice_price" (number).
-      Handle pharmaceutical shorthand (e.g., 'Amox' -> 'Amoxicillin').
-    `;
-
-    // Process the image data to ensure it's a raw string, not an array
     const sanitizedData = cleanBase64(base64Data);
 
-    // Call the model with explicit Part objects
+    // We use the most explicit "Part" structure possible here
     const result = await model.generateContent([
-      { text: prompt },
+      {
+        text: 'Extract pharmacy invoice items: item_name, qty, invoice_price. Return ONLY JSON.',
+      },
       {
         inlineData: {
-          data: sanitizedData, // MUST be a string
+          data: sanitizedData, // This is now a String.
           mimeType: mimeType,
         },
       },
     ]);
 
     const response = await result.response;
-    const text = response.text();
-
-    return JSON.parse(text);
+    return JSON.parse(response.text());
   } catch (error: any) {
     console.error('IMAGE SCAN ERROR:', error.message);
     return null;
