@@ -14,7 +14,7 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
-      model: 'gemini-1.5-flash',
+      model: 'gemini-2.5-flash',
       generationConfig: { 
         responseMimeType: 'application/json',
         temperature: 0.1 
@@ -28,8 +28,8 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
       Handle pharmaceutical shorthand (e.g., 'Amox' -> 'Amoxicillin').
     `;
 
-    // FIX: The array should contain ONE object with a 'parts' array, 
-    // OR just pass the parts directly as an array.
+    // FIX: The SDK expects an array of parts. 
+    // Each part must be its own object.
     const result = await model.generateContent([
       {
         inlineData: {
@@ -45,11 +45,11 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
     const response = await result.response;
     const text = response.text();
     
+    // Clean potential markdown and parse
     const cleanJson = text.replace(/```json|```/g, '').trim();
     return JSON.parse(cleanJson);
 
   } catch (error: any) {
-    // This will now show the specific reason if it fails again
     console.error('IMAGE SCAN ERROR:', error.message);
     return null;
   }
@@ -62,7 +62,7 @@ export async function parseInvoiceText(pastedText: string) {
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
-      model: 'gemini-1.5-flash', 
+      model: 'gemini-2.5-flash', 
       generationConfig: { responseMimeType: 'application/json' },
     });
 
