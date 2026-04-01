@@ -1,23 +1,34 @@
 'use server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-const getApiKey = () => process.env.NEXT_PUBLIC_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+// In 'use server', we only need the private GEMINI_API_KEY from Vercel env
+const getApiKey = () => process.env.GEMINI_API_KEY;
+
+/**
+ * Utility to strip the Data URL prefix if it exists
+ */
+const cleanBase64 = (base64String: string) => {
+  if (base64String.includes(',')) {
+    return base64String.split(',');
+  }
+  return base64String;
+};
 
 export async function parseInvoiceImage(base64Data: string, mimeType: string) {
   const apiKey = getApiKey();
 
   if (!apiKey) {
-    console.error('SERVER ERROR: API Key missing');
+    console.error('SERVER ERROR: API Key missing in environment variables');
     return null;
   }
 
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
-      generationConfig: { 
+      model: 'gemini-1.5-flash',
+      generationConfig: {
         responseMimeType: 'application/json',
-        temperature: 0.1 
+        temperature: 0.1,
       },
     });
 
@@ -28,29 +39,31 @@ export async function parseInvoiceImage(base64Data: string, mimeType: string) {
       Handle pharmaceutical shorthand (e.g., 'Amox' -> 'Amoxicillin').
     `;
 
-    // FIX: The SDK expects an array of parts. 
-    // Each part must be its own object.
+    // CRITICAL: We pass the prompt as a string and the image as a Part object.
+    // We also ensure the base64 is cleaned of any "data:image/..." headers.
     const result = await model.generateContent([
+      prompt,
       {
         inlineData: {
-          data: base64Data,
-          mimeType: mimeType
-        }
+          data: cleanBase64(base64Data),
+          mimeType: mimeType,
+        },
       },
-      {
-        text: prompt
-      }
     ]);
 
     const response = await result.response;
     const text = response.text();
-    
-    // Clean potential markdown and parse
-    const cleanJson = text.replace(/```json|```/g, '').trim();
-    return JSON.parse(cleanJson);
+
+    // Since we set responseMimeType to application/json, 
+    // the model should return raw JSON without markdown backticks.
+    return JSON.parse(text);
 
   } catch (error: any) {
     console.error('IMAGE SCAN ERROR:', error.message);
+    // If it's still a 400 error, log the full detail for debugging
+    if (error.message.includes('400')) {
+      console.error('Check if base64Data is valid and API key has access to 1.5-flash');
+    }
     return null;
   }
 }
@@ -62,7 +75,7 @@ export async function parseInvoiceText(pastedText: string) {
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash', 
+      model: 'gemini-1.5-flash',
       generationConfig: { responseMimeType: 'application/json' },
     });
 
@@ -70,10 +83,9 @@ export async function parseInvoiceText(pastedText: string) {
 
     const result = await model.generateContent(prompt);
     const response = await result.response;
-    const text = response.text();
     
-    const cleanJson = text.replace(/```json|```/g, '').trim();
-    return JSON.parse(cleanJson);
+    // No need to replace backticks if using responseMimeType: 'application/json'
+    return JSON.parse(response.text());
   } catch (error: any) {
     console.error('TEXT SCAN ERROR:', error.message);
     return null;
