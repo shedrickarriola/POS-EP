@@ -909,37 +909,36 @@ export default function NewPurchaseOrder() {
                   items.map((item, idx) => {
                     const matchScore = item.match_score ?? 999;
                     const hasInventoryId = !!item.inventory_id;
+                    // Using a stable key prevents row re-mounting during state changes
+                    const rowKey = item.id || `row-${item.inventory_id}-${idx}`;
 
                     return (
                       <tr
-                        key={idx}
+                        key={rowKey}
                         className={`group hover:bg-white/[0.02] transition-colors relative ${
                           activeSearchIndex === idx ? 'z-50' : 'z-0'
                         }`}
                       >
                         <td className="px-1 relative">
                           <input
-                            className={`w-full bg-slate-950 border rounded-xl p-3 text-[12px] font-bold outline-none transition-all ${
-                              // Red: No inventory linked yet
+                            className={`w-full bg-slate-950 border rounded-xl p-3 text-[12px] font-bold outline-none transition-all uppercase ${
                               !hasInventoryId && searchTerms[idx] !== ''
                                 ? 'border-red-500/50 bg-red-500/5'
-                                : // Green: Very good / Close match (strict 3-5 range)
-                                hasInventoryId && matchScore <= 5
+                                : hasInventoryId && matchScore <= 5
                                 ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-50'
-                                : // Orange: Acceptable but needs review (up to 8-10)
-                                hasInventoryId && matchScore <= 10
+                                : hasInventoryId && matchScore <= 10
                                 ? 'border-amber-500/50 bg-amber-500/10 text-amber-50'
-                                : // Red: Poor or wrong match
-                                  'border-red-500/50 bg-red-500/5'
+                                : 'border-red-500/50 bg-red-500/5'
                             }`}
-                            placeholder="Type to find product..."
-                            value={searchTerms[idx]}
+                            placeholder="TYPE TO FIND PRODUCT..."
+                            value={searchTerms[idx] || ''}
                             onFocus={() => setActiveSearchIndex(idx)}
-                            onBlur={() =>
-                              setTimeout(() => setActiveSearchIndex(null), 250)
-                            }
+                            onBlur={() => {
+                              // Increased delay slightly to allow dropdown onClick to finish first
+                              setTimeout(() => setActiveSearchIndex(null), 300);
+                            }}
                             onChange={(e) => {
-                              const newVal = e.target.value;
+                              const newVal = e.target.value.toUpperCase();
                               const t = [...searchTerms];
                               t[idx] = newVal;
                               setSearchTerms(t);
@@ -947,7 +946,7 @@ export default function NewPurchaseOrder() {
                             }}
                           />
 
-                          {/* Status Badge - Strict */}
+                          {/* Status Badge */}
                           {hasInventoryId && (
                             <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none">
                               {matchScore <= 5 ? (
@@ -968,7 +967,11 @@ export default function NewPurchaseOrder() {
 
                           {/* Dropdown when typing */}
                           {activeSearchIndex === idx && (
-                            <div className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z-[60] max-h-64 overflow-y-auto p-1 shadow-2xl">
+                            <div
+                              className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z- max-h-64 overflow-y-auto p-1 shadow-2xl"
+                              // Prevent the blur from closing when clicking scrollbar
+                              onMouseDown={(e) => e.preventDefault()}
+                            >
                               {inventoryList
                                 .filter(
                                   (i) =>
@@ -983,14 +986,23 @@ export default function NewPurchaseOrder() {
                                   <div
                                     key={inv.id}
                                     className="px-3 py-2 hover:bg-indigo-600 rounded-xl cursor-pointer text-[11px] font-black uppercase border-b border-white/5 last:border-0 transition-colors"
-                                    onMouseDown={() =>
-                                      updateItem(idx, 'inventory_id', inv.id)
-                                    }
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      // Update inventory link
+                                      updateItem(idx, 'inventory_id', inv.id);
+                                      // Also update the search term to match selection
+                                      const t = [...searchTerms];
+                                      t[idx] = inv.item_name.toUpperCase();
+                                      setSearchTerms(t);
+                                      // Close dropdown
+                                      setActiveSearchIndex(null);
+                                    }}
                                   >
-                                    <div className="flex justify-between items-center">
+                                    <div className="flex justify-between items-center pointer-events-none">
                                       <span>{inv.item_name}</span>
                                       <span className="text-[9px] opacity-60">
-                                        Stock: {inv.stock}
+                                        STOCK: {inv.stock}
                                       </span>
                                     </div>
                                   </div>
@@ -999,17 +1011,18 @@ export default function NewPurchaseOrder() {
                           )}
 
                           {/* + Add New Button */}
-                          {!hasInventoryId && searchTerms[idx] !== '' && (
-                            <button
-                              onClick={() => handleQuickAdd(idx)}
-                              className="absolute right-6 top-1/2 -translate-y-1/2 text-[9px] font-black uppercase text-emerald-400 bg-emerald-400/10 px-2 py-1 rounded hover:bg-emerald-400 hover:text-white transition-all"
-                            >
-                              + Add New
-                            </button>
-                          )}
+                          {!hasInventoryId &&
+                            searchTerms[idx] !== '' &&
+                            activeSearchIndex !== idx && (
+                              <button
+                                onClick={() => handleQuickAdd(idx)}
+                                className="absolute right-6 top-1/2 -translate-y-1/2 text-[9px] font-black uppercase text-emerald-400 bg-emerald-400/10 px-2 py-1 rounded hover:bg-emerald-400 hover:text-white transition-all"
+                              >
+                                + Add New
+                              </button>
+                            )}
                         </td>
 
-                        {/* === REST OF THE COLUMNS (unchanged) === */}
                         <td className="px-1 text-center">
                           <button
                             onClick={() =>
@@ -1044,11 +1057,15 @@ export default function NewPurchaseOrder() {
 
                         <td className="px-1">
                           <input
-                            type="number"
-                            className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
-                            value={item.packaging_type}
+                            type="text"
+                            className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none uppercase"
+                            value={item.packaging_type || ''}
                             onChange={(e) =>
-                              updateItem(idx, 'packaging_type', e.target.value)
+                              updateItem(
+                                idx,
+                                'packaging_type',
+                                e.target.value.toUpperCase()
+                              )
                             }
                           />
                         </td>
