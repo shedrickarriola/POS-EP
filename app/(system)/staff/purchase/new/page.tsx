@@ -461,39 +461,36 @@ export default function NewPurchaseOrder() {
             let bestScore = 999;
 
             if (Array.isArray(inventoryList) && inventoryList.length > 0) {
-              // Extract dosage numbers from AI result (e.g., "40", "125/5")
               const aiNumbers = normalizedAi.match(/\d+/g) || [];
 
               for (const inv of inventoryList) {
                 if (!inv?.item_name) continue;
 
                 const normalizedDb = normalizeMedicineName(inv.item_name);
-                let distance = getLevenshteinDistance(
-                  normalizedAi,
-                  normalizedDb
-                );
-
-                // --- DOSAGE GUARD ---
-                const dbNumbers = normalizedDb.match(/\d+/g) || [];
-
-                // Check if all numbers found by AI exist in this DB item
-                const hasDosageMatch = aiNumbers.every((num) =>
-                  dbNumbers.includes(num)
-                );
-
-                if (aiNumbers.length > 0 && !hasDosageMatch) {
-                  // Mismatching dosage numbers (e.g., 40 vs 10)
-                  // adds a penalty to prevent false positives
-                  distance += 30;
+                
+                // 1. PRIORITY: EXACT NORMALIZED MATCH
+                // If they are identical after normalization, stop looking.
+                if (normalizedAi === normalizedDb) {
+                  bestMatch = inv;
+                  bestScore = 0;
+                  break; 
                 }
 
-                // Substring bonus (only if dosage matches or no dosage was found)
-                if (distance < 30) {
-                  if (
-                    normalizedAi.includes(normalizedDb) ||
-                    normalizedDb.includes(normalizedAi)
-                  ) {
-                    distance = Math.min(distance, 2);
+                let distance = getLevenshteinDistance(normalizedAi, normalizedDb);
+
+                // 2. DOSAGE GUARD
+                const dbNumbers = normalizedDb.match(/\d+/g) || [];
+                const hasDosageMatch = aiNumbers.every((num) => dbNumbers.includes(num));
+
+                if (aiNumbers.length > 0 && !hasDosageMatch) {
+                  distance += 50; // Heavy penalty for mismatching numbers (40 vs 10)
+                }
+
+                // 3. SUBSTRING PRIORITY
+                // If the core name + dosage exists within the string, it's a high-quality match
+                if (distance < 50) {
+                  if (normalizedAi.includes(normalizedDb) || normalizedDb.includes(normalizedAi)) {
+                    distance = Math.min(distance, 1); 
                   }
                 }
 
@@ -501,23 +498,18 @@ export default function NewPurchaseOrder() {
                   bestScore = distance;
                   bestMatch = inv;
                 }
-
-                if (distance === 0) break;
               }
             }
 
             console.log(
-              `AI Raw: "${aiName}" → Norm: "${normalizedAi}" | Best DB Norm: "${
-                bestMatch ? normalizeMedicineName(bestMatch.item_name) : ''
-              }" | Distance: ${bestScore}`
+              `AI: "${aiName}" | Match: "${bestMatch?.item_name || 'NONE'}" | Score: ${bestScore}`
             );
 
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
 
-            // Using 7 as your threshold. False matches like "Allerta"
-            // will now have scores > 30 and will be ignored.
-            const matchedItem = bestScore <= 7 ? bestMatch : null;
+            // Strict threshold: Anything that failed the dosage guard is > 50
+            const matchedItem = bestScore <= 10 ? bestMatch : null;
 
             const finalName = matchedItem?.item_name || aiName;
             const markupVal = calculateMarkup(
@@ -547,7 +539,6 @@ export default function NewPurchaseOrder() {
         }
       } catch (err) {
         console.error('AI Extraction Failed:', err);
-        alert('Error processing image. Check console.');
       } finally {
         setIsScanning(false);
         if (e.target) e.target.value = '';
