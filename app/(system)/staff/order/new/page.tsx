@@ -239,6 +239,7 @@ export default function NewOrderPOS() {
 
   // --- FETCH INVENTORY (FILTERED BY BRANCH) ---
   // Inside NewOrderPOS component
+  // Update this function
   const fetchInventory = async (searchTerm: string = '') => {
     try {
       setRefreshing(true);
@@ -249,20 +250,21 @@ export default function NewOrderPOS() {
       const branchId = parsedBranch.id;
       setCurrentBranchId(branchId);
 
-      // Build the query
       let query = supabase
         .from('inventory')
         .select('*')
         .eq('branch_id', branchId)
-        .order('item_name', { ascending: true })
-        .limit(50); // Fetch a manageable number of matches
+        .order('item_name', { ascending: true });
 
-      // If the user has typed something, filter at the database level
       if (searchTerm) {
         query = query.ilike('item_name', `%${searchTerm}%`);
+      } else {
+        // Load more items when no search term (for "show all on click")
+        query = query.limit(100); // Increase this if you have < 200 products
       }
 
       const { data: invData, error } = await query;
+
       if (error) throw error;
 
       if (invData) {
@@ -370,13 +372,18 @@ export default function NewOrderPOS() {
       if (!branchData) throw new Error('No active branch selected');
       const branch = JSON.parse(branchData);
 
-      // Fixed: Generate clean Philippine Date string (YYYY-MM-DD)
-      const phtDateString = new Date().toLocaleDateString('en-CA', {
+      // === RELIABLE Philippine Date (YYYY-MM-DD) ===
+      const phtDateString = new Intl.DateTimeFormat('en-CA', {
         timeZone: 'Asia/Manila',
-      });
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(new Date());
 
-      // 1. Create the Sale Record
-      // Fetch the unique atomic SO number from the sequence first
+      // Optional: Add this temporarily to debug
+      // console.log('PHT Date used:', phtDateString);
+
+      // 1. Create the Order
       const { data: generatedSO, error: soErr } = await supabase.rpc(
         'get_next_so_number'
       );
@@ -386,7 +393,7 @@ export default function NewOrderPOS() {
         .from('orders')
         .insert([
           {
-            order_number: generatedSO, // Database-generated (e.g., SO1001)
+            order_number: generatedSO,
             client_name: clientName || 'WALK-IN',
             total_amount: metrics.total,
             generic_amt: metrics.generic_amt,
@@ -395,7 +402,7 @@ export default function NewOrderPOS() {
             created_by: session.user.email,
             status: 'completed',
             branch_id: currentBranchId,
-            created_date_pht: phtDateString,
+            created_date_pht: phtDateString, // ← Fixed here
           },
         ])
         .select()
@@ -403,10 +410,9 @@ export default function NewOrderPOS() {
 
       if (orderErr) throw orderErr;
 
-      // Update state to show the confirmed number in your Success Modal
       setConfirmedSONumber(order.order_number);
 
-      // 2. Create Sale Items (Retaining all your columns)
+      // 2. Create Order Items (already working for you)
       const payload = items.map((i) => ({
         order_id: order.id,
         product_id: i.product_id,
@@ -414,7 +420,7 @@ export default function NewOrderPOS() {
         unit_price: Number(i.price_piece),
         type: i.type,
         subtotal: i.qty * (i.price_piece * (1 - i.discount_percent / 100)),
-        created_date_pht: phtDateString,
+        created_date_pht: phtDateString, // ← Same reliable date
       }));
 
       const { error: itemsErr } = await supabase
@@ -423,7 +429,7 @@ export default function NewOrderPOS() {
 
       if (itemsErr) throw itemsErr;
 
-      // 3. DEDUCT STOCK & UPDATE SALES METRICS (Using the RPC we built)
+      // 3. Process inventory (stock deduction)
       const itemsPayloadForRPC = items.map((i) => ({
         product_id: i.product_id,
         qty: Number(i.qty),
@@ -434,10 +440,7 @@ export default function NewOrderPOS() {
         target_branch_id: branch.id,
       });
 
-      if (rpcErr) {
-        console.error('Inventory Update Failed:', rpcErr.message);
-        throw new Error(`Inventory Sync Error: ${rpcErr.message}`);
-      }
+      if (rpcErr) throw new Error(`Inventory Sync Error: ${rpcErr.message}`);
 
       setShowSuccess(true);
     } catch (err: any) {
@@ -662,13 +665,15 @@ export default function NewOrderPOS() {
                   const subtotal =
                     item.qty *
                     (item.price_piece * (1 - item.discount_percent / 100));
+
+                  // Improved filtering: show more results and better matching
                   const filteredProducts = products
                     .filter((p) =>
                       p.item_name
                         .toLowerCase()
-                        .includes(searchTerms[idx]?.toLowerCase() || '')
+                        .includes((searchTerms[idx] || '').toLowerCase())
                     )
-                    .slice(0, 5);
+                    .slice(0, 30); // Increased from 5 to 30
 
                   let inputBorderColor = 'border-white/5';
                   let statusIcon = null;
@@ -699,28 +704,42 @@ export default function NewOrderPOS() {
                       <td className="p-3 text-slate-600 text-center">
                         {idx + 1}
                       </td>
+
+                      {/* IMPROVED COMPACT PRODUCT SEARCH COLUMN */}
                       <td className="p-1.5 relative overflow-visible">
                         <div className="relative flex items-center gap-2 overflow-visible">
                           <div className="relative flex-1 overflow-visible">
                             <input
                               type="text"
-                              className={`w-full bg-slate-950 border ${inputBorderColor} rounded-md px-2 py-1.5 text-[11px] font-semibold text-slate-200 outline-none uppercase transition-all`}
-                              placeholder="SEARCH PRODUCT..."
+                              className={`w-full bg-slate-950 border ${inputBorderColor} rounded-md px-3 py-1.5 text-[11px] font-semibold text-slate-200 outline-none uppercase transition-all`}
+                              placeholder="SEARCH PRODUCT... (click to browse)"
                               value={
                                 item.product_id
                                   ? item.item_name
-                                  : searchTerms[idx]
+                                  : searchTerms[idx] || ''
                               }
-                              onFocus={() => setActiveSearchIndex(idx)}
+                              onFocus={() => {
+                                setActiveSearchIndex(idx);
+                                if (
+                                  !searchTerms[idx] ||
+                                  searchTerms[idx].length < 2
+                                ) {
+                                  fetchInventory('');
+                                }
+                              }}
+                              onBlur={() => {
+                                setTimeout(() => {
+                                  if (activeSearchIndex === idx)
+                                    setActiveSearchIndex(null);
+                                }, 150);
+                              }}
                               onChange={(e) => {
                                 const newVal = e.target.value;
 
-                                // Update local search state
                                 const newTerms = [...searchTerms];
                                 newTerms[idx] = newVal;
                                 setSearchTerms(newTerms);
 
-                                // Reset item status
                                 const newItems = [...items];
                                 newItems[idx].match_status = 'none';
                                 newItems[idx].product_id = '';
@@ -728,42 +747,52 @@ export default function NewOrderPOS() {
 
                                 setActiveSearchIndex(idx);
 
-                                // RE-FETCH filtered products from Supabase
-                                fetchInventory(newVal);
+                                if (newVal.length >= 2) {
+                                  fetchInventory(newVal);
+                                }
                               }}
                             />
-                            {/* DROPDOWN MENU */}
-                            {activeSearchIndex === idx &&
-                              searchTerms[idx].length > 0 && (
-                                <div className="absolute left-0 right-0 top-full mt-1 bg-slate-900 border border-white/10 rounded-lg shadow-2xl z-[2000] overflow-hidden">
-                                  {filteredProducts.length > 0 ? (
-                                    filteredProducts.map((p) => (
-                                      <button
-                                        key={p.id}
-                                        onClick={() =>
-                                          handleProductSelect(idx, p)
-                                        }
-                                        className="w-full text-left px-3 py-2 hover:bg-blue-600 text-white flex justify-between items-center transition-colors"
-                                      >
-                                        <span className="font-bold uppercase text-[10px]">
+
+                            {/* COMPACT DROPDOWN */}
+                            {activeSearchIndex === idx && (
+                              <div className="absolute left-0 right-0 top-full mt-1 bg-slate-900 border border-white/10 rounded-lg shadow-2xl z-[2000] max-h-[260px] overflow-auto text-sm">
+                                {filteredProducts.length > 0 ? (
+                                  filteredProducts.map((p) => (
+                                    <button
+                                      key={p.id}
+                                      onClick={() =>
+                                        handleProductSelect(idx, p)
+                                      }
+                                      className="w-full text-left px-3 py-2 hover:bg-blue-600 transition-colors flex justify-between items-center border-b border-white/5 last:border-b-0 text-[11px]"
+                                    >
+                                      <div className="flex-1 min-w-0 pr-2">
+                                        <div className="font-bold uppercase truncate">
                                           {p.item_name}
-                                        </span>
-                                        <span className="text-[9px] opacity-60">
-                                          ₱{p.price_piece}
-                                        </span>
-                                      </button>
-                                    ))
-                                  ) : (
-                                    <div className="p-3 text-[10px] text-slate-500 text-center font-black uppercase tracking-widest">
-                                      No Products Found
-                                    </div>
-                                  )}
-                                </div>
-                              )}
+                                        </div>
+                                        <div className="text-[10px] text-slate-400 flex gap-2">
+                                          <span>{p.type.toUpperCase()}</span>
+                                          <span>Stock: {p.stock}</span>
+                                        </div>
+                                      </div>
+                                      <div className="text-emerald-400 font-mono whitespace-nowrap">
+                                        ₱{p.price_piece}
+                                      </div>
+                                    </button>
+                                  ))
+                                ) : (
+                                  <div className="px-4 py-6 text-center text-[10px] text-slate-500">
+                                    No matching products found
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
+
                           <div className="shrink-0">{statusIcon}</div>
                         </div>
                       </td>
+
+                      {/* Rest of the columns remain the same */}
                       <td className="p-1.5 text-center">
                         <span
                           className={`text-[9px] font-black px-2 py-0.5 rounded ${
@@ -775,9 +804,11 @@ export default function NewOrderPOS() {
                           {item.product_id ? item.type.toUpperCase() : '-'}
                         </span>
                       </td>
+
                       <td className="p-1.5 text-center font-bold text-slate-500">
                         {item.product_id ? item.stock_on_hand : '-'}
                       </td>
+
                       <td className="p-1.5">
                         <input
                           type="number"
@@ -789,18 +820,15 @@ export default function NewOrderPOS() {
                                 if (i.id === item.id) {
                                   let updatedDiscount = i.discount_percent;
 
-                                  // Check if new quantity qualifies for a box discount
                                   const isValidBox =
                                     newQty % 30 === 0 ||
                                     newQty % 50 === 0 ||
                                     newQty % 100 === 0;
 
-                                  // Auto-reset 20% if not a valid box multiple
                                   if (updatedDiscount === 20 && !isValidBox) {
                                     updatedDiscount = 0;
                                   }
 
-                                  // Auto-reset 5+1 if not a multiple of 6
                                   if (
                                     updatedDiscount === 16.666667 &&
                                     (newQty < 6 || newQty % 6 !== 0)
@@ -821,6 +849,7 @@ export default function NewOrderPOS() {
                           className="w-full bg-yellow-400 text-slate-950 font-bold text-center py-1.5 rounded-md outline-none text-xs"
                         />
                       </td>
+
                       <td className="p-1.5 text-right">
                         <div className="flex items-center justify-end gap-1 px-2 text-emerald-500">
                           {isDrugstoreUser && (
@@ -866,6 +895,7 @@ export default function NewOrderPOS() {
                           />
                         </div>
                       </td>
+
                       <td className="p-1.5 min-w-[120px]">
                         <select
                           disabled={item.type.toLowerCase() !== 'generic'}
@@ -874,7 +904,6 @@ export default function NewOrderPOS() {
                             const val = Number(e.target.value);
                             const qty = Number(item.qty);
 
-                            // Rule: 20% must be multiples of 30, 50, OR 100
                             const isBoxMultiple =
                               qty % 30 === 0 ||
                               qty % 50 === 0 ||
@@ -887,7 +916,6 @@ export default function NewOrderPOS() {
                               return;
                             }
 
-                            // Rule: 5+1 must be multiples of 6
                             if (
                               val === 16.666667 &&
                               (qty < 6 || qty % 6 !== 0)
@@ -940,9 +968,11 @@ export default function NewOrderPOS() {
                           )}
                         </select>
                       </td>
+
                       <td className="p-1.5 text-right pr-8 font-bold text-white">
                         ₱{subtotal.toLocaleString()}
                       </td>
+
                       <td className="p-1.5 text-center">
                         <button
                           onClick={() => {
