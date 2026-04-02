@@ -144,7 +144,10 @@ export default function SalesOrderList() {
         groups[dateKey].actualSales += itemActual;
       });
 
-      groups[dateKey].orders.push(order);
+      groups[dateKey].orders = [...groups[dateKey].orders, order].sort(
+        (a, b) =>
+          new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      );
     });
 
     return Object.values(groups).sort(
