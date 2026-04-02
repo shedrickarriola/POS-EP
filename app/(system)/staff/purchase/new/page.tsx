@@ -465,52 +465,53 @@ export default function NewPurchaseOrder() {
               // 1. PREPARE AI DATA
               const cleanAiForNumbers = normalizedAi.replace(/\b\d+s\b/gi, '');
               const aiNumbers = cleanAiForNumbers.match(/\d+/g) || [];
-              // Get core words (e.g., "febuxostat", "paracetamol")
-              // We ignore words shorter than 3 chars and numbers
+              // Extract core medicine names (e.g., "febuxostat")
               const aiKeywords = normalizedAi
                 .split(' ')
-                .filter((w) => w.length > 2 && isNaN(Number(w)));
+                .filter((w) => w.length > 3 && isNaN(Number(w)));
 
               for (const inv of inventoryList) {
                 if (!inv?.item_name) continue;
 
                 const normalizedDb = normalizeMedicineName(inv.item_name);
 
-                // --- PRIORITY 1: EXACT MATCH ---
+                // PRIORITY 1: EXACT MATCH
                 if (normalizedAi === normalizedDb) {
                   bestMatch = inv;
                   bestScore = 0;
                   break;
                 }
 
-                // --- PRIORITY 2: CORE NAME GUARD ---
-                // If the AI keyword (e.g. "FEBUXOSTAT") isn't in the DB name at all, skip it.
-                // This prevents "Allerta" from matching "Febuxostat".
-                const hasCoreNameMatch = aiKeywords.some((word) =>
-                  normalizedDb.includes(word)
-                );
-                if (aiKeywords.length > 0 && !hasCoreNameMatch) continue;
+                // PRIORITY 2: CORE NAME GUARD
+                // The DB item MUST contain at least one of the medicine keywords
+                const hasCoreNameMatch =
+                  aiKeywords.length === 0 ||
+                  aiKeywords.some((word) => normalizedDb.includes(word));
+
+                if (!hasCoreNameMatch) continue;
 
                 let distance = getLevenshteinDistance(
                   normalizedAi,
                   normalizedDb
                 );
 
-                // --- PRIORITY 3: DOSAGE GUARD ---
+                // PRIORITY 3: DOSAGE GUARD (Lenient)
                 const cleanDbForNumbers = normalizedDb.replace(
                   /\b\d+s\b/gi,
                   ''
                 );
                 const dbNumbers = cleanDbForNumbers.match(/\d+/g) || [];
-                const hasDosageMatch = aiNumbers.every((num) =>
-                  dbNumbers.includes(num)
-                );
 
-                if (aiNumbers.length > 0 && !hasDosageMatch) {
-                  distance += 100; // Massive penalty for wrong strength (40mg vs 10mg)
+                // Use .some() instead of .every() so that '30s' doesn't break the match
+                const hasDosageMatch =
+                  aiNumbers.length === 0 ||
+                  aiNumbers.some((num) => dbNumbers.includes(num));
+
+                if (!hasDosageMatch) {
+                  distance += 100; // Penalty for mismatching strength
                 }
 
-                // --- PRIORITY 4: SUBSTRING BONUS ---
+                // PRIORITY 4: SUBSTRING BONUS
                 if (distance < 100) {
                   if (
                     normalizedAi.includes(normalizedDb) ||
@@ -536,8 +537,9 @@ export default function NewPurchaseOrder() {
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
 
-            // Threshold: Matches with score <= 10 are likely correct due to the Core Name Guard.
-            const matchedItem = bestScore <= 10 ? bestMatch : null;
+            // Allow matches up to 25.
+            // Since mismatching dosages are +100, they will still be ignored.
+            const matchedItem = bestScore <= 25 ? bestMatch : null;
 
             const finalName = matchedItem?.item_name || aiName;
             const markupVal = calculateMarkup(
