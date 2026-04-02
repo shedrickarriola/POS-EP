@@ -745,7 +745,7 @@ export default function NewPurchaseOrder() {
         <div className="fixed inset-0 z-[2000] flex flex-col items-center justify-center bg-slate-950/90 backdrop-blur-xl">
           <Loader2 className="animate-spin text-indigo-400 mb-6" size={64} />
           <h2 className="text-2xl font-black uppercase tracking-tighter mb-2">
-            Neural Scan in Progress
+            Mapping in Progress
           </h2>
         </div>
       )}
