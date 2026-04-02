@@ -106,26 +106,28 @@ const getLevenshteinDistance = (a: string, b: string): number => {
 
   return matrix[s1.length][s2.length];
 };
-// Smart normalization for medicine names - keeps strength (mg/ml) but removes common noise
 const normalizeMedicineName = (name: string): string => {
   if (!name) return '';
 
   let text = name.toLowerCase().trim();
 
-  // Step 1: Remove common dosage forms
+  // Remove common dosage forms and pack indicators
   text = text.replace(
     /\b(tab|tablet|cap|capsule|syrup|susp|suspension|tab\.|strip|box|vial|amp|pill)\b/gi,
     ''
   );
 
-  // Step 2: Keep ONLY numbers that are attached to mg or ml (e.g. 500mg, 10ml)
-  // Remove all other standalone numbers
-  text = text.replace(/\b(\d+)\b(?!\s*(mg|ml))/gi, ''); // Remove numbers not followed by mg/ml
+  // Remove pack size like "30s", "60ml", "125/5ml susp" etc.
+  text = text.replace(/\b(\d+\/?\d*)\s*(s|ml|mg|gm|g|mcg)\b/gi, '$2'); // keep only the unit
+  text = text.replace(/\b(\d+\/?\d*)\s*(s|ml)\b/gi, ''); // remove pure pack sizes
 
-  // Step 3: Keep mg and ml with their numbers
-  text = text.replace(/\b(\d+)\s*(mg|ml)\b/gi, '$1$2'); // Normalize "500 mg" → "500mg"
+  // Remove brand names in parentheses
+  text = text.replace(/\s*\([^)]+\)/g, '');
 
-  // Step 4: Clean punctuation and collapse spaces
+  // Keep only strength that has mg/ml (remove all other numbers)
+  text = text.replace(/\b(\d+)\b(?!\s*(mg|ml))/gi, '');
+
+  // Final clean
   text = text.replace(/[^a-z0-9\s]/g, ' ');
   text = text.replace(/\s+/g, ' ').trim();
 
@@ -472,12 +474,12 @@ export default function NewPurchaseOrder() {
                   normalizedDb
                 );
 
-                // Bonus for substring match after normalization
+                // Strong substring bonus after cleaning
                 if (
                   normalizedAi.includes(normalizedDb) ||
                   normalizedDb.includes(normalizedAi)
                 ) {
-                  distance = Math.min(distance, 3);
+                  distance = Math.min(distance, 2);
                 }
 
                 if (distance < bestScore) {
@@ -489,10 +491,17 @@ export default function NewPurchaseOrder() {
               }
             }
 
+            // === DEBUG LOG (remove after testing) ===
+            console.log(
+              `AI Raw: "${aiName}" → Norm: "${normalizedAi}" | Best DB Norm: "${
+                bestMatch ? normalizeMedicineName(bestMatch.item_name) : ''
+              }" | Distance: ${bestScore}`
+            );
+
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
 
-            // Strict threshold after better normalization
+            // Very strict threshold (3-5 range as you asked)
             const matchedItem = bestScore <= 7 ? bestMatch : null;
 
             const finalName = matchedItem?.item_name || aiName;
