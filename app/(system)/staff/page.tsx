@@ -51,6 +51,9 @@ export default function StaffDashboard() {
 
   // Daily Reports State
   const [dailyReports, setDailyReports] = useState<any[]>([]);
+  const [canCreateNewSale, setCanCreateNewSale] = useState(true);
+  const [blockingReason, setBlockingReason] = useState<string>('');
+  const [missingDatesList, setMissingDatesList] = useState<string[]>([]);
   const [showReportModal, setShowReportModal] = useState(false);
   const [remittance, setRemittance] = useState({
     actual_cash: 0,
@@ -104,6 +107,106 @@ export default function StaffDashboard() {
   const getDaysInCurrentMonth = () => {
     const now = new Date();
     return new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  };
+  // Check if staff can create new sale (all prior days must have remittance)
+  const checkNewSalePermission = async (branchId: string) => {
+    const role = (profile?.role || '').toString().toLowerCase().trim();
+
+    // Admin / Manager Bypass
+    if (role === 'branch_admin' || role === 'org_manager') {
+      setCanCreateNewSale(true);
+      setBlockingReason('');
+      setMissingDatesList([]);
+      return true;
+    }
+
+    try {
+      setBlockingReason('Checking previous remittance reports...');
+
+      // 1. Get first sales date
+      const { data: firstOrder } = await supabase
+        .from('orders')
+        .select('created_date_pht')
+        .eq('branch_id', branchId)
+        .order('created_date_pht', { ascending: true })
+        .limit(1)
+        .single();
+
+      if (!firstOrder?.created_date_pht) {
+        // No sales history yet → allow
+        setCanCreateNewSale(true);
+        setBlockingReason('');
+        setMissingDatesList([]);
+        return true;
+      }
+
+      const firstDate = firstOrder.created_date_pht;
+
+      // 2. Generate dates from first sale up to YESTERDAY
+      const start = new Date(firstDate);
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+
+      const datesToCheck: string[] = [];
+      let current = new Date(start);
+
+      while (current <= yesterday) {
+        datesToCheck.push(current.toISOString().split('T')[0]);
+        current.setDate(current.getDate() + 1);
+      }
+
+      if (datesToCheck.length === 0) {
+        setCanCreateNewSale(true);
+        setBlockingReason('');
+        setMissingDatesList([]);
+        return true;
+      }
+
+      // 3. Fetch reports with actual_cash
+      const { data: reports } = await supabase
+        .from('daily_reports')
+        .select('report_date, actual_cash')
+        .eq('branch_id', branchId)
+        .in('report_date', datesToCheck);
+
+      const reportMap = new Map(
+        (reports || []).map((r: any) => [r.report_date, r])
+      );
+
+      const missingOrIncomplete: string[] = [];
+
+      for (const dateStr of datesToCheck) {
+        const report = reportMap.get(dateStr);
+
+        // Block if:
+        // - No report row, OR
+        // - actual_cash is 0 or null
+        if (!report || Number(report.actual_cash || 0) <= 0) {
+          missingOrIncomplete.push(dateStr);
+        }
+      }
+
+      if (missingOrIncomplete.length > 0) {
+        setCanCreateNewSale(false);
+        setBlockingReason(
+          `Incomplete remittance for ${missingOrIncomplete.length} day(s)`
+        );
+        setMissingDatesList(missingOrIncomplete.sort());
+        return false;
+      }
+
+      // All previous days have proper remittance (actual_cash > 0)
+      setCanCreateNewSale(true);
+      setBlockingReason('');
+      setMissingDatesList([]);
+      return true;
+    } catch (err) {
+      console.error('Permission check failed:', err);
+      setCanCreateNewSale(false);
+      setBlockingReason('System error checking remittance');
+      setMissingDatesList([]);
+      return false;
+    }
   };
 
   const updateQuotas = (branch: any) => {
@@ -196,7 +299,7 @@ export default function StaffDashboard() {
           if (savedBranch) {
             const parsedBranch = JSON.parse(savedBranch);
             setSelectedBranch(parsedBranch);
-
+            await checkNewSalePermission(parsedBranch.id);
             // --- TRIGGER INITIAL LOGIN LOG ---
             logSystemActivity(
               'LOGIN',
@@ -334,7 +437,11 @@ export default function StaffDashboard() {
     setSelectedBranch(branch);
     localStorage.setItem('active_branch', JSON.stringify(branch));
 
-    // --- TRIGGER BRANCH CHANGE LOG ---
+    // Reset UI state
+    setCanCreateNewSale(false);
+    setBlockingReason('Checking remittance status...');
+    setMissingDatesList([]);
+
     await logSystemActivity(
       'BRANCH_CHANGE',
       branch.branch_name,
@@ -342,14 +449,14 @@ export default function StaffDashboard() {
       profile?.full_name
     );
 
-    // Use the correct setter from your file
     setBranchModalOpen(false);
 
-    // Load the dashboard data for the new branch
     fetchStats(branch.id);
     updateQuotas(branch.id);
     fetchDailyReports(branch.id);
     syncDailyReportRealtime(branch.id);
+
+    await checkNewSalePermission(branch.id);
   };
 
   const handleLogout = async () => {
@@ -1145,13 +1252,52 @@ export default function StaffDashboard() {
             </h3>
             <div className="grid grid-cols-1 gap-3">
               <button
-                onClick={() => router.push('/staff/order/new')}
-                className="flex items-center justify-between p-6 bg-emerald-600 hover:bg-emerald-500 rounded-2xl transition-all shadow-xl shadow-emerald-950/20"
+                onClick={() => {
+                  if (canCreateNewSale) {
+                    router.push('/staff/order/new');
+                  } else {
+                    triggerToast(
+                      `${blockingReason}. Please complete remittance first.`,
+                      'error'
+                    );
+                  }
+                }}
+                disabled={!canCreateNewSale}
+                className={`flex items-center justify-between p-6 rounded-2xl transition-all shadow-xl w-full ${
+                  canCreateNewSale
+                    ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-950/20'
+                    : 'bg-slate-800 border border-red-500/40 cursor-not-allowed'
+                }`}
               >
-                <span className="text-sm font-black uppercase italic text-white">
-                  New Sale
-                </span>
-                <Plus size={18} />
+                <div className="text-left">
+                  <span
+                    className={`text-sm font-black uppercase italic block ${
+                      canCreateNewSale ? 'text-white' : 'text-slate-400'
+                    }`}
+                  >
+                    New Sale
+                  </span>
+
+                  {!canCreateNewSale && blockingReason && (
+                    <p className="text-[10px] text-red-400 mt-1 font-medium">
+                      {blockingReason}
+                    </p>
+                  )}
+
+                  {/* Show missing dates if any */}
+                  {!canCreateNewSale && missingDatesList.length > 0 && (
+                    <div className="mt-2 text-[9px] text-red-500/90 font-mono">
+                      Missing: {missingDatesList.slice(0, 5).join(', ')}
+                      {missingDatesList.length > 5 &&
+                        ` +${missingDatesList.length - 5} more`}
+                    </div>
+                  )}
+                </div>
+
+                <Plus
+                  size={18}
+                  className={canCreateNewSale ? 'text-white' : 'text-slate-500'}
+                />
               </button>
               <button
                 onClick={() => router.push('/staff/order/list')}
