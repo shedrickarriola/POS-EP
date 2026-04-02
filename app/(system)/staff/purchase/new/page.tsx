@@ -108,31 +108,28 @@ const getLevenshteinDistance = (a: string, b: string): number => {
 };
 const normalizeMedicineName = (name: string): string => {
   if (!name) return '';
-
   let text = name.toLowerCase().trim();
 
-  // Remove common dosage forms and pack indicators
+  // 1. Remove brand names in parentheses (e.g., "(MYREMOL)")
+  text = text.replace(/\s*\([^)]+\)/g, '');
+
+  // 2. Standardize dosage: "40mg" -> "40 mg", "125/5ml" -> "125/5 ml"
+  // This ensures the distance algorithm sees numbers and units consistently
+  text = text.replace(/(\d+)\s*(mg|ml|mcg|gm|g|s|cap|tab)/gi, '$1 $2');
+
+  // 3. Remove "noise" words that don't help distinguish products
   text = text.replace(
-    /\b(tab|tablet|cap|capsule|syrup|susp|suspension|tab\.|strip|box|vial|amp|pill)\b/gi,
+    /\b(tablet|capsule|syrup|suspension|susp|strip|box|vial|amp|pill)\b/gi,
     ''
   );
 
-  // Remove pack size like "30s", "60ml", "125/5ml susp" etc.
-  text = text.replace(/\b(\d+\/?\d*)\s*(s|ml|mg|gm|g|mcg)\b/gi, '$2'); // keep only the unit
-  text = text.replace(/\b(\d+\/?\d*)\s*(s|ml)\b/gi, ''); // remove pure pack sizes
-
-  // Remove brand names in parentheses
-  text = text.replace(/\s*\([^)]+\)/g, '');
-
-  // Keep only strength that has mg/ml (remove all other numbers)
-  text = text.replace(/\b(\d+)\b(?!\s*(mg|ml))/gi, '');
-
-  // Final clean
-  text = text.replace(/[^a-z0-9\s]/g, ' ');
+  // 4. Keep only alphanumeric and the dosage slash
+  text = text.replace(/[^a-z0-9/\s]/g, ' ');
   text = text.replace(/\s+/g, ' ').trim();
 
   return text;
 };
+
 const findBestInventoryMatch = (aiName: string, inventoryList: any[]) => {
   if (!aiName || !Array.isArray(inventoryList) || inventoryList.length === 0) {
     return { bestMatch: null, score: 999 };
@@ -464,22 +461,40 @@ export default function NewPurchaseOrder() {
             let bestScore = 999;
 
             if (Array.isArray(inventoryList) && inventoryList.length > 0) {
+              // Extract dosage numbers from AI result (e.g., "40", "125/5")
+              const aiNumbers = normalizedAi.match(/\d+/g) || [];
+
               for (const inv of inventoryList) {
                 if (!inv?.item_name) continue;
 
                 const normalizedDb = normalizeMedicineName(inv.item_name);
-
                 let distance = getLevenshteinDistance(
                   normalizedAi,
                   normalizedDb
                 );
 
-                // Strong substring bonus after cleaning
-                if (
-                  normalizedAi.includes(normalizedDb) ||
-                  normalizedDb.includes(normalizedAi)
-                ) {
-                  distance = Math.min(distance, 2);
+                // --- DOSAGE GUARD ---
+                const dbNumbers = normalizedDb.match(/\d+/g) || [];
+
+                // Check if all numbers found by AI exist in this DB item
+                const hasDosageMatch = aiNumbers.every((num) =>
+                  dbNumbers.includes(num)
+                );
+
+                if (aiNumbers.length > 0 && !hasDosageMatch) {
+                  // Mismatching dosage numbers (e.g., 40 vs 10)
+                  // adds a penalty to prevent false positives
+                  distance += 30;
+                }
+
+                // Substring bonus (only if dosage matches or no dosage was found)
+                if (distance < 30) {
+                  if (
+                    normalizedAi.includes(normalizedDb) ||
+                    normalizedDb.includes(normalizedAi)
+                  ) {
+                    distance = Math.min(distance, 2);
+                  }
                 }
 
                 if (distance < bestScore) {
@@ -491,7 +506,6 @@ export default function NewPurchaseOrder() {
               }
             }
 
-            // === DEBUG LOG (remove after testing) ===
             console.log(
               `AI Raw: "${aiName}" → Norm: "${normalizedAi}" | Best DB Norm: "${
                 bestMatch ? normalizeMedicineName(bestMatch.item_name) : ''
@@ -501,7 +515,8 @@ export default function NewPurchaseOrder() {
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
 
-            // Very strict threshold (3-5 range as you asked)
+            // Using 7 as your threshold. False matches like "Allerta"
+            // will now have scores > 30 and will be ignored.
             const matchedItem = bestScore <= 7 ? bestMatch : null;
 
             const finalName = matchedItem?.item_name || aiName;
