@@ -106,28 +106,39 @@ const getLevenshteinDistance = (a: string, b: string): number => {
 
   return matrix[s1.length][s2.length];
 };
+/**
+ * Normalizes medicine names by removing structural noise, standardizing units,
+ * and stripping special characters (like quotes) that interfere with matching.
+ */
 const normalizeMedicineName = (name: string): string => {
   if (!name) return '';
-  // Force everything to UPPERCASE immediately
+
+  // 1. Force to UPPERCASE and trim immediately
   let text = name.toUpperCase().trim();
 
-  // 1. Remove brand names in parentheses (e.g., "(MYREMOL)")
-  text = text.replace(/\s*\([^)]+\)/g, '');
+  // 2. Remove brand names/info in parentheses (e.g., "(MYREMOL)", "(IMPORT)")
+  text = text.replace(/\s*\([^)]+\)/g, ' ');
 
-  // 2. STRIP PACK SIZE: Remove numbers followed by 'S' (e.g., 30S, 100S)
-  text = text.replace(/\b\d+S\b/gi, '');
+  // 3. Remove pack sizes (e.g., 30S, 100'S, 100S)
+  // Added handling for optional apostrophe before the 'S'
+  text = text.replace(/\b\d+[']?S\b/gi, ' ');
 
-  // 3. Standardize dosage spacing (40MG -> 40 MG)
-  text = text.replace(/(\d+)\s*(MG|ML|MCG|GM|G|CAP|TAB)/gi, '$1 $2');
+  // 4. Standardize dosage spacing (40MG -> 40 MG, 5ML -> 5 ML)
+  text = text.replace(/(\d+)\s*(MG|ML|MCG|GM|G|CAP|TAB|IU)/gi, '$1 $2');
 
-  // 4. Remove structural noise
+  // 5. Remove structural noise / common suffixes
+  // Added "ORAL" and "INJ" as these often appear in invoice data but not inventory
   text = text.replace(
-    /\b(TABLET|CAPSULE|CAP|TAB|SYRUP|SUSPENSION|SUSP|STRIP|VIAL)\b/gi,
-    ''
+    /\b(TABLET|TABLETS|CAPSULE|CAPSULES|CAP|TAB|SYRUP|SUSPENSION|SUSP|STRIP|VIAL|ORAL|INJ|INJECTION)\b/gi,
+    ' '
   );
 
-  // 5. Clean up special chars and extra spaces
+  // 6. STRIP ALL SPECIAL CHARACTERS
+  // Replaces anything that isn't a Letter, Number, or Space with a space.
+  // This effectively kills single quotes ('), double quotes ("), commas, etc.
   text = text.replace(/[^A-Z0-9\s]/g, ' ');
+
+  // 7. Final Polish: Collapse multiple spaces into one and trim
   return text.replace(/\s+/g, ' ').trim();
 };
 
