@@ -110,27 +110,25 @@ const normalizeMedicineName = (name: string): string => {
   if (!name) return '';
   let text = name.toLowerCase().trim();
 
-  // 1. Remove brand names in parentheses
+  // 1. Remove brand names in parentheses (e.g., "(MYREMOL)")
   text = text.replace(/\s*\([^)]+\)/g, '');
 
-  // 2. STRIP PACK SIZE: Remove numbers followed by 's' (e.g., 30s, 100s, 1s)
-  // This prevents '30' from being flagged as a missing dosage
+  // 2. STRIP PACK SIZE ONLY: Remove numbers followed by 's' (e.g., 30s, 100s)
+  // We keep 'mg' and 'ml' numbers for the dosage check
   text = text.replace(/\b\d+s\b/gi, '');
 
-  // 3. Standardize dosage spacing: "40mg" -> "40 mg"
-  text = text.replace(/(\d+)\s*(mg|ml|mcg|gm|g|cap|tab)/gi, '$1 $2');
+  // 3. Standardize spacing for dosages (e.g., "40mg" -> "40 mg")
+  text = text.replace(/(\d+)\s*(mg|ml|mcg|gm|g)/gi, '$1 $2');
 
-  // 4. Remove structural noise
+  // 4. Remove structural words that aren't the drug name
   text = text.replace(
-    /\b(tablet|capsule|syrup|suspension|susp|strip|box|vial|amp|pill)\b/gi,
+    /\b(tablet|capsule|cap|tab|syrup|suspension|susp|strip|vial)\b/gi,
     ''
   );
 
-  // 5. Clean up
-  text = text.replace(/[^a-z0-9/\s]/g, ' ');
-  text = text.replace(/\s+/g, ' ').trim();
-
-  return text;
+  // 5. Clean up extra spaces and special characters
+  text = text.replace(/[^a-z0-9\s]/g, ' ');
+  return text.replace(/\s+/g, ' ').trim();
 };
 
 const findBestInventoryMatch = (aiName: string, inventoryList: any[]) => {
@@ -464,46 +462,55 @@ export default function NewPurchaseOrder() {
             let bestScore = 999;
 
             if (Array.isArray(inventoryList) && inventoryList.length > 0) {
-              // 1. STRIP 'S' NUMBERS: Remove numbers attached to 's' (like 30s, 100s)
-              // before extracting dosages so they don't trigger the Dosage Guard.
+              // 1. PREPARE AI DATA
               const cleanAiForNumbers = normalizedAi.replace(/\b\d+s\b/gi, '');
               const aiNumbers = cleanAiForNumbers.match(/\d+/g) || [];
+              // Get core words (e.g., "febuxostat", "paracetamol")
+              // We ignore words shorter than 3 chars and numbers
+              const aiKeywords = normalizedAi
+                .split(' ')
+                .filter((w) => w.length > 2 && isNaN(Number(w)));
 
               for (const inv of inventoryList) {
                 if (!inv?.item_name) continue;
 
                 const normalizedDb = normalizeMedicineName(inv.item_name);
 
-                // PRIORITY: EXACT NORMALIZED MATCH
+                // --- PRIORITY 1: EXACT MATCH ---
                 if (normalizedAi === normalizedDb) {
                   bestMatch = inv;
                   bestScore = 0;
                   break;
                 }
 
+                // --- PRIORITY 2: CORE NAME GUARD ---
+                // If the AI keyword (e.g. "FEBUXOSTAT") isn't in the DB name at all, skip it.
+                // This prevents "Allerta" from matching "Febuxostat".
+                const hasCoreNameMatch = aiKeywords.some((word) =>
+                  normalizedDb.includes(word)
+                );
+                if (aiKeywords.length > 0 && !hasCoreNameMatch) continue;
+
                 let distance = getLevenshteinDistance(
                   normalizedAi,
                   normalizedDb
                 );
 
-                // 2. DOSAGE GUARD
+                // --- PRIORITY 3: DOSAGE GUARD ---
                 const cleanDbForNumbers = normalizedDb.replace(
                   /\b\d+s\b/gi,
                   ''
                 );
                 const dbNumbers = cleanDbForNumbers.match(/\d+/g) || [];
-
                 const hasDosageMatch = aiNumbers.every((num) =>
                   dbNumbers.includes(num)
                 );
 
                 if (aiNumbers.length > 0 && !hasDosageMatch) {
-                  // Massive penalty so mismatching strengths (40 vs 10) never match
-                  distance += 100;
+                  distance += 100; // Massive penalty for wrong strength (40mg vs 10mg)
                 }
 
-                // 3. SUBSTRING PRIORITY
-                // If the dosage matches and one name is inside the other, it's a winner
+                // --- PRIORITY 4: SUBSTRING BONUS ---
                 if (distance < 100) {
                   if (
                     normalizedAi.includes(normalizedDb) ||
@@ -529,7 +536,7 @@ export default function NewPurchaseOrder() {
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
 
-            // Threshold: 10 is very safe now because mismatching dosages are > 100
+            // Threshold: Matches with score <= 10 are likely correct due to the Core Name Guard.
             const matchedItem = bestScore <= 10 ? bestMatch : null;
 
             const finalName = matchedItem?.item_name || aiName;
