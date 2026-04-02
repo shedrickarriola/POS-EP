@@ -244,7 +244,7 @@ export default function NewPurchaseOrder() {
       .select('*')
       .eq('branch_id', branchId)
       .order('item_name', { ascending: true })
-      .limit(50); // Fetch a reasonable amount for the dropdown
+      .limit(5000); // Fetch a reasonable amount for the dropdown
 
     // If the user has typed something, filter by name
     if (searchTerm) {
