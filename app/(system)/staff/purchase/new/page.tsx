@@ -352,10 +352,45 @@ export default function NewPurchaseOrder() {
       alert(err.message);
     }
   };
-
+  const handleNumberKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Allow: Backspace, Delete, Tab, Escape, Enter, and .
+    if (
+      [46, 8, 9, 27, 13, 110, 190].includes(e.keyCode) ||
+      // Allow: Ctrl+A, Command+A
+      (e.keyCode === 65 && (e.ctrlKey === true || e.metaKey === true)) ||
+      // Allow: home, end, left, right
+      (e.keyCode >= 35 && e.keyCode <= 40)
+    ) {
+      return;
+    }
+    // Ensure that it is a number and stop the keypress if not
+    if (
+      (e.shiftKey || e.keyCode < 48 || e.keyCode > 57) &&
+      (e.keyCode < 96 || e.keyCode > 105)
+    ) {
+      e.preventDefault();
+    }
+  };
   const updateItem = (index: number, field: string, value: any) => {
     const newItems = [...items];
     const item = { ...newItems[index] };
+
+    // 1. Numeric Sanitization Logic
+    const numericFields = ['qty', 'invoice_price', 'discount', 'markup'];
+
+    if (numericFields.includes(field)) {
+      if (typeof value === 'string') {
+        // Allow only digits and one decimal point
+        let sanitized = value.replace(/[^0-9.]/g, '');
+        const parts = sanitized.split('.');
+
+        // If there's more than one dot, keep only the first one
+        if (parts.length > 2) {
+          sanitized = `${parts}.${parts.slice(1).join('')}`;
+        }
+        value = sanitized;
+      }
+    }
 
     if (field === 'inventory_id') {
       const selected = inventoryList.find((p) => p.id === value);
@@ -369,8 +404,6 @@ export default function NewPurchaseOrder() {
 
         // AUTO-MARKUP based on type and name
         item.markup = calculateMarkup(item.item_type, item.item_name);
-
-        // Force GREEN for manual selection (this was missing or not reliable before)
         item.match_score = 0;
 
         // Sync search term so the input shows the correct name
@@ -387,14 +420,14 @@ export default function NewPurchaseOrder() {
       if (field === 'item_name' || field === 'item_type') {
         item.markup = calculateMarkup(item.item_type, item.item_name);
 
-        // If user manually edits name, we treat it as a custom entry (orange/red)
         if (field === 'item_name') {
-          item.match_score = 999; // Reset to "No Match" until they re-select from dropdown
+          item.match_score = 999;
         }
       }
     }
 
     // ====================== FINAL CALCULATIONS ======================
+    // Use parseFloat for math, defaulting to 0 if the string is empty
     const qty = Math.max(0, parseFloat(item.qty as any) || 0);
     const pack = Math.max(1, parseFloat(item.packaging_type as any) || 1);
     const invPrice = Math.max(0, parseFloat(item.invoice_price as any) || 0);
@@ -745,7 +778,7 @@ export default function NewPurchaseOrder() {
         <div className="fixed inset-0 z-[2000] flex flex-col items-center justify-center bg-slate-950/90 backdrop-blur-xl">
           <Loader2 className="animate-spin text-indigo-400 mb-6" size={64} />
           <h2 className="text-2xl font-black uppercase tracking-tighter mb-2">
-            Mapping in Progress
+            Neural Scan in Progress
           </h2>
         </div>
       )}
@@ -1057,7 +1090,8 @@ export default function NewPurchaseOrder() {
 
                         <td className="px-1">
                           <input
-                            type="number"
+                            type="text"
+                            inputMode="decimal"
                             className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
                             value={item.qty}
                             onChange={(e) =>
@@ -1083,7 +1117,8 @@ export default function NewPurchaseOrder() {
 
                         <td className="px-1">
                           <input
-                            type="number"
+                            type="text"
+                            inputMode="decimal"
                             className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-right text-[12px] font-bold outline-none"
                             value={item.invoice_price}
                             onChange={(e) =>
@@ -1094,7 +1129,8 @@ export default function NewPurchaseOrder() {
 
                         <td className="px-1">
                           <input
-                            type="number"
+                            type="text"
+                            inputMode="decimal"
                             className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-right text-[12px] font-bold outline-none"
                             value={item.discount}
                             onChange={(e) =>
