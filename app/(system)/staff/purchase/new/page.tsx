@@ -108,26 +108,26 @@ const getLevenshteinDistance = (a: string, b: string): number => {
 };
 const normalizeMedicineName = (name: string): string => {
   if (!name) return '';
-  let text = name.toLowerCase().trim();
+  // Force everything to UPPERCASE immediately
+  let text = name.toUpperCase().trim();
 
   // 1. Remove brand names in parentheses (e.g., "(MYREMOL)")
   text = text.replace(/\s*\([^)]+\)/g, '');
 
-  // 2. STRIP PACK SIZE ONLY: Remove numbers followed by 's' (e.g., 30s, 100s)
-  // We keep 'mg' and 'ml' numbers for the dosage check
-  text = text.replace(/\b\d+s\b/gi, '');
+  // 2. STRIP PACK SIZE: Remove numbers followed by 'S' (e.g., 30S, 100S)
+  text = text.replace(/\b\d+S\b/gi, '');
 
-  // 3. Standardize spacing for dosages (e.g., "40mg" -> "40 mg")
-  text = text.replace(/(\d+)\s*(mg|ml|mcg|gm|g)/gi, '$1 $2');
+  // 3. Standardize dosage spacing (40MG -> 40 MG)
+  text = text.replace(/(\d+)\s*(MG|ML|MCG|GM|G|CAP|TAB)/gi, '$1 $2');
 
-  // 4. Remove structural words that aren't the drug name
+  // 4. Remove structural noise
   text = text.replace(
-    /\b(tablet|capsule|cap|tab|syrup|suspension|susp|strip|vial)\b/gi,
+    /\b(TABLET|CAPSULE|CAP|TAB|SYRUP|SUSPENSION|SUSP|STRIP|VIAL)\b/gi,
     ''
   );
 
-  // 5. Clean up extra spaces and special characters
-  text = text.replace(/[^a-z0-9\s]/g, ' ');
+  // 5. Clean up special chars and extra spaces
+  text = text.replace(/[^A-Z0-9\s]/g, ' ');
   return text.replace(/\s+/g, ' ').trim();
 };
 
@@ -456,6 +456,7 @@ export default function NewPurchaseOrder() {
         if (extracted && Array.isArray(extracted)) {
           const aiMappedItems = extracted.map((extractedItem: any) => {
             const aiName = (extractedItem.item_name || '').trim();
+            // normalizedAi is now guaranteed to be UPPERCASE
             const normalizedAi = normalizeMedicineName(aiName);
 
             let bestMatch: any = null;
@@ -463,9 +464,11 @@ export default function NewPurchaseOrder() {
 
             if (Array.isArray(inventoryList) && inventoryList.length > 0) {
               // 1. PREPARE AI DATA
-              const cleanAiForNumbers = normalizedAi.replace(/\b\d+s\b/gi, '');
+              // Strip 'S' numbers (e.g., 30S) for dosage check
+              const cleanAiForNumbers = normalizedAi.replace(/\b\d+S\b/gi, '');
               const aiNumbers = cleanAiForNumbers.match(/\d+/g) || [];
-              // Extract core medicine names (e.g., "febuxostat")
+
+              // Extract core medicine keywords (UPPERCASE)
               const aiKeywords = normalizedAi
                 .split(' ')
                 .filter((w) => w.length > 3 && isNaN(Number(w)));
@@ -473,9 +476,10 @@ export default function NewPurchaseOrder() {
               for (const inv of inventoryList) {
                 if (!inv?.item_name) continue;
 
+                // Ensure DB name is normalized to UPPERCASE
                 const normalizedDb = normalizeMedicineName(inv.item_name);
 
-                // PRIORITY 1: EXACT MATCH
+                // PRIORITY 1: EXACT MATCH (Case-insensitive because both are UPPERCASE)
                 if (normalizedAi === normalizedDb) {
                   bestMatch = inv;
                   bestScore = 0;
@@ -483,7 +487,7 @@ export default function NewPurchaseOrder() {
                 }
 
                 // PRIORITY 2: CORE NAME GUARD
-                // The DB item MUST contain at least one of the medicine keywords
+                // DB must contain at least one AI keyword (e.g., "FEBUXOSTAT")
                 const hasCoreNameMatch =
                   aiKeywords.length === 0 ||
                   aiKeywords.some((word) => normalizedDb.includes(word));
@@ -497,12 +501,11 @@ export default function NewPurchaseOrder() {
 
                 // PRIORITY 3: DOSAGE GUARD (Lenient)
                 const cleanDbForNumbers = normalizedDb.replace(
-                  /\b\d+s\b/gi,
+                  /\b\d+S\b/gi,
                   ''
                 );
                 const dbNumbers = cleanDbForNumbers.match(/\d+/g) || [];
 
-                // Use .some() instead of .every() so that '30s' doesn't break the match
                 const hasDosageMatch =
                   aiNumbers.length === 0 ||
                   aiNumbers.some((num) => dbNumbers.includes(num));
@@ -529,19 +532,20 @@ export default function NewPurchaseOrder() {
             }
 
             console.log(
-              `AI: "${aiName}" | Match: "${
-                bestMatch?.item_name || 'NONE'
+              `AI: "${normalizedAi}" | Match: "${
+                bestMatch?.item_name?.toUpperCase() || 'NONE'
               }" | Score: ${bestScore}`
             );
 
             const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
             const qty = Math.max(1, Number(extractedItem.qty) || 1);
 
-            // Allow matches up to 25.
-            // Since mismatching dosages are +100, they will still be ignored.
+            // Threshold: 25 is safe because mismatching dosages are +100
             const matchedItem = bestScore <= 25 ? bestMatch : null;
 
-            const finalName = matchedItem?.item_name || aiName;
+            // Force the final displayed name to be UPPERCASE
+            const finalName = (matchedItem?.item_name || aiName).toUpperCase();
+
             const markupVal = calculateMarkup(
               matchedItem?.item_type || 'GENERIC',
               finalName
@@ -565,7 +569,7 @@ export default function NewPurchaseOrder() {
           });
 
           setItems(aiMappedItems);
-          setSearchTerms(aiMappedItems.map((i: any) => i.item_name || ''));
+          setSearchTerms(aiMappedItems.map((i: any) => i.item_name));
         }
       } catch (err) {
         console.error('AI Extraction Failed:', err);
