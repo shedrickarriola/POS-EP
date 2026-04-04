@@ -162,30 +162,37 @@ export default function InventoryProtocol() {
       setExpandedItemId(null);
       return;
     }
+
     setExpandedItemId(item.id);
+    setLoading(true); // show loading while fetching
 
     try {
       const savedBranch = JSON.parse(
         localStorage.getItem('active_branch') || '{}'
       );
+      const branchId = savedBranch.id;
 
-      // Fetch Outbound using product_id
-      const { data: sos } = await supabase
-        .from('order_items')
-        .select('quantity, orders!inner(order_number, status, branch_id)')
-        .eq('product_id', item.id)
-        .eq('orders.branch_id', savedBranch.id);
+      const { data, error } = await supabase.rpc('get_item_audit', {
+        p_branch_id: branchId,
+        p_inventory_id: item.id, // this is the inventory.id
+      });
 
-      // Fetch Inbound using inventory_id
-      const { data: pos } = await supabase
-        .from('purchase_order_items')
-        .select('quantity, purchase_orders!inner(po_number, status, branch_id)')
-        .eq('inventory_id', item.id)
-        .eq('purchase_orders.branch_id', savedBranch.id);
+      if (error) throw error;
 
-      setItemDetails({ sos: sos || [], pos: pos || [] });
-    } catch (error) {
+      // Split the results
+      const pos = (data || []).filter((row: any) => row.type === 'inbound');
+      const sos = (data || []).filter((row: any) => row.type === 'outbound');
+
+      setItemDetails({ sos, pos });
+
+      console.log(
+        `Loaded ${pos.length} POs and ${sos.length} SOs for this item`
+      );
+    } catch (error: any) {
       console.error('Audit fetch error:', error);
+      alert(`Failed to load audit: ${error.message || 'Check console'}`);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -451,18 +458,21 @@ export default function InventoryProtocol() {
                                         Inbound (Purchase Orders)
                                       </p>
                                       <p className="text-[10px] font-mono font-bold text-emerald-400">
-                                        Total:{' '}
+                                        Total: {itemDetails.pos.length} records
+                                        •
                                         {itemDetails.pos.reduce(
                                           (acc, curr) =>
                                             acc + (Number(curr.quantity) || 0),
                                           0
-                                        )}
+                                        )}{' '}
+                                        qty
                                       </p>
                                     </div>
+
                                     <div className="max-h-48 overflow-y-auto space-y-1 pr-2">
                                       {itemDetails.pos
                                         .filter((p) =>
-                                          (p.purchase_orders?.po_number ?? '')
+                                          (p.doc_number ?? '')
                                             .toUpperCase()
                                             .includes(innerSearch.toUpperCase())
                                         )
@@ -471,9 +481,8 @@ export default function InventoryProtocol() {
                                             key={i}
                                             className="flex justify-between items-center bg-white/5 p-2 rounded border border-white/5 font-mono text-[9px]"
                                           >
-                                            <span className="text-slate-400">
-                                              {p.purchase_orders?.po_number ??
-                                                'UNKNOWN PO'}
+                                            <span className="text-slate-400 truncate">
+                                              {p.doc_number ?? 'UNKNOWN PO'}
                                             </span>
                                             <span className="text-emerald-400 font-bold">
                                               +{p.quantity}
@@ -490,18 +499,21 @@ export default function InventoryProtocol() {
                                         Outbound (Sales Orders)
                                       </p>
                                       <p className="text-[10px] font-mono font-bold text-red-400">
-                                        Total:{' '}
+                                        Total: {itemDetails.sos.length} records
+                                        •
                                         {itemDetails.sos.reduce(
                                           (acc, curr) =>
                                             acc + (Number(curr.quantity) || 0),
                                           0
-                                        )}
+                                        )}{' '}
+                                        qty
                                       </p>
                                     </div>
+
                                     <div className="max-h-48 overflow-y-auto space-y-1 pr-2">
                                       {itemDetails.sos
                                         .filter((s) =>
-                                          (s.orders?.order_number ?? '')
+                                          (s.doc_number ?? '')
                                             .toUpperCase()
                                             .includes(innerSearch.toUpperCase())
                                         )
@@ -510,9 +522,8 @@ export default function InventoryProtocol() {
                                             key={i}
                                             className="flex justify-between items-center bg-white/5 p-2 rounded border border-white/5 font-mono text-[9px]"
                                           >
-                                            <span className="text-slate-400">
-                                              {s.orders?.order_number ??
-                                                'UNKNOWN SO'}
+                                            <span className="text-slate-400 truncate">
+                                              {s.doc_number ?? 'UNKNOWN SO'}
                                             </span>
                                             <span className="text-red-400 font-bold">
                                               -{s.quantity}

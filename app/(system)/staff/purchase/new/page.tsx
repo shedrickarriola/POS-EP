@@ -375,23 +375,7 @@ export default function NewPurchaseOrder() {
     const newItems = [...items];
     const item = { ...newItems[index] };
 
-    // 1. Numeric Sanitization Logic
-    const numericFields = ['qty', 'invoice_price', 'discount', 'markup'];
-
-    if (numericFields.includes(field)) {
-      if (typeof value === 'string') {
-        // Allow only digits and one decimal point
-        let sanitized = value.replace(/[^0-9.]/g, '');
-        const parts = sanitized.split('.');
-
-        // If there's more than one dot, keep only the first one
-        if (parts.length > 2) {
-          sanitized = `${parts}.${parts.slice(1).join('')}`;
-        }
-        value = sanitized;
-      }
-    }
-
+    // ====================== HANDLE FIELD UPDATES ======================
     if (field === 'inventory_id') {
       const selected = inventoryList.find((p) => p.id === value);
       if (selected) {
@@ -406,7 +390,7 @@ export default function NewPurchaseOrder() {
         item.markup = calculateMarkup(item.item_type, item.item_name);
         item.match_score = 0;
 
-        // Sync search term so the input shows the correct name
+        // Sync search term
         const newST = [...searchTerms];
         newST[index] = selected.item_name;
         setSearchTerms(newST);
@@ -419,36 +403,43 @@ export default function NewPurchaseOrder() {
       // Re-calculate markup only when type or name changes manually
       if (field === 'item_name' || field === 'item_type') {
         item.markup = calculateMarkup(item.item_type, item.item_name);
-
         if (field === 'item_name') {
           item.match_score = 999;
         }
       }
     }
 
-    // ====================== FINAL CALCULATIONS ======================
-    // Use parseFloat for math, defaulting to 0 if the string is empty
-    const qty = Math.max(0, parseFloat(item.qty as any) || 0);
-    const pack = Math.max(1, parseFloat(item.packaging_type as any) || 1);
-    const invPrice = Math.max(0, parseFloat(item.invoice_price as any) || 0);
-    const disc = Math.max(0, parseFloat(item.discount as any) || 0);
-    const currentMarkup = parseFloat(item.markup as any) || 0;
+    // ====================== FINAL CALCULATIONS (with NEW RULE) ======================
+    const qty = Math.max(0, Number(item.qty) || 0);
+    const pack = Math.max(1, Number(item.packaging_type) || 1);
+    const invPrice = Math.max(0, Number(item.invoice_price) || 0);
+    const disc = Math.max(0, Number(item.discount) || 0);
 
-    // 1. Total Buy Cost
-    const rawTotal = qty * invPrice - disc;
-    item.buy_cost_total = Math.round(rawTotal * 100) / 100;
+    // 1. Line Total (before unit conversion)
+    const lineTotal = qty * invPrice - disc;
+    item.buy_cost_total = Math.round(lineTotal * 100) / 100;
 
-    // 2. Unit Buy Cost
+    // 2. Calculated Unit Cost
     const totalUnits = qty * pack;
+    let calculatedUnitCost = 0;
+
     if (totalUnits > 0) {
-      const rawUnitCost = item.buy_cost_total / totalUnits;
-      item.buy_cost = Math.round(rawUnitCost * 100) / 100;
-    } else {
-      item.buy_cost = 0;
+      calculatedUnitCost = Math.round((lineTotal / totalUnits) * 100) / 100;
     }
 
-    // 3. Suggested New Price (rounded up to nearest whole number)
-    item.new_price = Math.ceil(item.buy_cost * (1 + currentMarkup / 100));
+    // NEW RULE: Only update buy_cost if it goes UP (or if currently 0)
+    const currentBuyCost = Number(item.buy_cost) || 0;
+
+    if (calculatedUnitCost > currentBuyCost) {
+      item.buy_cost = calculatedUnitCost;
+    }
+    // else: keep the old higher buy_cost (do NOT decrease it)
+
+    // 3. Suggested New Price (based on final buy_cost)
+    const currentMarkup = Number(item.markup) || 0;
+    item.new_price = Math.ceil(
+      (item.buy_cost || 0) * (1 + currentMarkup / 100)
+    );
 
     newItems[index] = item;
     setItems(newItems);
@@ -645,10 +636,11 @@ export default function NewPurchaseOrder() {
       return alert('Some items are not matched.');
 
     setIsSubmitting(true);
+
     try {
       if (!currentBranchId) throw new Error('Branch ID missing');
 
-      // 1. CALCULATE SPLIT TOTALS (This was the missing part)
+      // 1. CALCULATE SPLIT TOTALS
       const splitTotals = items.reduce(
         (acc, item) => {
           const amount = Number(item.buy_cost_total) || 0;
@@ -663,21 +655,45 @@ export default function NewPurchaseOrder() {
         .toISOString()
         .split('T');
 
-      // 2. MAP ITEMS FOR RPC
-      const mappedItems = items.map((item) => ({
-        inventory_id: item.inventory_id,
-        item_name: item.item_name,
-        item_type: item.item_type,
-        qty: Number(item.qty),
-        packaging_type: Number(item.packaging_type) || 1,
-        unit_cost: Number(item.invoice_price),
-        buy_cost: Number(item.buy_cost),
-        // Only use the new suggested price if it is higher than the current price
-        new_price:
-          item.new_price > item.current_price
-            ? Number(item.new_price)
-            : Number(item.current_price),
-      }));
+      // 2. MAP ITEMS FOR RPC - WITH BUY_COST PROTECTION
+      const mappedItems = items.map((item) => {
+        const qty = Number(item.qty);
+        const pack = Number(item.packaging_type) || 1;
+        const invPrice = Number(item.invoice_price);
+        const disc = Number(item.discount) || 0;
+
+        // Calculate what the unit cost *should* be right now
+        const lineTotal = qty * invPrice - disc;
+        const totalUnits = qty * pack;
+
+        let calculatedUnitCost = 0;
+        if (totalUnits > 0) {
+          calculatedUnitCost = Math.round((lineTotal / totalUnits) * 100) / 100;
+        }
+
+        // PROTECT buy_cost: Only allow it to go UP, never down
+        let finalBuyCost = Number(item.buy_cost) || 0;
+
+        if (calculatedUnitCost > finalBuyCost) {
+          finalBuyCost = calculatedUnitCost;
+        }
+        // else: keep the previously recorded higher buy_cost
+
+        return {
+          inventory_id: item.inventory_id,
+          item_name: item.item_name,
+          item_type: item.item_type,
+          qty: qty,
+          packaging_type: pack,
+          unit_cost: invPrice,
+          buy_cost: finalBuyCost, // ← Protected buy_cost
+          // Only use the new suggested price if it is higher than the current price
+          new_price:
+            item.new_price > item.current_price
+              ? Number(item.new_price)
+              : Number(item.current_price),
+        };
+      });
 
       // 3. CALL RPC
       const { data: generatedPo, error } = await supabase.rpc(
@@ -1139,8 +1155,16 @@ export default function NewPurchaseOrder() {
                           />
                         </td>
 
-                        <td className="px-1 text-right font-black text-indigo-300 text-[12px]">
+                        <td className="px-1 text-right font-black text-indigo-300 text-[12px] relative group">
                           ₱{(item.buy_cost || 0).toFixed(2)}
+                          {item.buy_cost &&
+                            item.invoice_price &&
+                            Number(item.buy_cost) >
+                              Number(item.invoice_price) && (
+                              <span className="absolute -top-1 -right-1 text-[8px] text-amber-400 font-black">
+                                ↑
+                              </span>
+                            )}
                         </td>
 
                         <td className="px-1 text-right font-black text-white text-[12px]">
