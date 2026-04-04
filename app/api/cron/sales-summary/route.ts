@@ -18,7 +18,7 @@ export async function GET(request: Request) {
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
 
-    // Get reliable PHT date
+    // Get reliable PHT date for today
     const { data: todayPHT, error: dateError } = await supabaseAdmin.rpc(
       'get_current_pht_date'
     );
@@ -28,11 +28,10 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'Date error' }, { status: 500 });
     }
 
-    // === MORE FORGIVING TIME WINDOW FOR LOGS ===
-    // We fetch from 00:00 PHT yesterday to be safe for early morning logins
-    const yesterdayPHT = new Date(todayPHT);
-    yesterdayPHT.setDate(yesterdayPHT.getDate() - 1);
-    const yesterdayStr = yesterdayPHT.toISOString().split('T')[0];
+    // Calculate yesterday for safe buffer (3 AM PHT yesterday)
+    const yesterdayDate = new Date(todayPHT);
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    const yesterdayStr = yesterdayDate.toISOString().split('T')[0];
 
     // 1. DATA FETCHING
     const [
@@ -55,12 +54,12 @@ export async function GET(request: Request) {
       supabaseAdmin.from('branches').select('*'),
       supabaseAdmin.from('organizations').select('*'),
 
-      // FIXED: More forgiving query for early morning logins
+      // FIXED: Safe buffer starting from 3:00 AM PHT yesterday
       supabaseAdmin
         .from('system_logs')
         .select('*')
         .in('event_type', ['LOGIN', 'BRANCH_CHANGE'])
-        .gte('created_at', `${yesterdayStr}T16:00:00Z`) // Start from 12:00 AM PHT yesterday (safe buffer)
+        .gte('created_at', `${yesterdayStr}T19:00:00Z`) // 3:00 AM PHT yesterday (19:00 UTC)
         .lte('created_at', `${todayPHT}T23:59:59Z`)
         .order('created_at', { ascending: true }),
 
@@ -102,7 +101,7 @@ export async function GET(request: Request) {
       }
     });
 
-    // 3. BRANCH STATS (unchanged)
+    // 3. BRANCH STATS
     const branchStats: Record<string, any> = {};
     branches?.forEach((b) => {
       branchStats[b.id] = {
@@ -127,8 +126,6 @@ export async function GET(request: Request) {
       }
     });
 
-    // ... rest of your code (orgGroups, message building, sending) remains the same
-
     const orgMap: Record<string, any> = {};
     orgs?.forEach((org) => {
       orgMap[org.id] = org;
@@ -152,7 +149,28 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        // ... your stock advisory code
+        message = `<b>📦 WEEKLY STOCK RECOMMENDATIONS</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
+        group.branches.forEach((b: any) => {
+          const toOrder = products
+            ?.filter(
+              (p: any) =>
+                p.branch_id === b.id &&
+                (Number(p.current_stock) <= Number(p.sold_weekly || 0) ||
+                  Number(p.current_stock) < 5)
+            )
+            .slice(0, 10);
+
+          message += `<b>📍 ${b.branch_name.toUpperCase()}</b>\n`;
+          if (toOrder && toOrder.length > 0) {
+            toOrder.forEach((p: any) => {
+              const icon = Number(p.current_stock) <= 0 ? '🚨' : '⚠️';
+              message += `${icon} ${p.name}: ${p.current_stock} left (Sold ${p.sold_weekly}/wk)\n`;
+            });
+          } else {
+            message += `✅ <i>Stock levels healthy</i>\n`;
+          }
+          message += `━━━━━━━━━━━━━━━━━━\n`;
+        });
       } else {
         let header = '';
         switch (type) {
