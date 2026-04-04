@@ -1054,10 +1054,11 @@ export default function StaffDashboard() {
           {(() => {
             const now = new Date();
 
-            // Date Bounds
+            // Week range: Sunday to Saturday
             const sun = new Date(now);
             sun.setDate(now.getDate() - now.getDay());
             sun.setHours(0, 0, 0, 0);
+
             const sat = new Date(sun);
             sat.setDate(sun.getDate() + 6);
 
@@ -1072,24 +1073,32 @@ export default function StaffDashboard() {
               0
             ).getDate();
 
-            // Quotas & Actuals
+            // Quotas
             const dailyGen = Number(selectedBranch?.daily_generic_quota || 0);
             const weeklyQuo = dailyGen * 7;
             const monthlyQuo = dailyGen * daysInMonth;
 
-            const totals = dailyReports.reduce(
-              (acc, r) => {
-                const rDate = new Date(r.report_date);
-                const gen = Number(r.generic_sales || 0);
-                if (rDate >= sun && rDate <= sat) acc.w += gen;
-                if (rDate >= firstDayMonth && rDate <= now) acc.m += gen;
-                return acc;
-              },
-              { w: 0, m: 0 }
-            );
+            // FIXED: Calculate weekly and monthly totals properly (includes today)
+            let weeklyGeneric = 0;
+            let monthlyGeneric = 0;
 
-            const getProg = (a: number, q: number) =>
-              q > 0 ? Math.min((a / q) * 100, 100) : 0;
+            dailyReports.forEach((r) => {
+              const reportDate = new Date(r.report_date + 'T00:00:00'); // Ensure proper date parsing
+              const gen = Number(r.generic_sales || 0);
+
+              // Weekly (Sunday → Saturday)
+              if (reportDate >= sun && reportDate <= sat) {
+                weeklyGeneric += gen;
+              }
+
+              // Monthly (1st of month → today)
+              if (reportDate >= firstDayMonth && reportDate <= now) {
+                monthlyGeneric += gen;
+              }
+            });
+
+            const getProg = (actual: number, quota: number) =>
+              quota > 0 ? Math.min((actual / quota) * 100, 100) : 0;
 
             return (
               <div className="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1098,21 +1107,23 @@ export default function StaffDashboard() {
                   <div className="flex justify-between items-start mb-2">
                     <div>
                       <p className="text-[9px] font-black text-emerald-500 uppercase tracking-widest">
-                        Weekly_Generic
+                        Weekly Generic
                       </p>
                       <p className="text-xl font-black text-white">
-                        ₱{totals.w.toLocaleString()}
+                        ₱{weeklyGeneric.toLocaleString()}
                       </p>
                     </div>
                     <p className="text-xs font-black text-emerald-500 bg-emerald-500/10 px-2 py-1 rounded-lg">
-                      {getProg(totals.w, weeklyQuo).toFixed(0)}%
+                      {getProg(weeklyGeneric, weeklyQuo).toFixed(0)}%
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
                     <div className="flex-1 h-1.5 bg-black rounded-full overflow-hidden">
                       <div
                         className="h-full bg-emerald-500"
-                        style={{ width: `${getProg(totals.w, weeklyQuo)}%` }}
+                        style={{
+                          width: `${getProg(weeklyGeneric, weeklyQuo)}%`,
+                        }}
                       />
                     </div>
                     <span className="text-[9px] font-bold text-slate-500 whitespace-nowrap">
@@ -1126,21 +1137,23 @@ export default function StaffDashboard() {
                   <div className="flex justify-between items-start mb-2">
                     <div>
                       <p className="text-[9px] font-black text-blue-500 uppercase tracking-widest">
-                        Monthly_Generic
+                        Monthly Generic
                       </p>
                       <p className="text-xl font-black text-white">
-                        ₱{totals.m.toLocaleString()}
+                        ₱{monthlyGeneric.toLocaleString()}
                       </p>
                     </div>
                     <p className="text-xs font-black text-blue-500 bg-blue-500/10 px-2 py-1 rounded-lg">
-                      {getProg(totals.m, monthlyQuo).toFixed(0)}%
+                      {getProg(monthlyGeneric, monthlyQuo).toFixed(0)}%
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
                     <div className="flex-1 h-1.5 bg-black rounded-full overflow-hidden">
                       <div
                         className="h-full bg-blue-500"
-                        style={{ width: `${getProg(totals.m, monthlyQuo)}%` }}
+                        style={{
+                          width: `${getProg(monthlyGeneric, monthlyQuo)}%`,
+                        }}
                       />
                     </div>
                     <span className="text-[9px] font-bold text-slate-500 whitespace-nowrap">
