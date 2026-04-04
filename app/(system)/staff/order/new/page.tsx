@@ -291,24 +291,34 @@ export default function NewOrderPOS() {
 
   useEffect(() => {
     const initPage = async () => {
-      const {
-        data: { user: authUser },
-      } = await supabase.auth.getUser();
-      setUser(authUser);
-      await fetchInventory();
+      try {
+        const {
+          data: { user: authUser },
+        } = await supabase.auth.getUser();
+        setUser(authUser);
 
-      const { data: lastOrders } = await supabase
-        .from('orders')
-        .select('order_number')
-        .order('created_at', { ascending: false })
-        .limit(1);
+        // 1. Fetch inventory
+        await fetchInventory();
 
-      if (lastOrders?.[0]?.order_number) {
-        const lastNo = lastOrders[0].order_number;
-        const numPart = parseInt(lastNo.replace('SO', ''));
-        setNextSONumber(`SO${(numPart + 1).toString().padStart(2, '0')}`);
+        // 2. Get next SO number
+        const { data: lastOrders } = await supabase
+          .from('orders')
+          .select('order_number')
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (lastOrders?.[0]?.order_number) {
+          const lastNo = lastOrders[0].order_number;
+          const numPart = parseInt(lastNo.replace('SO', ''));
+          setNextSONumber(`SO${(numPart + 1).toString().padStart(2, '0')}`);
+        } else {
+          setNextSONumber('SO01');
+        }
+      } catch (err) {
+        console.error('Init page error:', err);
       }
     };
+
     initPage();
   }, []);
 
@@ -372,16 +382,14 @@ export default function NewOrderPOS() {
       if (!branchData) throw new Error('No active branch selected');
       const branch = JSON.parse(branchData);
 
-      // === RELIABLE Philippine Date (YYYY-MM-DD) ===
-      const phtDateString = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'Asia/Manila',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-      }).format(new Date());
+      // Get reliable PHT date
+      const { data: phtDateData, error: dateError } = await supabase.rpc(
+        'get_current_pht_date'
+      );
 
-      // Optional: Add this temporarily to debug
-      // console.log('PHT Date used:', phtDateString);
+      if (dateError) throw new Error('Failed to get Philippine date');
+
+      const phtDateString = phtDateData;
 
       // 1. Create the Order
       const { data: generatedSO, error: soErr } = await supabase.rpc(
@@ -402,7 +410,7 @@ export default function NewOrderPOS() {
             created_by: session.user.email,
             status: 'completed',
             branch_id: currentBranchId,
-            created_date_pht: phtDateString, // ← Fixed here
+            created_date_pht: phtDateString,
           },
         ])
         .select()
@@ -412,7 +420,7 @@ export default function NewOrderPOS() {
 
       setConfirmedSONumber(order.order_number);
 
-      // 2. Create Order Items (already working for you)
+      // 2. Create Order Items
       const payload = items.map((i) => ({
         order_id: order.id,
         product_id: i.product_id,
@@ -420,7 +428,7 @@ export default function NewOrderPOS() {
         unit_price: Number(i.price_piece),
         type: i.type,
         subtotal: i.qty * (i.price_piece * (1 - i.discount_percent / 100)),
-        created_date_pht: phtDateString, // ← Same reliable date
+        created_date_pht: phtDateString,
       }));
 
       const { error: itemsErr } = await supabase
@@ -429,7 +437,7 @@ export default function NewOrderPOS() {
 
       if (itemsErr) throw itemsErr;
 
-      // 3. Process inventory (stock deduction)
+      // 3. Process inventory deduction
       const itemsPayloadForRPC = items.map((i) => ({
         product_id: i.product_id,
         qty: Number(i.qty),
@@ -441,6 +449,18 @@ export default function NewOrderPOS() {
       });
 
       if (rpcErr) throw new Error(`Inventory Sync Error: ${rpcErr.message}`);
+
+      // === NEW: Run healing right after successful submission ===
+      try {
+        await supabase.rpc('heal_orders_pht_date');
+        console.log('✅ Date healing executed after order submission');
+      } catch (healErr) {
+        console.warn(
+          'Healing after submission failed (non-critical):',
+          healErr
+        );
+        // We don't throw here — order was already successful
+      }
 
       setShowSuccess(true);
     } catch (err: any) {
