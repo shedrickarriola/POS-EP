@@ -92,7 +92,39 @@ export default function StaffDashboard() {
     selling: 0,
     type: '',
   });
+  const calculateMarkup = (
+    type: string | null | undefined,
+    name: string | null | undefined
+  ): number => {
+    const upperType = (type ?? 'GENERIC').toUpperCase();
+    const lowerName = (name ?? '').toLowerCase();
 
+    // Rule 1: Generic is always 50%
+    if (upperType === 'GENERIC') return 50;
+
+    // Rule 2: Branded Logic
+    if (upperType === 'BRANDED') {
+      const medicineKeywords = [
+        'tab',
+        'tablet',
+        'cap',
+        'capsule',
+        'mg',
+        'syr',
+        'syrup',
+        'suspension',
+      ];
+
+      const isMedicine = medicineKeywords.some((keyword) =>
+        lowerName.includes(keyword)
+      );
+
+      return isMedicine ? 10 : 15;
+    }
+
+    // Fallback
+    return 25;
+  };
   const triggerToast = (msg: string, type: 'success' | 'error' = 'success') => {
     setToast({ show: true, msg, type });
     setTimeout(() => setToast((prev) => ({ ...prev, show: false })), 3000);
@@ -328,7 +360,7 @@ export default function StaffDashboard() {
       const delayDebounceFn = setTimeout(async () => {
         const { data } = await supabase
           .from('inventory')
-          .select(`id, stock, item_name, price, buy_cost`)
+          .select(`id, stock, item_name, price, buy_cost, item_type`)
           .eq('branch_id', selectedBranch.id)
           .ilike('item_name', `%${searchTerm}%`)
           .limit(5);
@@ -353,7 +385,37 @@ export default function StaffDashboard() {
     ]);
     setStats({ poCount: poRes.count || 0, salesCount: orderRes.count || 0 });
   }
+  // Update the logic near line 392
+  const handleUpdatePrice = async () => {
+    if (!selectedProduct) return;
 
+    setLogStatus('PUSHING_CALIBRATION...');
+    try {
+      const finalType = updatePrices.type || selectedProduct.type;
+
+      const { error } = await supabase
+        .from('inventory')
+        .update({
+          price: updatePrices.selling,
+          buy_cost: updatePrices.cost, // ← This is what we want to REMOVE
+          item_type: finalType,
+        })
+        .eq('id', selectedProduct.id);
+
+      if (error) throw error;
+
+      triggerToast('Product Calibration Complete', 'success');
+
+      setSelectedProduct(null);
+      setUpdatePrices({ cost: 0, selling: 0, type: '' });
+      setSearchTerm('');
+
+      refreshInventoryState();
+      setShowPriceModal(false);
+    } catch (err: any) {
+      triggerToast(err.message, 'error');
+    }
+  };
   async function fetchDailyReports(branchId: string) {
     setLogStatus('CHECKING_FOR_MISSING_DATA...');
 
@@ -608,40 +670,6 @@ export default function StaffDashboard() {
       triggerToast(`${newProduct.name} Registered!`, 'success');
       setNewProduct({ name: '', cost: 0, selling: 0, type: '' });
       setShowAddModal(false);
-    } catch (err: any) {
-      triggerToast(err.message, 'error');
-    }
-  };
-
-  // Update the logic near line 392
-  const handleUpdatePrice = async () => {
-    if (!selectedProduct) return;
-
-    setLogStatus('PUSHING_CALIBRATION...');
-    try {
-      // If updatePrices.type is empty, fallback to the existing product type
-      const finalType = updatePrices.type || selectedProduct.type;
-
-      const { error } = await supabase
-        .from('inventory')
-        .update({
-          price: updatePrices.selling,
-          buy_cost: updatePrices.cost,
-          item_type: finalType,
-        })
-        .eq('id', selectedProduct.id);
-
-      if (error) throw error;
-
-      triggerToast('Product Calibration Complete', 'success');
-
-      // Reset states
-      setSelectedProduct(null);
-      setUpdatePrices({ cost: 0, selling: 0, type: '' });
-      setSearchTerm('');
-
-      refreshInventoryState();
-      setShowPriceModal(false);
     } catch (err: any) {
       triggerToast(err.message, 'error');
     }
@@ -1691,9 +1719,9 @@ export default function StaffDashboard() {
           </div>
         )}
 
-        {/* Update Price Modal */}
+        {/* Compact & Mobile-Friendly Price Calibration Modal */}
         {showPriceModal && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
             <div
               className="absolute inset-0 bg-black/80 backdrop-blur-sm"
               onClick={() => {
@@ -1701,118 +1729,115 @@ export default function StaffDashboard() {
                 refreshInventoryState();
               }}
             />
-            <div className="relative bg-slate-900 border border-blue-500/30 w-full max-w-md rounded-3xl p-8 shadow-2xl">
-              <div className="flex justify-between items-center mb-6">
-                <h2 className="text-xl font-black italic text-white uppercase tracking-tighter">
-                  Price_Calibration
+            <div className="relative bg-slate-900 border border-blue-500/30 w-full max-w-md rounded-3xl p-5 shadow-2xl">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-base font-black italic text-white uppercase tracking-tight">
+                  Price Calibration
                 </h2>
                 <button
                   onClick={() => {
                     setShowPriceModal(false);
                     refreshInventoryState();
                   }}
-                  className="text-slate-500 hover:text-white"
+                  className="text-slate-500 hover:text-white p-1"
                 >
                   <X size={20} />
                 </button>
               </div>
+
               <div className="space-y-4">
+                {/* Search */}
                 <div className="relative">
                   <Search
-                    className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500"
-                    size={16}
+                    className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500"
+                    size={15}
                   />
                   <input
                     type="text"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
-                    className="w-full bg-slate-950 border border-white/5 rounded-xl pl-12 pr-4 py-3 text-sm text-white outline-none"
-                    placeholder="Search branch inventory..."
+                    className="w-full bg-slate-950 border border-white/5 rounded-xl pl-10 pr-4 py-3 text-sm text-white outline-none"
+                    placeholder="Search product..."
                   />
                 </div>
+
+                {/* Search Results */}
                 {!selectedProduct && searchResults.length > 0 && (
-                  <div className="bg-slate-950 border border-white/5 rounded-xl overflow-hidden max-h-40 overflow-y-auto">
+                  <div className="bg-slate-950 border border-white/5 rounded-xl overflow-hidden max-h-44 overflow-y-auto">
                     {searchResults.map((p) => (
                       <button
                         key={p.id}
                         onClick={() => {
                           setSelectedProduct(p);
                           setUpdatePrices({
-                            cost: p.buy_cost,
-                            selling: p.price,
-                            type: p.type || '',
+                            cost: Number(p.buy_cost || 0),
+                            selling: Number(p.price || 0),
+                            type: (
+                              p.item_type ||
+                              p.type ||
+                              'GENERIC'
+                            ).toUpperCase(),
                           });
                         }}
                         className="w-full px-4 py-3 text-left border-b border-white/5 hover:bg-blue-500/10 group"
                       >
                         <div className="flex justify-between items-center">
-                          <span className="text-xs font-bold text-slate-300 group-hover:text-white uppercase">
+                          <span className="text-sm font-medium text-slate-200 line-clamp-1">
                             {p.item_name}
                           </span>
-                          <span className="text-[10px] font-black text-emerald-500">
-                            {p.stock} UNIT
+                          <span className="text-xs text-emerald-400 whitespace-nowrap ml-2">
+                            Stock: {p.stock}
                           </span>
                         </div>
                       </button>
                     ))}
                   </div>
                 )}
+
+                {/* Form */}
                 {selectedProduct && (
-                  <div className="p-4 bg-blue-500/5 border border-blue-500/20 rounded-2xl space-y-4">
-                    <div className="flex justify-between items-center">
-                      <span className="text-xs font-black text-white uppercase italic">
+                  <div className="space-y-4">
+                    {/* Product Name */}
+                    <div className="text-center">
+                      <p className="font-semibold text-white text-base leading-tight">
                         {selectedProduct.item_name}
-                      </span>
-                      <button
-                        onClick={() => setSelectedProduct(null)}
-                        className="text-[9px] text-slate-500 uppercase font-black"
-                      >
-                        Change
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-1">
-                        <p className="text-[8px] text-slate-500 font-bold uppercase ml-1">
-                          Buy Cost
-                        </p>
-                        <input
-                          type="number"
-                          value={updatePrices.cost}
-                          onChange={(e) =>
-                            setUpdatePrices({
-                              ...updatePrices,
-                              cost: parseFloat(e.target.value) || 0,
-                            })
-                          }
-                          className="w-full bg-slate-950 border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none"
-                          placeholder="Cost"
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <p className="text-[8px] text-slate-500 font-bold uppercase ml-1">
-                          Selling Price
-                        </p>
-                        <input
-                          type="number"
-                          value={updatePrices.selling}
-                          onChange={(e) =>
-                            setUpdatePrices({
-                              ...updatePrices,
-                              selling: parseFloat(e.target.value) || 0,
-                            })
-                          }
-                          className="w-full bg-slate-950 border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none"
-                          placeholder="Price"
-                        />
-                      </div>
-                    </div>
-
-                    {/* Classification Dropdown */}
-                    <div className="space-y-1">
-                      <p className="text-[8px] text-slate-500 font-bold uppercase ml-1">
-                        Classification
                       </p>
+                    </div>
+
+                    {/* Buy Cost - Locked */}
+                    <div className="bg-slate-950 border border-amber-500/30 rounded-2xl p-4 text-center">
+                      <p className="text-[9px] font-black text-amber-400 uppercase tracking-widest">
+                        BUY COST (LOCKED)
+                      </p>
+                      <p className="text-2xl font-black text-amber-400 mt-1">
+                        ₱{Number(updatePrices.cost).toFixed(2)}
+                      </p>
+                    </div>
+
+                    {/* Selling Price */}
+                    <div>
+                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">
+                        New Selling Price
+                      </label>
+                      <input
+                        type="number"
+                        value={updatePrices.selling}
+                        onChange={(e) =>
+                          setUpdatePrices({
+                            ...updatePrices,
+                            selling: parseFloat(e.target.value) || 0,
+                          })
+                        }
+                        className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3 text-lg font-semibold text-white outline-none focus:border-emerald-500"
+                        placeholder="0.00"
+                      />
+                    </div>
+
+                    {/* Classification */}
+                    <div>
+                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">
+                        Classification
+                      </label>
                       <select
                         value={updatePrices.type}
                         onChange={(e) =>
@@ -1821,21 +1846,60 @@ export default function StaffDashboard() {
                             type: e.target.value,
                           })
                         }
-                        className="w-full bg-slate-950 border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none cursor-pointer"
+                        className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3 text-sm font-medium text-white outline-none focus:border-emerald-500"
                       >
-                        <option value="" disabled>
-                          Select Type
-                        </option>
-                        <option value="GENERIC">Generic</option>
-                        <option value="BRANDED">Branded</option>
+                        <option value="GENERIC">GENERIC</option>
+                        <option value="BRANDED">BRANDED</option>
                       </select>
+                    </div>
+
+                    {/* Suggested Markup + Warning - Matching NewPurchaseOrder Logic */}
+                    <div className="bg-emerald-500/5 border border-emerald-500/30 rounded-2xl p-4">
+                      <p className="text-xs font-black text-emerald-400 uppercase tracking-widest mb-1">
+                        Suggested Markup
+                      </p>
+
+                      {(() => {
+                        const suggestedMarkup = calculateMarkup(
+                          updatePrices.type,
+                          selectedProduct?.item_name
+                        );
+                        const suggestedPrice = Math.ceil(
+                          updatePrices.cost * (1 + suggestedMarkup / 100)
+                        );
+
+                        return (
+                          <>
+                            <p className="text-xl font-black text-emerald-400">
+                              {suggestedMarkup}%
+                            </p>
+                            <p className="text-xs text-slate-300 mt-1">
+                              Suggested Price: ₱{suggestedPrice}
+                            </p>
+
+                            {updatePrices.selling > 0 && (
+                              <div
+                                className={`mt-3 p-3 rounded-xl text-xs border ${
+                                  updatePrices.selling >= suggestedPrice
+                                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                                    : 'bg-red-500/10 border-red-500/30 text-red-400'
+                                }`}
+                              >
+                                {updatePrices.selling >= suggestedPrice
+                                  ? '✓ Healthy margin'
+                                  : '⚠️ Selling price is too low (below suggested markup)'}
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
                     </div>
 
                     <button
                       onClick={handleUpdatePrice}
-                      className="w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-xl text-xs font-black uppercase text-white transition-all"
+                      className="w-full py-4 bg-blue-600 hover:bg-blue-500 rounded-2xl text-sm font-black uppercase tracking-widest text-white"
                     >
-                      Commit Adjustments
+                      Update Selling Price Only
                     </button>
                   </div>
                 )}
