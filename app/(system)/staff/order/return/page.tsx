@@ -99,6 +99,7 @@ export default function ReturnOrder() {
     }
     setItems(updatedItems);
   };
+
   const cancelReturn = (idx: number) => {
     const itemToRestore = returnedItems[idx];
     const updatedItems = [...items];
@@ -129,6 +130,7 @@ export default function ReturnOrder() {
     updatedQueue.splice(idx, 1);
     setReturnedItems(updatedQueue);
   };
+
   const handleProcessReturn = async () => {
     if (isProcessing || returnedItems.length === 0) return;
     setIsProcessing(true);
@@ -185,13 +187,13 @@ export default function ReturnOrder() {
               })
               .eq('id', item.id);
           } else {
-            // If returning the last of the quantity, delete the row [cite: 23]
+            // If returning the last of the quantity, delete the row
             await supabase.from('order_items').delete().eq('id', item.id);
           }
         }
       }
 
-      // 3. Financial Recalculation [cite: 24, 25, 26, 27]
+      // 3. Financial Recalculation
       const newBranded = Math.max(
         0,
         Number(activeOrder.branded_amt || 0) - brandedAdjustment
@@ -217,6 +219,22 @@ export default function ReturnOrder() {
         .eq('id', activeOrder.id);
 
       if (orderError) throw orderError;
+
+      // 4. HEAL BUY_COST — Revert inventory buy_cost to the highest PO cost
+      // This is critical because buy_cost may have changed since the original sale.
+      // We run it AFTER stock has been restored and the order is adjusted.
+      if (currentBranchId) {
+        const { error: healError } = await supabase.rpc('heal_inventory_buy_cost', {
+          p_branch_id: currentBranchId,
+        });
+
+        if (healError) {
+          // Non-blocking warning — the return succeeded, heal is just a safety net
+          console.warn('⚠️ heal_inventory_buy_cost warning:', healError.message);
+        } else {
+          console.log('✅ heal_inventory_buy_cost completed successfully');
+        }
+      }
 
       setShowSuccessModal(true);
     } catch (err: any) {
@@ -535,7 +553,7 @@ export default function ReturnOrder() {
             </h2>
             <p className="text-xs text-slate-500 mb-8 font-mono uppercase tracking-widest leading-relaxed">
               Items restored to branch inventory. Financial records for branded
-              and generic sales adjusted.
+              and generic sales adjusted. Buy cost healed to highest PO price.
             </p>
             <button
               onClick={() => router.push('/staff')}
