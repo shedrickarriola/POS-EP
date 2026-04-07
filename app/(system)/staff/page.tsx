@@ -144,18 +144,22 @@ export default function StaffDashboard() {
   const checkNewSalePermission = async (branchId: string) => {
     const role = (profile?.role || '').toString().toLowerCase().trim();
 
-    // Admin / Manager Bypass
-    if (role === 'branch_admin' || role === 'org_manager') {
+    // ✅ SUPER RELIABLE ADMIN BYPASS
+    if (
+      role === 'branch_admin' ||
+      role === 'org_manager' ||
+      role.includes('admin')
+    ) {
       setCanCreateNewSale(true);
       setBlockingReason('');
       setMissingDatesList([]);
       return true;
     }
 
+    // Regular staff - enforce remittance rules
     try {
       setBlockingReason('Checking previous remittance reports...');
 
-      // 1. Get first sales date
       const { data: firstOrder } = await supabase
         .from('orders')
         .select('created_date_pht')
@@ -165,7 +169,6 @@ export default function StaffDashboard() {
         .single();
 
       if (!firstOrder?.created_date_pht) {
-        // No sales history yet → allow
         setCanCreateNewSale(true);
         setBlockingReason('');
         setMissingDatesList([]);
@@ -173,14 +176,11 @@ export default function StaffDashboard() {
       }
 
       const firstDate = firstOrder.created_date_pht;
-
-      // 2. Generate dates from first sale up to YESTERDAY
-      const start = new Date(firstDate);
       const yesterday = new Date();
       yesterday.setDate(yesterday.getDate() - 1);
 
       const datesToCheck: string[] = [];
-      let current = new Date(start);
+      let current = new Date(firstDate);
 
       while (current <= yesterday) {
         datesToCheck.push(current.toISOString().split('T')[0]);
@@ -194,7 +194,6 @@ export default function StaffDashboard() {
         return true;
       }
 
-      // 3. Fetch reports with actual_cash
       const { data: reports } = await supabase
         .from('daily_reports')
         .select('report_date, actual_cash')
@@ -209,10 +208,6 @@ export default function StaffDashboard() {
 
       for (const dateStr of datesToCheck) {
         const report = reportMap.get(dateStr);
-
-        // Block if:
-        // - No report row, OR
-        // - actual_cash is 0 or null
         if (!report || Number(report.actual_cash || 0) <= 0) {
           missingOrIncomplete.push(dateStr);
         }
@@ -227,7 +222,6 @@ export default function StaffDashboard() {
         return false;
       }
 
-      // All previous days have proper remittance (actual_cash > 0)
       setCanCreateNewSale(true);
       setBlockingReason('');
       setMissingDatesList([]);
@@ -499,9 +493,9 @@ export default function StaffDashboard() {
     setSelectedBranch(branch);
     localStorage.setItem('active_branch', JSON.stringify(branch));
 
-    // Reset UI state
-    setCanCreateNewSale(false);
-    setBlockingReason('Checking remittance status...');
+    // Reset UI immediately
+    setCanCreateNewSale(true); // ← Default to true
+    setBlockingReason('');
     setMissingDatesList([]);
 
     await logSystemActivity(
@@ -513,11 +507,13 @@ export default function StaffDashboard() {
 
     setBranchModalOpen(false);
 
+    // Refresh everything
     fetchStats(branch.id);
-    updateQuotas(branch.id);
+    updateQuotas(branch);
     fetchDailyReports(branch.id);
     syncDailyReportRealtime(branch.id);
 
+    // Re-check permission (but admins will bypass instantly)
     await checkNewSalePermission(branch.id);
   };
 
