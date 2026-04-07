@@ -101,6 +101,7 @@ export default function PurchaseOrderList() {
   async function fetchData() {
     try {
       setLoading(true);
+
       const now = new Date();
       const firstOfMonth = new Date(
         now.getFullYear(),
@@ -108,12 +109,12 @@ export default function PurchaseOrderList() {
         1
       ).toISOString();
 
-      // Get Monthly Aggregates
+      // === MONTHLY STATS (fixed date filter) ===
       const { data: monthData } = await supabase
         .from('purchase_orders')
         .select('total_amount, generic_amt, branded_amt')
         .eq('branch_id', currentBranchId)
-        .gte('created_date_pht', firstOfMonth.split('T'));
+        .gte('created_date_pht', firstOfMonth);
 
       setMonthlyStats({
         total:
@@ -125,15 +126,15 @@ export default function PurchaseOrderList() {
           monthData?.reduce((sum, row) => sum + (row.branded_amt || 0), 0) || 0,
       });
 
-      // Fetch Paginated Orders + Joined Items
+      // === MAIN QUERY WITH PROPER SORTING ===
       let dataQuery = supabase
         .from('purchase_orders')
         .select(
           `
-          *, 
-          profiles (full_name), 
-          purchase_order_items (*)
-        `,
+            *, 
+            profiles (full_name), 
+            purchase_order_items (*)
+          `,
           { count: 'exact' }
         )
         .eq('branch_id', currentBranchId);
@@ -147,11 +148,14 @@ export default function PurchaseOrderList() {
       if (endDate) dataQuery = dataQuery.lte('created_date_pht', endDate);
 
       const from = currentPage * pageSize;
+
       const { data, count, error } = await dataQuery
-        .order('created_date_pht', { ascending: false })
+        .order('created_date_pht', { ascending: false }) // Newest date first
+        .order('po_number', { ascending: false }) // Then highest PO number first
         .range(from, from + pageSize - 1);
 
       if (error) throw error;
+
       setOrders(data || []);
       setTotalCount(count || 0);
 
