@@ -957,8 +957,8 @@ export default function NewPurchaseOrder() {
                     return (
                       <tr
                         key={rowKey}
-                        className={`group hover:bg-white/[0.02] transition-colors relative ${
-                          activeSearchIndex === idx ? 'z-50' : 'z-0'
+                        className={`group hover:bg-white/[0.02] transition-colors relative isolate ${
+                          activeSearchIndex === idx ? 'z-[9999]' : 'z-0'
                         }`}
                       >
                         <td className="px-1 relative">
@@ -1008,10 +1008,10 @@ export default function NewPurchaseOrder() {
                           )}
 
                           {/* Dropdown when typing */}
+                          {/* Dropdown when typing */}
                           {activeSearchIndex === idx && (
                             <div
-                              className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z- max-h-64 overflow-y-auto p-1 shadow-2xl"
-                              // Prevent the blur from closing when clicking scrollbar
+                              className="absolute left-0 right-0 top-full mt-2 bg-slate-900 border border-indigo-500 rounded-2xl z-[99999] max-h-64 overflow-y-auto p-1 shadow-2xl"
                               onMouseDown={(e) => e.preventDefault()}
                             >
                               {inventoryList
