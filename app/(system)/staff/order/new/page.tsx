@@ -450,15 +450,17 @@ export default function NewOrderPOS() {
 
       if (rpcErr) throw new Error(`Inventory Sync Error: ${rpcErr.message}`);
 
-      // === NEW: Run healing right after successful submission ===
+      // === NEW: Single-order heal (dedicated RPC) ===
+      // This only updates the order we just created (safe + re-fetches PHT date)
       try {
-        await supabase.rpc('heal_orders_pht_date');
-        console.log('✅ Date healing executed after order submission');
-      } catch (healErr) {
-        console.warn(
-          'Healing after submission failed (non-critical):',
-          healErr
+        await supabase.rpc('heal_order_pht_date_solo', {
+          p_order_id: order.id,
+        });
+        console.log(
+          `✅ Solo PHT date healed for new order ${order.order_number}`
         );
+      } catch (healErr) {
+        console.warn('Solo heal failed (non-critical):', healErr);
         // We don't throw here — order was already successful
       }
 
