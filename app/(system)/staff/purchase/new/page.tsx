@@ -631,16 +631,19 @@ export default function NewPurchaseOrder() {
   );
 
   const handleSubmit = async () => {
-    if (!supplierSearch) return alert('Please enter or select a supplier.');
+    if (!supplierSearch?.trim())
+      return alert('Please enter or select a supplier.');
+
     if (items.some((i) => !i.inventory_id))
-      return alert('Some items are not matched.');
+      return alert('Some items are not matched to inventory.');
 
     setIsSubmitting(true);
 
     try {
-      if (!currentBranchId) throw new Error('Branch ID missing');
+      if (!currentBranchId) throw new Error('Branch ID is missing');
+      if (!profile?.id) throw new Error('User profile is missing');
 
-      // 1. CALCULATE SPLIT TOTALS
+      // 1. Calculate split totals
       const splitTotals = items.reduce(
         (acc, item) => {
           const amount = Number(item.buy_cost_total) || 0;
@@ -651,74 +654,53 @@ export default function NewPurchaseOrder() {
         { generic: 0, branded: 0 }
       );
 
-      const phtDateString = new Date(new Date().getTime() + 8 * 60 * 60 * 1000)
-        .toISOString()
-        .split('T');
+      // 2. PHT Date as clean YYYY-MM-DD string (converted to DATE in Postgres)
+      const nowPHT = new Date(Date.now() + 8 * 60 * 60 * 1000);
+      const phtDateString = nowPHT.toISOString().split('T')[0];
 
-      // 2. MAP ITEMS FOR RPC - WITH BUY_COST PROTECTION
-      const mappedItems = items.map((item) => {
-        const qty = Number(item.qty);
-        const pack = Number(item.packaging_type) || 1;
-        const invPrice = Number(item.invoice_price);
-        const disc = Number(item.discount) || 0;
+      // 3. Prepare items for RPC
+      const mappedItems = items.map((item) => ({
+        inventory_id: item.inventory_id,
+        item_name: item.item_name,
+        item_type: item.item_type,
+        qty: Number(item.qty) || 0,
+        packaging_type: Number(item.packaging_type) || 1,
+        unit_cost: Number(item.invoice_price) || 0,
+        buy_cost: Number(item.buy_cost) || 0,
+        new_price:
+          Number(item.new_price) > Number(item.current_price)
+            ? Number(item.new_price)
+            : Number(item.current_price),
+      }));
 
-        // Calculate what the unit cost *should* be right now
-        const lineTotal = qty * invPrice - disc;
-        const totalUnits = qty * pack;
-
-        let calculatedUnitCost = 0;
-        if (totalUnits > 0) {
-          calculatedUnitCost = Math.round((lineTotal / totalUnits) * 100) / 100;
-        }
-
-        // PROTECT buy_cost: Only allow it to go UP, never down
-        let finalBuyCost = Number(item.buy_cost) || 0;
-
-        if (calculatedUnitCost > finalBuyCost) {
-          finalBuyCost = calculatedUnitCost;
-        }
-        // else: keep the previously recorded higher buy_cost
-
-        return {
-          inventory_id: item.inventory_id,
-          item_name: item.item_name,
-          item_type: item.item_type,
-          qty: qty,
-          packaging_type: pack,
-          unit_cost: invPrice,
-          buy_cost: finalBuyCost, // ← Protected buy_cost
-          // Only use the new suggested price if it is higher than the current price
-          new_price:
-            item.new_price > item.current_price
-              ? Number(item.new_price)
-              : Number(item.current_price),
-        };
-      });
-
-      // 3. CALL RPC
-      const { data: generatedPo, error } = await supabase.rpc(
+      // 4. Call RPC
+      const { data, error } = await supabase.rpc(
         'process_branch_purchase_order',
         {
-          p_supplier_name: supplierSearch,
-          p_invoice_id: invoiceId,
+          p_supplier_name: supplierSearch.trim(),
+          p_invoice_id: invoiceId.trim() || null,
           p_total_amount: totalTransaction,
           p_generic_amt: splitTotals.generic,
           p_branded_amt: splitTotals.branded,
           p_branch_id: currentBranchId,
-          p_created_by: profile?.id,
-          p_created_date_pht: phtDateString,
+          p_created_by: profile.id,
+          p_created_date_pht: phtDateString, // ← Clean string (will be cast to DATE)
           p_items_json: mappedItems,
         }
       );
 
-      if (error) throw error;
+      if (error) {
+        console.error('RPC Error Details:', error);
+        throw new Error(error.message || 'Failed to process purchase order');
+      }
 
-      // 4. UPDATE LOCAL STATE FOR SUCCESS MODAL
+      // Success
       setFinalGenericAmt(splitTotals.generic);
       setFinalBrandedAmt(splitTotals.branded);
       setIsSuccess(true);
     } catch (err: any) {
-      alert(`Transaction Failed: ${err.message}`);
+      console.error('Submit Error:', err);
+      alert(`Transaction Failed: ${err.message || 'Unknown error'}`);
     } finally {
       setIsSubmitting(false);
     }
