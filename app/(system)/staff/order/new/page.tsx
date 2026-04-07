@@ -326,21 +326,29 @@ export default function NewOrderPOS() {
     let total = 0;
     let generic_amt = 0;
     let branded_amt = 0;
+    let total_discount = 0; // ← NEW
 
     items.forEach((i) => {
       if (!i.product_id) return;
-      const discountedPrice = i.price_piece * (1 - i.discount_percent / 100);
-      const subtotal = i.qty * discountedPrice;
+
+      const gross = i.qty * i.price_piece;
+      const discountAmount = gross * (i.discount_percent / 100); // ← NEW
+      const subtotal = gross - discountAmount;
+
       total += subtotal;
+      total_discount += discountAmount; // ← NEW
+
       if (i.type === 'branded') branded_amt += subtotal;
       else generic_amt += subtotal;
     });
 
     const isPaid = paymentMethod !== 'CASH' || cashReceived >= total;
+
     return {
       total,
       generic_amt,
       branded_amt,
+      total_discount, // ← NEW
       change: cashReceived > total ? cashReceived - total : 0,
       isValid: isPaid && total > 0 && items.every((i) => i.product_id),
     };
@@ -386,12 +394,11 @@ export default function NewOrderPOS() {
       const { data: phtDateData, error: dateError } = await supabase.rpc(
         'get_current_pht_date'
       );
-
       if (dateError) throw new Error('Failed to get Philippine date');
 
       const phtDateString = phtDateData;
 
-      // 1. Create the Order
+      // 1. Create the Order (now with discount_total)
       const { data: generatedSO, error: soErr } = await supabase.rpc(
         'get_next_so_number'
       );
@@ -406,6 +413,7 @@ export default function NewOrderPOS() {
             total_amount: metrics.total,
             generic_amt: metrics.generic_amt,
             branded_amt: metrics.branded_amt,
+            discount_total: metrics.total_discount, // ← NEW
             payment_method: paymentMethod,
             created_by: session.user.email,
             status: 'completed',
@@ -420,16 +428,22 @@ export default function NewOrderPOS() {
 
       setConfirmedSONumber(order.order_number);
 
-      // 2. Create Order Items
-      const payload = items.map((i) => ({
-        order_id: order.id,
-        product_id: i.product_id,
-        quantity: Number(i.qty),
-        unit_price: Number(i.price_piece),
-        type: i.type,
-        subtotal: i.qty * (i.price_piece * (1 - i.discount_percent / 100)),
-        created_date_pht: phtDateString,
-      }));
+      // 2. Create Order Items (now with discount column)
+      const payload = items.map((i) => {
+        const gross = Number(i.qty) * Number(i.price_piece);
+        const discountAmount = gross * (Number(i.discount_percent) / 100);
+
+        return {
+          order_id: order.id,
+          product_id: i.product_id,
+          quantity: Number(i.qty),
+          unit_price: Number(i.price_piece),
+          type: i.type,
+          subtotal: gross - discountAmount, // net amount
+          discount: discountAmount, // ← NEW (per item)
+          created_date_pht: phtDateString,
+        };
+      });
 
       const { error: itemsErr } = await supabase
         .from('order_items')
@@ -437,7 +451,7 @@ export default function NewOrderPOS() {
 
       if (itemsErr) throw itemsErr;
 
-      // 3. Process inventory deduction
+      // 3. Process inventory deduction (unchanged)
       const itemsPayloadForRPC = items.map((i) => ({
         product_id: i.product_id,
         qty: Number(i.qty),
@@ -450,18 +464,13 @@ export default function NewOrderPOS() {
 
       if (rpcErr) throw new Error(`Inventory Sync Error: ${rpcErr.message}`);
 
-      // === NEW: Single-order heal (dedicated RPC) ===
-      // This only updates the order we just created (safe + re-fetches PHT date)
+      // Optional: keep your existing solo heal if you want
       try {
         await supabase.rpc('heal_order_pht_date_solo', {
           p_order_id: order.id,
         });
-        console.log(
-          `✅ Solo PHT date healed for new order ${order.order_number}`
-        );
       } catch (healErr) {
         console.warn('Solo heal failed (non-critical):', healErr);
-        // We don't throw here — order was already successful
       }
 
       setShowSuccess(true);
