@@ -1049,7 +1049,7 @@ export default function NewPurchaseOrder() {
                             </div>
                           )}
 
-                          {/* + Add New Button */}
+                          {/* + Add New Button hello */}
                           {!hasInventoryId &&
                             searchTerms[idx] !== '' &&
                             activeSearchIndex !== idx && (
@@ -1164,7 +1164,6 @@ export default function NewPurchaseOrder() {
                             }
                           />
                         </td>
-
                         <td className="px-1 text-right font-black text-emerald-400 text-[12px]">
                           ₱{(item.new_price || 0).toFixed(2)}
                         </td>
