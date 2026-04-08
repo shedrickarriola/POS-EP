@@ -409,36 +409,30 @@ export default function NewPurchaseOrder() {
       }
     }
 
-    // ====================== FINAL CALCULATIONS (with NEW RULE) ======================
+    // ====================== FINAL CALCULATIONS ======================
     const qty = Math.max(0, Number(item.qty) || 0);
     const pack = Math.max(1, Number(item.packaging_type) || 1);
     const invPrice = Math.max(0, Number(item.invoice_price) || 0);
     const disc = Math.max(0, Number(item.discount) || 0);
 
-    // 1. Line Total (before unit conversion)
+    // 1. Line Total
     const lineTotal = qty * invPrice - disc;
     item.buy_cost_total = Math.round(lineTotal * 100) / 100;
 
-    // 2. Calculated Unit Cost
+    // 2. Calculated Unit Cost → ALWAYS update (removed the old "NEW RULE")
     const totalUnits = qty * pack;
-    let calculatedUnitCost = 0;
+    const calculatedUnitCost =
+      totalUnits > 0 ? Math.round((lineTotal / totalUnits) * 100) / 100 : 0;
 
-    if (totalUnits > 0) {
-      calculatedUnitCost = Math.round((lineTotal / totalUnits) * 100) / 100;
-    }
+    item.buy_cost = calculatedUnitCost;
 
-    // NEW RULE: Only update buy_cost if it goes UP (or if currently 0)
-    const currentBuyCost = Number(item.buy_cost) || 0;
-
-    if (calculatedUnitCost > currentBuyCost) {
-      item.buy_cost = calculatedUnitCost;
-    }
-    // else: keep the old higher buy_cost (do NOT decrease it)
-
-    // 3. Suggested New Price (based on final buy_cost)
+    // 3. Suggested New Price with FLOOR = current selling price
     const currentMarkup = Number(item.markup) || 0;
-    item.new_price = Math.ceil(
-      (item.buy_cost || 0) * (1 + currentMarkup / 100)
+    const rawNewPrice = (item.buy_cost || 0) * (1 + currentMarkup / 100);
+
+    item.new_price = Math.max(
+      Math.ceil(rawNewPrice),
+      Number(item.current_price) || 0
     );
 
     newItems[index] = item;
@@ -597,7 +591,10 @@ export default function NewPurchaseOrder() {
               buy_cost_total: qty * price,
               match_score: matchedItem ? Math.round(bestScore) : 999,
               markup: markupVal,
-              new_price: Math.ceil(price * (1 + markupVal / 100)),
+              new_price: Math.max(
+                Math.ceil(price * (1 + markupVal / 100)),
+                matchedItem?.price || 0
+              ),
               current_price: matchedItem?.price || 0,
               remaining_stock: matchedItem?.stock || 0,
             };
