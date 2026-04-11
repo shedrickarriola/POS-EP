@@ -1,13 +1,15 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation'; // Use Next.js router for smoother transitions
+import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
+import { Eye, EyeOff } from 'lucide-react'; // ← added for password toggle
 
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false); // ← new state
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [message, setMessage] = useState('');
@@ -18,29 +20,53 @@ export default function LoginPage() {
     setStatus('idle');
     setMessage('');
 
-    const { error } = await supabase.auth.signInWithPassword({
+    // 1. Login with Supabase Auth
+    const { error: authError } = await supabase.auth.signInWithPassword({
       email,
       password,
     });
 
-    if (error) {
+    if (authError) {
       setStatus('error');
-      setMessage(error.message);
+      setMessage(authError.message);
       setLoading(false);
-    } else {
-      setStatus('success');
-
-      // STEP 3: Instead of '/dashboard', we go to the Gatekeeper
-      // The Gatekeeper will check the profile role and send them to the right page
-      setTimeout(() => {
-        router.push('/gatekeeper');
-      }, 1500);
+      return;
     }
+
+    // 2. Check if account is ACTIVE in profiles table
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (user) {
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('status')
+        .eq('id', user.id)
+        .single();
+
+      if (profile && profile.status !== 'ACTIVE') {
+        await supabase.auth.signOut();
+        setStatus('error');
+        setMessage(
+          'Your account has been deactivated. Please contact the administrator.'
+        );
+        setLoading(false);
+        return;
+      }
+    }
+
+    // 3. All good → success
+    setStatus('success');
+
+    setTimeout(() => {
+      router.push('/gatekeeper');
+    }, 1500);
   };
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-[#020617] relative overflow-hidden font-sans">
-      {/* SUCCESS NOTIFICATION BAR */}
+      {/* SUCCESS NOTIFICATION */}
       {status === 'success' && (
         <div className="absolute top-5 right-5 bg-emerald-500 text-white px-6 py-3 rounded-lg shadow-2xl flex items-center gap-3 animate-bounce z-50">
           <span className="text-xl">🚀</span>
@@ -64,6 +90,7 @@ export default function LoginPage() {
         </div>
 
         <form onSubmit={handleLogin} className="space-y-6">
+          {/* Email */}
           <div>
             <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
               Email Address
@@ -73,22 +100,36 @@ export default function LoginPage() {
               required
               placeholder="admin@pharma.com"
               className="w-full p-3 bg-slate-950 border border-white/10 rounded-xl text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all placeholder:text-slate-700"
+              value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
           </div>
+
+          {/* Password with toggle */}
           <div>
             <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
               Password
             </label>
-            <input
-              type="password"
-              required
-              placeholder="••••••••"
-              className="w-full p-3 bg-slate-950 border border-white/10 rounded-xl text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all placeholder:text-slate-700"
-              onChange={(e) => setPassword(e.target.value)}
-            />
+            <div className="relative">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                required
+                placeholder="••••••••"
+                className="w-full p-3 bg-slate-950 border border-white/10 rounded-xl text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all placeholder:text-slate-700 pr-12"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 transition-colors"
+              >
+                {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+              </button>
+            </div>
           </div>
 
+          {/* Error message */}
           {status === 'error' && (
             <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl">
               <p className="text-red-500 text-[10px] text-center font-black uppercase tracking-widest">

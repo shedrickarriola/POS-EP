@@ -48,6 +48,7 @@ export default function ExecutiveTerminal() {
     staff: false,
     org: false,
     quota: false,
+    status: false,
   });
 
   const [branchForm, setBranchForm] = useState({
@@ -66,7 +67,12 @@ export default function ExecutiveTerminal() {
     role: 'staff',
     branch_id: '',
     org_id: '',
-    password: '', // Add this
+    password: '',
+  });
+
+  const [statusForm, setStatusForm] = useState({
+    profile_id: '',
+    new_status: 'ACTIVE' as 'ACTIVE' | 'INACTIVE',
   });
 
   const [selectedBranch, setSelectedBranch] = useState<any>(null);
@@ -207,6 +213,33 @@ export default function ExecutiveTerminal() {
     }
   }
 
+  // ====================== FIXED LOGOUT ======================
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push('/login');
+  };
+
+  // ====================== CHANGE STATUS ======================
+  const handleChangeStatus = async () => {
+    if (!statusForm.profile_id) {
+      return alert('Please select a user');
+    }
+
+    const { error } = await supabase
+      .from('profiles')
+      .update({ status: statusForm.new_status })
+      .eq('id', statusForm.profile_id);
+
+    if (error) {
+      alert(`Error: ${error.message}`);
+    } else {
+      showSuccess(`Status updated to ${statusForm.new_status}`);
+      setModals({ ...modals, status: false });
+      setStatusForm({ profile_id: '', new_status: 'ACTIVE' });
+      fetchInitialData();
+    }
+  };
+
   const handleAddOrg = async () => {
     const { error } = await supabase.from('organizations').insert([orgForm]);
     if (!error) {
@@ -231,7 +264,6 @@ export default function ExecutiveTerminal() {
     }
 
     try {
-      // Step 1: Create the User in Supabase Auth
       const { data: authData, error: authError } = await supabase.auth.signUp({
         email: staffForm.email,
         password: staffForm.password,
@@ -245,15 +277,15 @@ export default function ExecutiveTerminal() {
       if (authError) throw authError;
       if (!authData.user) throw new Error('Auth creation failed.');
 
-      // Step 2: Create the Profile record linked to the new Auth ID
       const { error: profileError } = await supabase.from('profiles').insert([
         {
-          id: authData.user.id, // Link to Auth ID
+          id: authData.user.id,
           email: staffForm.email,
           full_name: staffForm.full_name,
           role: staffForm.role,
           branch_id: staffForm.branch_id,
           org_id: staffForm.org_id,
+          status: 'ACTIVE',
         },
       ]);
 
@@ -269,6 +301,7 @@ export default function ExecutiveTerminal() {
         org_id: '',
         password: '',
       });
+      fetchInitialData();
     } catch (err: any) {
       alert(`Deployment Error: ${err.message}`);
     }
@@ -294,6 +327,14 @@ export default function ExecutiveTerminal() {
       fetchInitialData();
     }
   };
+
+  const allStaff = organizations.flatMap(
+    (org) =>
+      org.branches?.flatMap(
+        (branch: any) =>
+          branch.staff?.filter((s: any) => s.role !== 'org_manager') || []
+      ) || []
+  );
 
   const filteredOrgs = organizations
     .map((org) => ({
@@ -341,7 +382,7 @@ export default function ExecutiveTerminal() {
             <p className="text-[9px] font-black text-white">{user?.email}</p>
           </div>
           <button
-            onClick={() => supabase.auth.signOut()}
+            onClick={handleLogout}
             className="text-slate-500 hover:text-red-500 transition-all"
           >
             <LogOut size={18} />
@@ -382,6 +423,15 @@ export default function ExecutiveTerminal() {
               <UserPlus size={14} className="inline mr-2 text-purple-500" /> Add
               Staff
             </button>
+
+            <button
+              onClick={() => setModals({ ...modals, status: true })}
+              className="bg-slate-900 px-5 py-3 rounded-2xl text-[9px] font-black uppercase text-slate-300 border border-white/5 hover:border-orange-500/50 transition-all flex items-center gap-2"
+            >
+              <ShieldAlert size={14} className="text-orange-500" />
+              Change Status
+            </button>
+
             <button
               onClick={() => router.push('/org-manager/reports')}
               className="bg-emerald-600 px-5 py-3 rounded-2xl text-[9px] font-black uppercase text-white shadow-lg hover:bg-emerald-500 transition-all"
@@ -391,7 +441,7 @@ export default function ExecutiveTerminal() {
           </div>
         </div>
 
-        {/* SEARCH AND FILTERS (FULLY RESTORED) */}
+        {/* SEARCH AND FILTERS */}
         <div className="mb-12 flex flex-col md:flex-row gap-6 bg-slate-900/20 p-6 rounded-3xl border border-white/5">
           <div className="relative flex-1">
             <Search
@@ -468,7 +518,6 @@ export default function ExecutiveTerminal() {
                     </div>
 
                     <div className="grid grid-cols-2 gap-8">
-                      {/* REVENUE SECTION (BRANDED RESTORED) */}
                       <div className="space-y-4">
                         <p className="text-[9px] font-black text-emerald-400 uppercase tracking-widest flex items-center gap-2">
                           <Zap size={12} /> Revenue
@@ -500,7 +549,6 @@ export default function ExecutiveTerminal() {
                         </div>
                       </div>
 
-                      {/* EXPENSE SECTION (BRANDED & EXCEL FILTER RESTORED) */}
                       <div className="space-y-4">
                         <p className="text-[9px] font-black text-orange-400 uppercase tracking-widest flex items-center gap-2">
                           <ShoppingCart size={12} /> Expenses
@@ -610,7 +658,7 @@ export default function ExecutiveTerminal() {
         </div>
       )}
 
-      {/* MODAL: QUOTA UI (FULLY RESTORED) */}
+      {/* MODAL: QUOTA UI */}
       {modals.quota && (
         <div className="fixed inset-0 z-[150] bg-black/95 backdrop-blur-md flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-emerald-500/20 p-10 rounded-[3rem] w-full max-w-sm shadow-2xl">
@@ -819,6 +867,75 @@ export default function ExecutiveTerminal() {
               </button>
               <button
                 onClick={() => setModals({ ...modals, staff: false })}
+                className="w-full text-[10px] font-black uppercase text-slate-500 mt-2 text-center"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CHANGE STATUS MODAL */}
+      {modals.status && (
+        <div className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-orange-500/20 p-8 rounded-[2.5rem] w-full max-w-md">
+            <h3 className="text-xl font-black text-white uppercase italic mb-6 tracking-tighter">
+              Change User Status
+            </h3>
+
+            <div className="space-y-6">
+              <select
+                className="w-full bg-black/50 border border-slate-800 p-4 rounded-2xl text-white outline-none text-xs font-bold"
+                value={statusForm.profile_id}
+                onChange={(e) =>
+                  setStatusForm({ ...statusForm, profile_id: e.target.value })
+                }
+              >
+                <option value="">Select user...</option>
+                {allStaff.map((s: any) => (
+                  <option key={s.id} value={s.id}>
+                    {s.full_name} — {s.email} ({s.role})
+                  </option>
+                ))}
+              </select>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() =>
+                    setStatusForm({ ...statusForm, new_status: 'ACTIVE' })
+                  }
+                  className={`flex-1 py-4 rounded-2xl font-black text-xs tracking-widest transition-all ${
+                    statusForm.new_status === 'ACTIVE'
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  ACTIVE
+                </button>
+                <button
+                  onClick={() =>
+                    setStatusForm({ ...statusForm, new_status: 'INACTIVE' })
+                  }
+                  className={`flex-1 py-4 rounded-2xl font-black text-xs tracking-widest transition-all ${
+                    statusForm.new_status === 'INACTIVE'
+                      ? 'bg-red-600 text-white'
+                      : 'bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  INACTIVE
+                </button>
+              </div>
+
+              <button
+                onClick={handleChangeStatus}
+                className="w-full bg-orange-600 hover:bg-orange-500 py-5 rounded-2xl text-white font-black uppercase text-xs tracking-widest transition-all"
+              >
+                Update Status
+              </button>
+
+              <button
+                onClick={() => setModals({ ...modals, status: false })}
                 className="w-full text-[10px] font-black uppercase text-slate-500 mt-2 text-center"
               >
                 Cancel
