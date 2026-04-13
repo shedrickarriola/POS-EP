@@ -773,11 +773,27 @@ export default function StaffDashboard() {
   };
 
   const handleSaveReport = async () => {
-    if (!remittance.actual_cash)
+    if (!remittance.actual_cash) {
       return triggerToast('Actual Cash Required', 'error');
+    }
+
+    // NEW: Prevent submission if expenses > 0 but notes are empty
+    if (
+      remittance.expenses > 0 &&
+      (!remittance.notes || remittance.notes.trim() === '')
+    ) {
+      return triggerToast(
+        'Notes/Discrepancies are required when there are expenses',
+        'error'
+      );
+    }
 
     // Helper to ensure 2 decimal precision
     const formatMoney = (val: any) => Number(Number(val || 0).toFixed(2));
+
+    const excess = formatMoney(
+      (remittance.actual_cash || 0) - (remittance.total_sales || 0)
+    );
 
     const { error } = await supabase.from('daily_reports').upsert(
       [
@@ -785,13 +801,15 @@ export default function StaffDashboard() {
           branch_id: selectedBranch.id,
           branch_name: selectedBranch.branch_name,
           report_date: remittance.report_date,
-          // Formatting inputs to 2 decimal places
+          // Money fields (2 decimal precision)
           actual_cash: formatMoney(remittance.actual_cash),
           expenses: formatMoney(remittance.expenses),
-          // Saving real-time calculated sales with 2 decimal precision
           generic_sales: formatMoney(remittance.generic_sales),
           branded_sales: formatMoney(remittance.branded_sales),
           total_sales: formatMoney(remittance.total_sales),
+          excess: excess, // ← FIXED: actual_cash - total_sales
+          // Notes is now saved and never null
+          notes: remittance.notes?.trim() || '',
           reported_by: profile?.full_name,
           is_checked: false,
         },
