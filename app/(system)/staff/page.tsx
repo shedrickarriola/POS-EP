@@ -777,7 +777,7 @@ export default function StaffDashboard() {
       return triggerToast('Actual Cash Required', 'error');
     }
 
-    // NEW: Prevent submission if expenses > 0 but notes are empty
+    // Existing validation for expenses
     if (
       remittance.expenses > 0 &&
       (!remittance.notes || remittance.notes.trim() === '')
@@ -788,7 +788,24 @@ export default function StaffDashboard() {
       );
     }
 
-    // Helper to ensure 2 decimal precision
+    // ─────────────────────────────────────────────────────────────
+    // NEW: BLOCK SUBMISSION IF ALREADY VERIFIED
+    // ─────────────────────────────────────────────────────────────
+    const { data: existingReport } = await supabase
+      .from('daily_reports')
+      .select('is_checked')
+      .eq('branch_id', selectedBranch.id)
+      .eq('report_date', remittance.report_date)
+      .single();
+
+    if (existingReport?.is_checked === true) {
+      return triggerToast(
+        'This daily report has already been verified by management and cannot be modified.',
+        'error'
+      );
+    }
+    // ─────────────────────────────────────────────────────────────
+
     const formatMoney = (val: any) => Number(Number(val || 0).toFixed(2));
 
     const excess = formatMoney(
@@ -801,14 +818,12 @@ export default function StaffDashboard() {
           branch_id: selectedBranch.id,
           branch_name: selectedBranch.branch_name,
           report_date: remittance.report_date,
-          // Money fields (2 decimal precision)
           actual_cash: formatMoney(remittance.actual_cash),
           expenses: formatMoney(remittance.expenses),
           generic_sales: formatMoney(remittance.generic_sales),
           branded_sales: formatMoney(remittance.branded_sales),
           total_sales: formatMoney(remittance.total_sales),
-          excess: excess, // ← FIXED: actual_cash - total_sales
-          // Notes is now saved and never null
+          excess: excess, // ← already fixed in previous update
           notes: remittance.notes?.trim() || '',
           reported_by: profile?.full_name,
           is_checked: false,

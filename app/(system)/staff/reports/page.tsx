@@ -8,9 +8,8 @@ import {
   CheckCircle2,
   AlertCircle,
   ArrowLeft,
-  History,
-  Target,
   Loader2,
+  TrendingUp,
 } from 'lucide-react';
 
 export default function ReportsAuditPage() {
@@ -19,16 +18,14 @@ export default function ReportsAuditPage() {
   const [reports, setReports] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // FIXED: State moved inside the component body
-  const [branch, setBranch] = useState<any>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('active_branch');
-      return saved ? JSON.parse(saved) : null;
-    }
-    return null;
-  });
-
+  const [branch, setBranch] = useState<any>(null);
   const [profile, setProfile] = useState<any>(null);
+
+  // Verification modal
+  const [showVerificationModal, setShowVerificationModal] = useState(false);
+  const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
+  const [actualRemittance, setActualRemittance] = useState<number>(0);
+  const [savings, setSavings] = useState<number>(0);
 
   useEffect(() => {
     fetchData();
@@ -37,13 +34,11 @@ export default function ReportsAuditPage() {
   const fetchData = async () => {
     setLoading(true);
 
-    // 1. Get User
     const {
       data: { user },
     } = await supabase.auth.getUser();
     if (!user) return router.push('/login');
 
-    // 2. Get Profile AND Branch in one go
     const { data: profileData } = await supabase
       .from('profiles')
       .select('*, branches(*)')
@@ -53,12 +48,18 @@ export default function ReportsAuditPage() {
     if (profileData) {
       setProfile(profileData);
 
-      // Prioritize the branch linked to the profile
-      const activeBranch = profileData.branches;
-      if (activeBranch) {
+      const savedBranch = localStorage.getItem('active_branch');
+      let activeBranch: any = null;
+
+      if (savedBranch) {
+        activeBranch = JSON.parse(savedBranch);
+      } else if (profileData.branches?.[0]) {
+        activeBranch = profileData.branches[0];
+      }
+
+      if (activeBranch?.id) {
         setBranch(activeBranch);
 
-        // 3. Fetch Reports using the confirmed branch ID
         const start = new Date(
           currentDate.getFullYear(),
           currentDate.getMonth(),
@@ -73,20 +74,21 @@ export default function ReportsAuditPage() {
         const { data: reportsData } = await supabase
           .from('daily_reports')
           .select('*')
-          .eq('branch_id', activeBranch.id) // Using the ID directly from the fetch
+          .eq('branch_id', activeBranch.id)
           .gte('report_date', start.toISOString().split('T')[0])
-          .lte('report_date', end.toISOString().split('T')[0]);
+          .lte('report_date', end.toISOString().split('T')[0])
+          .order('report_date', { ascending: true });
 
         setReports(reportsData || []);
       }
     }
+
     setLoading(false);
   };
 
-  const handleVerify = async (id: string) => {
-    // Convert to lowercase to prevent "staff" vs "Staff" bypass
+  // Toggle verification (OFF = no modal, ON = show modal)
+  const toggleVerification = async (id: string, currentlyChecked: boolean) => {
     const userRole = profile?.role?.toLowerCase();
-
     if (userRole === 'staff') {
       alert(
         'Access Denied: Staff members are not authorized to verify reports.'
@@ -94,19 +96,63 @@ export default function ReportsAuditPage() {
       return;
     }
 
-    const { error } = await supabase
-      .from('daily_reports')
-      .update({ is_checked: true })
-      .eq('id', id);
+    if (currentlyChecked) {
+      // Turn OFF
+      const { error } = await supabase
+        .from('daily_reports')
+        .update({ is_checked: false, checked_by: null })
+        .eq('id', id);
 
-    if (!error) {
-      setReports((prev) =>
-        prev.map((r) => (r.id === id ? { ...r, is_checked: true } : r))
-      );
+      if (!error) {
+        setReports((prev) =>
+          prev.map((r) =>
+            r.id === id ? { ...r, is_checked: false, checked_by: null } : r
+          )
+        );
+      }
+    } else {
+      // Turn ON → show modal
+      setSelectedReportId(id);
+      setActualRemittance(0);
+      setSavings(0);
+      setShowVerificationModal(true);
     }
   };
 
-  // CALENDAR GENERATION LOGIC
+  const confirmVerification = async () => {
+    if (!selectedReportId) return;
+
+    const { error } = await supabase
+      .from('daily_reports')
+      .update({
+        is_checked: true,
+        checked_by: profile?.full_name || profile?.email || 'Checker',
+        actual_remitted: actualRemittance, // ← SAVED TO actual_remitted
+        savings: savings,
+      })
+      .eq('id', selectedReportId);
+
+    if (!error) {
+      setReports((prev) =>
+        prev.map((r) =>
+          r.id === selectedReportId
+            ? {
+                ...r,
+                is_checked: true,
+                checked_by: profile?.full_name || profile?.email || 'Checker',
+                actual_remitted: actualRemittance,
+                savings: savings,
+              }
+            : r
+        )
+      );
+    }
+
+    setShowVerificationModal(false);
+    setSelectedReportId(null);
+  };
+
+  // Calendar logic (unchanged)
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth();
   const firstDayOfMonth = new Date(year, month, 1).getDay();
@@ -159,9 +205,8 @@ export default function ReportsAuditPage() {
             </button>
             <div>
               <h1 className="text-2xl font-black uppercase tracking-tighter">
-                {'Branch_Audit'}
+                BRANCH_AUDIT
               </h1>
-              {/* FIXED: Specific styling for branch and role as requested */}
               <p className="text-[9px] font-bold text-slate-500 uppercase mt-1 tracking-widest">
                 {branch?.branch_name} | {profile?.role || 'Staff'}
               </p>
@@ -188,8 +233,17 @@ export default function ReportsAuditPage() {
               <ChevronRight />
             </button>
           </div>
+
+          <button
+            onClick={() => router.push('/staff/reports/weekly')}
+            className="flex items-center gap-3 bg-indigo-600 hover:bg-indigo-500 px-6 py-3 rounded-2xl text-white font-black uppercase text-sm tracking-widest transition-all shadow-lg shadow-indigo-500/30"
+          >
+            <TrendingUp size={18} />
+            Weekly Reconciliation
+          </button>
         </div>
 
+        {/* Calendar Header */}
         <div className="grid grid-cols-8 gap-2 mb-2">
           {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
             <div
@@ -204,6 +258,7 @@ export default function ReportsAuditPage() {
           </div>
         </div>
 
+        {/* Calendar Content */}
         {loading ? (
           <div className="h-[60vh] flex flex-col items-center justify-center bg-slate-900/20 border border-white/5 rounded-3xl">
             <Loader2 className="animate-spin text-emerald-500 mb-4" size={40} />
@@ -232,7 +287,7 @@ export default function ReportsAuditPage() {
                     return (
                       <div
                         key={dIdx}
-                        className={`min-h-[110px] p-3 rounded-xl border transition-all ${
+                        className={`min-h-[140px] p-3 rounded-xl border transition-all flex flex-col ${
                           !day.current
                             ? 'opacity-10 bg-transparent border-white/5'
                             : isFuture
@@ -248,57 +303,118 @@ export default function ReportsAuditPage() {
                       >
                         <div className="flex justify-between items-start mb-2">
                           <span
-                            className={`text-[10px] font-black ${
+                            className={`text-[13px] font-black ${
                               day.current ? 'text-white' : 'text-slate-700'
                             }`}
                           >
                             {day.day}
                           </span>
+
                           {report && (
                             <button
-                              onClick={() => {
-                                const isStaff =
-                                  profile?.role?.toLowerCase() === 'staff';
-                                if (isStaff || report.is_checked) return;
-                                handleVerify(report.id);
-                              }}
+                              onClick={() =>
+                                toggleVerification(report.id, report.is_checked)
+                              }
                               className={`${
                                 report.is_checked
                                   ? 'text-emerald-500'
                                   : profile?.role?.toLowerCase() === 'staff'
-                                  ? 'text-slate-800 opacity-30 cursor-not-allowed' // Make it very dim for staff
+                                  ? 'text-slate-800 opacity-30 cursor-not-allowed'
                                   : 'text-orange-500 animate-pulse cursor-pointer'
                               }`}
-                              title={
-                                profile?.role?.toLowerCase() === 'staff'
-                                  ? 'Admin only'
-                                  : ''
-                              }
                             >
                               <CheckCircle2 size={14} />
                             </button>
                           )}
                         </div>
+
                         {report ? (
-                          <div className="space-y-1">
-                            <p className="text-[10px] font-bold text-emerald-400">
-                              ₱{Number(report.generic_sales).toLocaleString()}
-                            </p>
-                            <p className="text-[8px] text-slate-500 font-bold uppercase">
-                              Total: ₱
-                              {Number(report.total_sales).toLocaleString()}
-                            </p>
+                          <div className="flex-1 text-[10px] space-y-1 font-mono">
+                            <div className="flex justify-between bg-emerald-500/10 px-2 py-1 rounded">
+                              <span className="font-black text-emerald-400">
+                                GENERIC
+                              </span>
+                              <span className="font-black text-white">
+                                ₱{Number(report.generic_sales).toLocaleString()}
+                              </span>
+                            </div>
+
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Branded</span>
+                              <span className="font-medium">
+                                ₱{Number(report.branded_sales).toLocaleString()}
+                              </span>
+                            </div>
+
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">
+                                Total Sales
+                              </span>
+                              <span className="font-medium">
+                                ₱{Number(report.total_sales).toLocaleString()}
+                              </span>
+                            </div>
+
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Discounts</span>
+                              <span className="font-medium text-orange-400">
+                                ₱
+                                {Number(
+                                  report.discount_total || 0
+                                ).toLocaleString()}
+                              </span>
+                            </div>
+
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">
+                                Actual Cash
+                              </span>
+                              <span className="font-medium">
+                                ₱{Number(report.actual_cash).toLocaleString()}
+                              </span>
+                            </div>
+
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Excess</span>
+                              <span className="font-medium text-emerald-400">
+                                ₱{Number(report.excess || 0).toLocaleString()}
+                              </span>
+                            </div>
+
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Expenses</span>
+                              <span className="font-medium text-red-400">
+                                ₱{Number(report.expenses || 0).toLocaleString()}
+                              </span>
+                            </div>
+
+                            <div className="pt-2 border-t border-white/10 text-[9px] text-slate-500">
+                              <div>
+                                Reported:{' '}
+                                <span className="text-white">
+                                  {report.reported_by || '-'}
+                                </span>
+                              </div>
+                              {report.is_checked && report.checked_by && (
+                                <div>
+                                  Verified:{' '}
+                                  <span className="text-emerald-400">
+                                    {report.checked_by}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
                           </div>
                         ) : (
                           day.current &&
                           !isFuture && (
-                            <div className="flex flex-col items-center justify-center mt-2 opacity-40">
+                            <div className="flex flex-col items-center justify-center mt-6 opacity-40">
                               <AlertCircle
-                                size={12}
+                                size={16}
                                 className="text-red-500 mb-1"
                               />
-                              <span className="text-[7px] font-black text-red-500 uppercase">
-                                Missing
+                              <span className="text-[9px] font-black text-red-500 uppercase">
+                                Missing Report
                               </span>
                             </div>
                           )
@@ -307,6 +423,7 @@ export default function ReportsAuditPage() {
                     );
                   })}
 
+                  {/* Weekly Quota Column */}
                   <div className="bg-emerald-500/5 border border-emerald-500/10 rounded-xl p-3 flex flex-col justify-center items-center shadow-inner">
                     <p className="text-[9px] font-black text-emerald-500/40 uppercase mb-1 tracking-tighter">
                       Weekly_Total
@@ -335,6 +452,62 @@ export default function ReportsAuditPage() {
           </div>
         )}
       </div>
+
+      {/* VERIFICATION MODAL */}
+      {showVerificationModal && (
+        <div className="fixed inset-0 z-[200] bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-emerald-500/30 rounded-3xl w-full max-w-md p-8">
+            <h3 className="text-xl font-black uppercase text-white mb-6">
+              Verify Report
+            </h3>
+
+            <div className="space-y-6">
+              <div>
+                <label className="block text-xs font-black text-emerald-400 mb-2">
+                  Actual Remittance
+                </label>
+                <input
+                  type="number"
+                  value={actualRemittance}
+                  onChange={(e) =>
+                    setActualRemittance(Number(e.target.value) || 0)
+                  }
+                  className="w-full bg-slate-950 border border-white/10 rounded-2xl px-4 py-3 text-white font-mono text-lg focus:border-emerald-500 outline-none"
+                  placeholder="0"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-black text-emerald-400 mb-2">
+                  Savings
+                </label>
+                <input
+                  type="number"
+                  value={savings}
+                  onChange={(e) => setSavings(Number(e.target.value) || 0)}
+                  className="w-full bg-slate-950 border border-white/10 rounded-2xl px-4 py-3 text-white font-mono text-lg focus:border-emerald-500 outline-none"
+                  placeholder="0"
+                />
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowVerificationModal(false)}
+                  className="flex-1 py-4 bg-slate-800 hover:bg-slate-700 rounded-2xl text-white font-black text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmVerification}
+                  className="flex-1 py-4 bg-emerald-600 hover:bg-emerald-500 rounded-2xl text-white font-black text-sm"
+                >
+                  Confirm Verification
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
