@@ -1186,6 +1186,10 @@ export default function StaffDashboard() {
                   Number(report?.total_sales || 0) -
                   Number(report?.discount_total || 0);
 
+                const genActual =
+                  Number(report?.generic_sales || 0) -
+                  Number(report?.discount_total || 0);
+
                 return (
                   <div
                     key={dateStr}
@@ -1216,32 +1220,37 @@ export default function StaffDashboard() {
 
                     <div className="space-y-1 mb-3 border-b border-white/5 pb-2 text-[9px] font-bold">
                       <div className="flex justify-between">
-                        <span className="text-slate-500">GEN</span>
-                        <span className="text-white">
+                        <span className="text-slate-200">GEN</span>
+                        <span className="text-slate-500">
                           ₱{Number(report?.generic_sales || 0).toLocaleString()}
                         </span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-slate-500">BRD</span>
-                        <span className="text-white">
-                          ₱{Number(report?.branded_sales || 0).toLocaleString()}
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500">TTL</span>
-                        <span className="text-white">
-                          ₱{Number(report?.total_sales || 0).toLocaleString()}
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-orange-400">DISC</span>
-                        <span className="text-orange-400">
+                        <span className="text-orange-600">DISC</span>
+                        <span className="text-orange-600">
                           ₱
                           {Number(report?.discount_total || 0).toLocaleString()}
                         </span>
                       </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-200">
+                          {' '}
+                          ---------------
+                        </span>
+                        <span className="text-slate-200 ">
+                          ₱{genActual.toLocaleString()}
+                        </span>
+                      </div>
+
+                      <div className="flex justify-between">
+                        <span className="text-slate-200">BRD</span>
+                        <span className="text-white">
+                          ₱{Number(report?.branded_sales || 0).toLocaleString()}
+                        </span>
+                      </div>
+
                       <div className="flex justify-between pt-1 border-t border-white/10 font-black">
-                        <span className="text-emerald-500">ACTUAL</span>
+                        <span className="text-emerald-500">TOTAL</span>
                         <span className="text-emerald-500">
                           ₱
                           {netSales.toLocaleString(undefined, {
