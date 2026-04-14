@@ -430,44 +430,56 @@ export default function StaffDashboard() {
       return d.toISOString().split('T')[0];
     });
 
-    // Light healing - only fix missing days (no more overwriting good rows)
-    const datesToFix = last7Days.filter((dateStr) => {
-      const report = currentReports?.find((r) => r.report_date === dateStr);
-      return !report || Number(report.total_sales) === 0;
-    });
+    setLogStatus(`HEALING_${last7Days.length}_DAYS...`);
 
-    if (datesToFix.length > 0) {
-      setLogStatus(`HEALING_${datesToFix.length}_DAYS...`);
+    for (const dateStr of last7Days) {
+      // Step 1: Get only orders for THIS branch + date
+      const { data: ordersForDate } = await supabase
+        .from('orders')
+        .select('id')
+        .eq('branch_id', branchId)
+        .eq('created_date_pht', dateStr);
 
-      for (const dateStr of datesToFix) {
-        const { data: orders } = await supabase
-          .from('orders')
-          .select('generic_amt, branded_amt, total_amount, discount_total')
-          .eq('branch_id', branchId)
-          .eq('created_date_pht', dateStr);
+      const orderIds = (ordersForDate || []).map((o: any) => o.id);
 
-        const gen =
-          orders?.reduce((s, o) => s + (Number(o.generic_amt) || 0), 0) || 0;
-        const brd =
-          orders?.reduce((s, o) => s + (Number(o.branded_amt) || 0), 0) || 0;
-        const ttl =
-          orders?.reduce((s, o) => s + (Number(o.total_amount) || 0), 0) || 0;
-        const disc =
-          orders?.reduce((s, o) => s + (Number(o.discount_total) || 0), 0) || 0;
+      if (orderIds.length === 0) continue;
 
-        await supabase.from('daily_reports').upsert(
-          {
-            branch_id: branchId,
-            report_date: dateStr,
-            generic_sales: gen,
-            branded_sales: brd,
-            total_sales: ttl,
-            discount_total: disc,
-            branch_name: selectedBranch?.branch_name,
-          },
-          { onConflict: 'branch_id,report_date' }
-        );
-      }
+      // Step 2: Get order_items ONLY for this branch's orders
+      const { data: orderItems } = await supabase
+        .from('order_items')
+        .select('type, subtotal, discount')
+        .in('order_id', orderIds);
+
+      let gen = 0;
+      let brd = 0;
+      let ttl = 0;
+      let disc = 0;
+
+      (orderItems || []).forEach((oi: any) => {
+        const itemType = String(oi.type || '')
+          .trim()
+          .toLowerCase();
+        const gross = Number(oi.subtotal || 0) + Number(oi.discount || 0);
+
+        if (itemType === 'generic') gen += gross;
+        else if (itemType === 'branded') brd += gross;
+
+        ttl += gross;
+        disc += Number(oi.discount || 0);
+      });
+
+      await supabase.from('daily_reports').upsert(
+        {
+          branch_id: branchId,
+          report_date: dateStr,
+          generic_sales: gen,
+          branded_sales: brd,
+          total_sales: ttl,
+          discount_total: disc,
+          branch_name: selectedBranch?.branch_name,
+        },
+        { onConflict: 'branch_id,report_date' }
+      );
     }
 
     const { data: finalData } = await supabase
@@ -478,7 +490,6 @@ export default function StaffDashboard() {
       .limit(31);
 
     setDailyReports(finalData || []);
-
     setLogStatus('SYSTEM_READY');
   }
   const handleBranchSelect = async (branch: any) => {
@@ -702,20 +713,38 @@ export default function StaffDashboard() {
       return;
     }
 
-    const { data: orders } = await supabase
+    const { data: ordersForDate } = await supabase
       .from('orders')
-      .select('generic_amt, branded_amt, total_amount, discount_total')
+      .select('id')
       .eq('branch_id', selectedBranch.id)
       .eq('created_date_pht', todayPHT);
 
-    const genTotal =
-      orders?.reduce((s, o) => s + (Number(o.generic_amt) || 0), 0) || 0;
-    const brdTotal =
-      orders?.reduce((s, o) => s + (Number(o.branded_amt) || 0), 0) || 0;
-    const ttlTotal =
-      orders?.reduce((s, o) => s + (Number(o.total_amount) || 0), 0) || 0;
-    const discTotal =
-      orders?.reduce((s, o) => s + (Number(o.discount_total) || 0), 0) || 0;
+    const orderIds = (ordersForDate || []).map((o: any) => o.id);
+
+    let genTotal = 0;
+    let brdTotal = 0;
+    let ttlTotal = 0;
+    let discTotal = 0;
+
+    if (orderIds.length > 0) {
+      const { data: orderItems } = await supabase
+        .from('order_items')
+        .select('type, subtotal, discount')
+        .in('order_id', orderIds);
+
+      (orderItems || []).forEach((oi: any) => {
+        const itemType = String(oi.type || '')
+          .trim()
+          .toLowerCase();
+        const gross = Number(oi.subtotal || 0) + Number(oi.discount || 0);
+
+        if (itemType === 'generic') genTotal += gross;
+        else if (itemType === 'branded') brdTotal += gross;
+
+        ttlTotal += gross;
+        discTotal += Number(oi.discount || 0);
+      });
+    }
 
     await supabase.from('daily_reports').upsert(
       {
@@ -816,51 +845,57 @@ export default function StaffDashboard() {
   };
   const syncDailyReportRealtime = async (branchId: string) => {
     const todayPHT = new Date().toISOString().split('T')[0];
+    setLogStatus('REALTIME_SYNC...');
 
-    setLogStatus('REALTIME_SYNC_INITIATED...');
-
-    const { data: orders } = await supabase
+    const { data: ordersForDate } = await supabase
       .from('orders')
-      .select('generic_amt, branded_amt, total_amount, discount_total')
+      .select('id')
       .eq('branch_id', branchId)
       .eq('created_date_pht', todayPHT);
 
-    if (!orders || orders.length === 0) {
+    const orderIds = (ordersForDate || []).map((o: any) => o.id);
+
+    if (orderIds.length === 0) {
       setLogStatus('IDLE: NO_ORDERS_TODAY');
       return;
     }
 
-    const genTotal = orders.reduce(
-      (s, o) => s + (Number(o.generic_amt) || 0),
-      0
-    );
-    const brdTotal = orders.reduce(
-      (s, o) => s + (Number(o.branded_amt) || 0),
-      0
-    );
-    const ttlTotal = orders.reduce(
-      (s, o) => s + (Number(o.total_amount) || 0),
-      0
-    );
-    const discTotal = orders.reduce(
-      (s, o) => s + (Number(o.discount_total) || 0),
-      0
-    );
+    const { data: orderItems } = await supabase
+      .from('order_items')
+      .select('type, subtotal, discount')
+      .in('order_id', orderIds);
+
+    let gen = 0;
+    let brd = 0;
+    let ttl = 0;
+    let disc = 0;
+
+    (orderItems || []).forEach((oi: any) => {
+      const itemType = String(oi.type || '')
+        .trim()
+        .toLowerCase();
+      const gross = Number(oi.subtotal || 0) + Number(oi.discount || 0);
+
+      if (itemType === 'generic') gen += gross;
+      else if (itemType === 'branded') brd += gross;
+
+      ttl += gross;
+      disc += Number(oi.discount || 0);
+    });
 
     await supabase.from('daily_reports').upsert(
       {
         branch_id: branchId,
         report_date: todayPHT,
-        generic_sales: genTotal,
-        branded_sales: brdTotal,
-        total_sales: ttlTotal,
-        discount_total: discTotal,
+        generic_sales: gen,
+        branded_sales: brd,
+        total_sales: ttl,
+        discount_total: disc,
         branch_name: selectedBranch?.branch_name,
       },
       { onConflict: 'branch_id,report_date' }
     );
 
-    setLogStatus(`SYNC_SUCCESS: ${todayPHT}`);
     fetchDailyReports(branchId);
   };
 
