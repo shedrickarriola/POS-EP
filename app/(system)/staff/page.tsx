@@ -430,40 +430,46 @@ export default function StaffDashboard() {
       return d.toISOString().split('T')[0];
     });
 
-    // FORCE RECALCULATION of the last 7 days (this fixes stale values)
-    setLogStatus(`RECALCULATING_${last7Days.length}_DAYS...`);
+    // Light healing - only fix missing days (no more overwriting good rows)
+    const datesToFix = last7Days.filter((dateStr) => {
+      const report = currentReports?.find((r) => r.report_date === dateStr);
+      return !report || Number(report.total_sales) === 0;
+    });
 
-    for (const dateStr of last7Days) {
-      const { data: orders } = await supabase
-        .from('orders')
-        .select('generic_amt, branded_amt, total_amount, discount_total')
-        .eq('branch_id', branchId)
-        .eq('created_date_pht', dateStr);
+    if (datesToFix.length > 0) {
+      setLogStatus(`HEALING_${datesToFix.length}_DAYS...`);
 
-      const gen =
-        orders?.reduce((s, o) => s + (Number(o.generic_amt) || 0), 0) || 0;
-      const brd =
-        orders?.reduce((s, o) => s + (Number(o.branded_amt) || 0), 0) || 0;
-      const ttl =
-        orders?.reduce((s, o) => s + (Number(o.total_amount) || 0), 0) || 0;
-      const disc =
-        orders?.reduce((s, o) => s + (Number(o.discount_total) || 0), 0) || 0;
+      for (const dateStr of datesToFix) {
+        const { data: orders } = await supabase
+          .from('orders')
+          .select('generic_amt, branded_amt, total_amount, discount_total')
+          .eq('branch_id', branchId)
+          .eq('created_date_pht', dateStr);
 
-      await supabase.from('daily_reports').upsert(
-        {
-          branch_id: branchId,
-          report_date: dateStr,
-          generic_sales: gen,
-          branded_sales: brd,
-          total_sales: ttl,
-          discount_total: disc,
-          branch_name: selectedBranch?.branch_name,
-        },
-        { onConflict: 'branch_id,report_date' }
-      );
+        const gen =
+          orders?.reduce((s, o) => s + (Number(o.generic_amt) || 0), 0) || 0;
+        const brd =
+          orders?.reduce((s, o) => s + (Number(o.branded_amt) || 0), 0) || 0;
+        const ttl =
+          orders?.reduce((s, o) => s + (Number(o.total_amount) || 0), 0) || 0;
+        const disc =
+          orders?.reduce((s, o) => s + (Number(o.discount_total) || 0), 0) || 0;
+
+        await supabase.from('daily_reports').upsert(
+          {
+            branch_id: branchId,
+            report_date: dateStr,
+            generic_sales: gen,
+            branded_sales: brd,
+            total_sales: ttl,
+            discount_total: disc,
+            branch_name: selectedBranch?.branch_name,
+          },
+          { onConflict: 'branch_id,report_date' }
+        );
+      }
     }
 
-    // Final load
     const { data: finalData } = await supabase
       .from('daily_reports')
       .select('*')
@@ -680,26 +686,19 @@ export default function StaffDashboard() {
   };
 
   const handleOpenReport = async () => {
-    const todayPHT = new Date(new Date().getTime() + 8 * 60 * 60 * 1000)
-      .toISOString()
-      .split('T')[0];
+    const todayPHT = new Date().toISOString().split('T')[0];
 
-    const targetDate = todayPHT;
-
-    setLogStatus(`REFRESHING_SALES_FOR: ${targetDate}...`);
+    setLogStatus(`REFRESHING_SALES_FOR: ${todayPHT}...`);
 
     const { data: existing } = await supabase
       .from('daily_reports')
       .select('is_checked')
       .eq('branch_id', selectedBranch.id)
-      .eq('report_date', targetDate)
+      .eq('report_date', todayPHT)
       .single();
 
     if (existing?.is_checked === true) {
-      triggerToast(
-        'This report has already been verified and cannot be edited.',
-        'error'
-      );
+      triggerToast('This report has already been verified.', 'error');
       return;
     }
 
@@ -707,7 +706,7 @@ export default function StaffDashboard() {
       .from('orders')
       .select('generic_amt, branded_amt, total_amount, discount_total')
       .eq('branch_id', selectedBranch.id)
-      .eq('created_date_pht', targetDate);
+      .eq('created_date_pht', todayPHT);
 
     const genTotal =
       orders?.reduce((s, o) => s + (Number(o.generic_amt) || 0), 0) || 0;
@@ -716,12 +715,12 @@ export default function StaffDashboard() {
     const ttlTotal =
       orders?.reduce((s, o) => s + (Number(o.total_amount) || 0), 0) || 0;
     const discTotal =
-      orders?.reduce((s, o) => s + (Number(o.discount) || 0), 0) || 0;
+      orders?.reduce((s, o) => s + (Number(o.discount_total) || 0), 0) || 0;
 
     await supabase.from('daily_reports').upsert(
       {
         branch_id: selectedBranch.id,
-        report_date: targetDate,
+        report_date: todayPHT,
         generic_sales: genTotal,
         branded_sales: brdTotal,
         total_sales: ttlTotal,
@@ -733,7 +732,7 @@ export default function StaffDashboard() {
 
     setRemittance({
       ...remittance,
-      report_date: targetDate,
+      report_date: todayPHT,
       actual_cash: 0,
       expenses: 0,
       generic_sales: genTotal,
@@ -742,7 +741,7 @@ export default function StaffDashboard() {
       discount_total: discTotal,
     });
 
-    setLogStatus(`SYNC_COMPLETE: ${targetDate}`);
+    setLogStatus(`SYNC_COMPLETE: ${todayPHT}`);
     setShowReportModal(true);
     fetchDailyReports(selectedBranch.id);
   };
@@ -816,9 +815,7 @@ export default function StaffDashboard() {
     }
   };
   const syncDailyReportRealtime = async (branchId: string) => {
-    const todayPHT = new Date(new Date().getTime() + 8 * 60 * 60 * 1000)
-      .toISOString()
-      .split('T')[0];
+    const todayPHT = new Date().toISOString().split('T')[0];
 
     setLogStatus('REALTIME_SYNC_INITIATED...');
 
@@ -833,17 +830,21 @@ export default function StaffDashboard() {
       return;
     }
 
-    const genTotal = Number(
-      orders.reduce((s, o) => s + (Number(o.generic_amt) || 0), 0).toFixed(2)
+    const genTotal = orders.reduce(
+      (s, o) => s + (Number(o.generic_amt) || 0),
+      0
     );
-    const brdTotal = Number(
-      orders.reduce((s, o) => s + (Number(o.branded_amt) || 0), 0).toFixed(2)
+    const brdTotal = orders.reduce(
+      (s, o) => s + (Number(o.branded_amt) || 0),
+      0
     );
-    const ttlTotal = Number(
-      orders.reduce((s, o) => s + (Number(o.total_amount) || 0), 0).toFixed(2)
+    const ttlTotal = orders.reduce(
+      (s, o) => s + (Number(o.total_amount) || 0),
+      0
     );
-    const discTotal = Number(
-      orders.reduce((s, o) => s + (Number(o.discount) || 0), 0).toFixed(2)
+    const discTotal = orders.reduce(
+      (s, o) => s + (Number(o.discount_total) || 0),
+      0
     );
 
     await supabase.from('daily_reports').upsert(
@@ -859,7 +860,7 @@ export default function StaffDashboard() {
       { onConflict: 'branch_id,report_date' }
     );
 
-    setLogStatus(`SYNC_SUCCESS: ${todayPHT} ₱${ttlTotal.toLocaleString()}`);
+    setLogStatus(`SYNC_SUCCESS: ${todayPHT}`);
     fetchDailyReports(branchId);
   };
 
@@ -1233,10 +1234,7 @@ export default function StaffDashboard() {
                         </span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-slate-200">
-                          {' '}
-                          ---------------
-                        </span>
+                        <span className="text-slate-200"> ---------------</span>
                         <span className="text-slate-200 ">
                           ₱{genActual.toLocaleString()}
                         </span>
