@@ -60,6 +60,10 @@ export default function StaffDashboard() {
     expenses: 0,
     notes: '',
     report_date: new Date().toISOString().split('T')[0],
+    generic_sales: 0,
+    branded_sales: 0,
+    total_sales: 0,
+    discount_total: 0, // ← NEW
   });
 
   const [toast, setToast] = useState<{
@@ -413,82 +417,64 @@ export default function StaffDashboard() {
   async function fetchDailyReports(branchId: string) {
     setLogStatus('CHECKING_FOR_MISSING_DATA...');
 
-    // 1. Fetch current summary table
-    const { data: currentReports, error: fetchError } = await supabase
+    const { data: currentReports } = await supabase
       .from('daily_reports')
       .select('*')
       .eq('branch_id', branchId)
       .order('report_date', { ascending: false })
       .limit(31);
 
-    if (fetchError) return;
-
-    // 2. Identify dates to fix (Fixing the .split('T') here)
     const last7Days = [...Array(7)].map((_, i) => {
-      const d = new Date(new Date().getTime() + 8 * 60 * 60 * 1000);
+      const d = new Date();
       d.setDate(d.getDate() - i);
-      return d.toISOString().split('T'); // Added to get the string
+      return d.toISOString().split('T')[0];
     });
 
-    const todayStr = last7Days;
+    // FORCE RECALCULATION of the last 7 days (this fixes stale values)
+    setLogStatus(`RECALCULATING_${last7Days.length}_DAYS...`);
 
-    const datesToFix = last7Days.filter((dateStr) => {
-      // ALWAYS include today so it updates as orders come in
-      if (dateStr === todayStr) return true;
-
-      const report = currentReports?.find((r) => r.report_date === dateStr);
-      // Only fix previous days if they are missing or still 0
-      return !report || Number(report.total_sales) === 0;
-    });
-
-    // 3. Repair the dates
-    if (datesToFix.length > 0) {
-      setLogStatus(`SYNCING_${datesToFix.length}_DAYS...`);
-
-      for (const dateStr of datesToFix) {
-        const { data: orders } = await supabase
-          .from('orders')
-          .select('generic_amt, branded_amt, total_amount')
-          .eq('branch_id', branchId)
-          .eq('created_date_pht', dateStr);
-
-        // Even if orders are 0, we upsert to keep the report accurate
-        const gen =
-          orders?.reduce((s, o) => s + (Number(o.generic_amt) || 0), 0) || 0;
-        const brd =
-          orders?.reduce((s, o) => s + (Number(o.branded_amt) || 0), 0) || 0;
-        const ttl =
-          orders?.reduce((s, o) => s + (Number(o.total_amount) || 0), 0) || 0;
-
-        await supabase.from('daily_reports').upsert(
-          {
-            branch_id: branchId,
-            report_date: dateStr,
-            generic_sales: gen,
-            branded_sales: brd,
-            total_sales: ttl,
-            branch_name: selectedBranch?.branch_name,
-          },
-          { onConflict: 'branch_id,report_date' }
-        );
-      }
-
-      // 4. Final fetch to show the new numbers
-      const { data: finalData } = await supabase
-        .from('daily_reports')
-        .select('*')
+    for (const dateStr of last7Days) {
+      const { data: orders } = await supabase
+        .from('orders')
+        .select('generic_amt, branded_amt, total_amount, discount_total')
         .eq('branch_id', branchId)
-        .order('report_date', { ascending: false })
-        .limit(31);
+        .eq('created_date_pht', dateStr);
 
-      setDailyReports(finalData || []);
-    } else {
-      setDailyReports(currentReports || []);
+      const gen =
+        orders?.reduce((s, o) => s + (Number(o.generic_amt) || 0), 0) || 0;
+      const brd =
+        orders?.reduce((s, o) => s + (Number(o.branded_amt) || 0), 0) || 0;
+      const ttl =
+        orders?.reduce((s, o) => s + (Number(o.total_amount) || 0), 0) || 0;
+      const disc =
+        orders?.reduce((s, o) => s + (Number(o.discount_total) || 0), 0) || 0;
+
+      await supabase.from('daily_reports').upsert(
+        {
+          branch_id: branchId,
+          report_date: dateStr,
+          generic_sales: gen,
+          branded_sales: brd,
+          total_sales: ttl,
+          discount_total: disc,
+          branch_name: selectedBranch?.branch_name,
+        },
+        { onConflict: 'branch_id,report_date' }
+      );
     }
+
+    // Final load
+    const { data: finalData } = await supabase
+      .from('daily_reports')
+      .select('*')
+      .eq('branch_id', branchId)
+      .order('report_date', { ascending: false })
+      .limit(31);
+
+    setDailyReports(finalData || []);
 
     setLogStatus('SYSTEM_READY');
   }
-
   const handleBranchSelect = async (branch: any) => {
     setSelectedBranch(branch);
     localStorage.setItem('active_branch', JSON.stringify(branch));
@@ -694,82 +680,71 @@ export default function StaffDashboard() {
   };
 
   const handleOpenReport = async () => {
-    // 1. Determine target date - Ensure it is a STRING "YYYY-MM-DD"
     const todayPHT = new Date(new Date().getTime() + 8 * 60 * 60 * 1000)
       .toISOString()
-      .split('T'); // The is critical!
+      .split('T')[0];
 
-    const targetDate = selectedDate || todayPHT;
+    const targetDate = todayPHT;
 
     setLogStatus(`REFRESHING_SALES_FOR: ${targetDate}...`);
 
-    try {
-      // 2. Fetch RAW ORDERS using the new PHT column
-      const { data: orders, error: orderError } = await supabase
-        .from('orders')
-        .select('generic_amt, branded_amt, total_amount')
-        .eq('branch_id', selectedBranch.id)
-        .eq('created_date_pht', targetDate);
+    const { data: existing } = await supabase
+      .from('daily_reports')
+      .select('is_checked')
+      .eq('branch_id', selectedBranch.id)
+      .eq('report_date', targetDate)
+      .single();
 
-      if (orderError) throw orderError;
+    if (existing?.is_checked === true) {
+      triggerToast(
+        'This report has already been verified and cannot be edited.',
+        'error'
+      );
+      return;
+    }
 
-      let genTotal = 0;
-      let brdTotal = 0;
-      let ttlTotal = 0;
+    const { data: orders } = await supabase
+      .from('orders')
+      .select('generic_amt, branded_amt, total_amount, discount_total')
+      .eq('branch_id', selectedBranch.id)
+      .eq('created_date_pht', targetDate);
 
-      if (orders && orders.length > 0) {
-        genTotal = orders.reduce(
-          (sum, o) => sum + (Number(o.generic_amt) || 0),
-          0
-        );
-        brdTotal = orders.reduce(
-          (sum, o) => sum + (Number(o.branded_amt) || 0),
-          0
-        );
-        ttlTotal = orders.reduce(
-          (sum, o) => sum + (Number(o.total_amount) || 0),
-          0
-        );
+    const genTotal =
+      orders?.reduce((s, o) => s + (Number(o.generic_amt) || 0), 0) || 0;
+    const brdTotal =
+      orders?.reduce((s, o) => s + (Number(o.branded_amt) || 0), 0) || 0;
+    const ttlTotal =
+      orders?.reduce((s, o) => s + (Number(o.total_amount) || 0), 0) || 0;
+    const discTotal =
+      orders?.reduce((s, o) => s + (Number(o.discount) || 0), 0) || 0;
 
-        // 3. REPAIR THE CALENDAR: Update the daily_reports table
-        const { error: upsertError } = await supabase
-          .from('daily_reports')
-          .upsert(
-            {
-              branch_id: selectedBranch.id,
-              report_date: targetDate,
-              generic_sales: genTotal,
-              branded_sales: brdTotal,
-              total_sales: ttlTotal,
-              branch_name: selectedBranch.branch_name,
-            },
-            { onConflict: 'branch_id,report_date' }
-          );
-
-        if (upsertError) console.error('Upsert Error:', upsertError);
-
-        // 4. Update the Dashboard Grid immediately
-        fetchDailyReports(selectedBranch.id);
-      }
-
-      // 5. Populate Remittance State for the Modal
-      setRemittance({
-        ...remittance,
+    await supabase.from('daily_reports').upsert(
+      {
+        branch_id: selectedBranch.id,
         report_date: targetDate,
-        actual_cash: 0,
-        expenses: 0,
         generic_sales: genTotal,
         branded_sales: brdTotal,
         total_sales: ttlTotal,
-      });
+        discount_total: discTotal,
+        branch_name: selectedBranch.branch_name,
+      },
+      { onConflict: 'branch_id,report_date' }
+    );
 
-      setLogStatus(`SYNC_COMPLETE: ${targetDate}`);
-      setShowReportModal(true);
-    } catch (err) {
-      console.error('HandleOpenReport Error:', err);
-      setLogStatus('ERROR_FETCHING_SALES');
-      triggerToast('Failed to sync sales data', 'error');
-    }
+    setRemittance({
+      ...remittance,
+      report_date: targetDate,
+      actual_cash: 0,
+      expenses: 0,
+      generic_sales: genTotal,
+      branded_sales: brdTotal,
+      total_sales: ttlTotal,
+      discount_total: discTotal,
+    });
+
+    setLogStatus(`SYNC_COMPLETE: ${targetDate}`);
+    setShowReportModal(true);
+    fetchDailyReports(selectedBranch.id);
   };
 
   const handleSaveReport = async () => {
@@ -777,7 +752,6 @@ export default function StaffDashboard() {
       return triggerToast('Actual Cash Required', 'error');
     }
 
-    // Existing validation for expenses
     if (
       remittance.expenses > 0 &&
       (!remittance.notes || remittance.notes.trim() === '')
@@ -788,9 +762,6 @@ export default function StaffDashboard() {
       );
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // NEW: BLOCK SUBMISSION IF ALREADY VERIFIED
-    // ─────────────────────────────────────────────────────────────
     const { data: existingReport } = await supabase
       .from('daily_reports')
       .select('is_checked')
@@ -804,7 +775,6 @@ export default function StaffDashboard() {
         'error'
       );
     }
-    // ─────────────────────────────────────────────────────────────
 
     const formatMoney = (val: any) => Number(Number(val || 0).toFixed(2));
 
@@ -823,7 +793,8 @@ export default function StaffDashboard() {
           generic_sales: formatMoney(remittance.generic_sales),
           branded_sales: formatMoney(remittance.branded_sales),
           total_sales: formatMoney(remittance.total_sales),
-          excess: excess, // ← already fixed in previous update
+          discount_total: formatMoney(remittance.discount_total),
+          excess: excess,
           notes: remittance.notes?.trim() || '',
           reported_by: profile?.full_name,
           is_checked: false,
@@ -845,64 +816,51 @@ export default function StaffDashboard() {
     }
   };
   const syncDailyReportRealtime = async (branchId: string) => {
-    // 1. Get Today's Date in PHT (YYYY-MM-DD)
     const todayPHT = new Date(new Date().getTime() + 8 * 60 * 60 * 1000)
       .toISOString()
-      .split('T'); // Added to get the string, not an array
+      .split('T')[0];
 
     setLogStatus('REALTIME_SYNC_INITIATED...');
 
-    // 2. Fetch Orders using the NEW column
-    const { data: orders, error: orderError } = await supabase
+    const { data: orders } = await supabase
       .from('orders')
-      .select('generic_amt, branded_amt, total_amount')
+      .select('generic_amt, branded_amt, total_amount, discount_total')
       .eq('branch_id', branchId)
-      .eq('created_date_pht', todayPHT); // Direct match!
+      .eq('created_date_pht', todayPHT);
 
-    if (orderError || !orders || orders.length === 0) {
+    if (!orders || orders.length === 0) {
       setLogStatus('IDLE: NO_ORDERS_TODAY');
       return;
     }
 
-    // 3. Simple Aggregation
     const genTotal = Number(
-      orders
-        .reduce((sum, o) => sum + (parseFloat(o.generic_amt) || 0), 0)
-        .toFixed(2)
+      orders.reduce((s, o) => s + (Number(o.generic_amt) || 0), 0).toFixed(2)
     );
     const brdTotal = Number(
-      orders
-        .reduce((sum, o) => sum + (parseFloat(o.branded_amt) || 0), 0)
-        .toFixed(2)
+      orders.reduce((s, o) => s + (Number(o.branded_amt) || 0), 0).toFixed(2)
     );
     const ttlTotal = Number(
-      orders
-        .reduce((sum, o) => sum + (parseFloat(o.total_amount) || 0), 0)
-        .toFixed(2)
+      orders.reduce((s, o) => s + (Number(o.total_amount) || 0), 0).toFixed(2)
+    );
+    const discTotal = Number(
+      orders.reduce((s, o) => s + (Number(o.discount) || 0), 0).toFixed(2)
     );
 
-    // 4. UPSERT to daily_reports
-    const { error: upsertError } = await supabase.from('daily_reports').upsert(
+    await supabase.from('daily_reports').upsert(
       {
         branch_id: branchId,
-        report_date: todayPHT, // Use the PHT date directly
+        report_date: todayPHT,
         generic_sales: genTotal,
         branded_sales: brdTotal,
         total_sales: ttlTotal,
+        discount_total: discTotal,
         branch_name: selectedBranch?.branch_name,
       },
-      {
-        onConflict: 'branch_id,report_date',
-      }
+      { onConflict: 'branch_id,report_date' }
     );
 
-    if (!upsertError) {
-      setLogStatus(`SYNC_SUCCESS: ${todayPHT} ₱${ttlTotal.toLocaleString()}`);
-      fetchDailyReports(branchId);
-    } else {
-      console.error('Upsert Error:', upsertError);
-      setLogStatus('SYNC_ERROR_DATABASE');
-    }
+    setLogStatus(`SYNC_SUCCESS: ${todayPHT} ₱${ttlTotal.toLocaleString()}`);
+    fetchDailyReports(branchId);
   };
 
   const handleVerifyReport = async (reportId: string) => {
@@ -1075,6 +1033,7 @@ export default function StaffDashboard() {
 
       <main className="max-w-6xl mx-auto p-6 lg:p-10 pb-24">
         {/* Previous 7 Day Report Audit */}
+        {/* 7-Day Report Audit */}
         <div className="mb-10">
           <h3 className="text-[10px] font-black text-slate-600 uppercase tracking-[0.3em] px-1 italic mb-4 flex items-center gap-2">
             <History size={12} /> 7_Day_Report_Audit
@@ -1082,8 +1041,9 @@ export default function StaffDashboard() {
 
           {(() => {
             const now = new Date();
+            const todayStr = now.toISOString().split('T')[0];
 
-            // Week range: Sunday to Saturday
+            // Sunday to Saturday - exact same logic as your PROD file
             const sun = new Date(now);
             sun.setDate(now.getDate() - now.getDay());
             sun.setHours(0, 0, 0, 0);
@@ -1102,27 +1062,27 @@ export default function StaffDashboard() {
               0
             ).getDate();
 
-            // Quotas
             const dailyGen = Number(selectedBranch?.daily_generic_quota || 0);
             const weeklyQuo = dailyGen * 7;
             const monthlyQuo = dailyGen * daysInMonth;
 
-            // FIXED: Calculate weekly and monthly totals properly (includes today)
-            let weeklyGeneric = 0;
-            let monthlyGeneric = 0;
+            // ✅ GROSS GENERIC - DISCOUNTS (Net) for quotas
+            let weeklyGenericNet = 0;
+            let monthlyGenericNet = 0;
 
             dailyReports.forEach((r) => {
-              const reportDate = new Date(r.report_date + 'T00:00:00'); // Ensure proper date parsing
-              const gen = Number(r.generic_sales || 0);
+              const reportDateStr = r.report_date;
+              const genGross = Number(r.generic_sales || 0);
+              const disc = Number(r.discount_total || 0);
+              const genNet = genGross - disc;
 
-              // Weekly (Sunday → Saturday)
+              const reportDate = new Date(reportDateStr + 'T00:00:00');
+
               if (reportDate >= sun && reportDate <= sat) {
-                weeklyGeneric += gen;
+                weeklyGenericNet += genNet;
               }
-
-              // Monthly (1st of month → today)
               if (reportDate >= firstDayMonth && reportDate <= now) {
-                monthlyGeneric += gen;
+                monthlyGenericNet += genNet;
               }
             });
 
@@ -1131,19 +1091,19 @@ export default function StaffDashboard() {
 
             return (
               <div className="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Weekly Generic */}
+                {/* Weekly */}
                 <div className="bg-slate-900/40 border border-white/5 p-4 rounded-2xl">
                   <div className="flex justify-between items-start mb-2">
                     <div>
                       <p className="text-[9px] font-black text-emerald-500 uppercase tracking-widest">
-                        Weekly Generic
+                        Weekly Generic (Net)
                       </p>
                       <p className="text-xl font-black text-white">
-                        ₱{weeklyGeneric.toLocaleString()}
+                        ₱{weeklyGenericNet.toLocaleString()}
                       </p>
                     </div>
                     <p className="text-xs font-black text-emerald-500 bg-emerald-500/10 px-2 py-1 rounded-lg">
-                      {getProg(weeklyGeneric, weeklyQuo).toFixed(0)}%
+                      {getProg(weeklyGenericNet, weeklyQuo).toFixed(0)}%
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
@@ -1151,29 +1111,29 @@ export default function StaffDashboard() {
                       <div
                         className="h-full bg-emerald-500"
                         style={{
-                          width: `${getProg(weeklyGeneric, weeklyQuo)}%`,
+                          width: `${getProg(weeklyGenericNet, weeklyQuo)}%`,
                         }}
                       />
                     </div>
-                    <span className="text-[9px] font-bold text-slate-500 whitespace-nowrap">
+                    <span className="text-[9px] font-bold text-slate-500">
                       Target: ₱{weeklyQuo.toLocaleString()}
                     </span>
                   </div>
                 </div>
 
-                {/* Monthly Generic */}
+                {/* Monthly */}
                 <div className="bg-slate-900/40 border border-white/5 p-4 rounded-2xl">
                   <div className="flex justify-between items-start mb-2">
                     <div>
                       <p className="text-[9px] font-black text-blue-500 uppercase tracking-widest">
-                        Monthly Generic
+                        Monthly Generic (Net)
                       </p>
                       <p className="text-xl font-black text-white">
-                        ₱{monthlyGeneric.toLocaleString()}
+                        ₱{monthlyGenericNet.toLocaleString()}
                       </p>
                     </div>
                     <p className="text-xs font-black text-blue-500 bg-blue-500/10 px-2 py-1 rounded-lg">
-                      {getProg(monthlyGeneric, monthlyQuo).toFixed(0)}%
+                      {getProg(monthlyGenericNet, monthlyQuo).toFixed(0)}%
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
@@ -1181,11 +1141,11 @@ export default function StaffDashboard() {
                       <div
                         className="h-full bg-blue-500"
                         style={{
-                          width: `${getProg(monthlyGeneric, monthlyQuo)}%`,
+                          width: `${getProg(monthlyGenericNet, monthlyQuo)}%`,
                         }}
                       />
                     </div>
-                    <span className="text-[9px] font-bold text-slate-500 whitespace-nowrap">
+                    <span className="text-[9px] font-bold text-slate-500">
                       Target: ₱{monthlyQuo.toLocaleString()}
                     </span>
                   </div>
@@ -1194,10 +1154,13 @@ export default function StaffDashboard() {
             );
           })()}
 
-          {/* 7-Day Grid */}
+          {/* 7-Day Grid with correct TODAY */}
+          {/* 7-Day Grid - EXACTLY like your PROD file (Sunday to Saturday, no shift) */}
           <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
             {(() => {
               const now = new Date();
+              const todayStr = now.toISOString().split('T')[0];
+
               const sun = new Date(now);
               sun.setDate(now.getDate() - now.getDay());
               sun.setHours(0, 0, 0, 0);
@@ -1206,6 +1169,7 @@ export default function StaffDashboard() {
                 const date = new Date(sun);
                 date.setDate(sun.getDate() + i);
 
+                // EXACT same string construction as your PROD file
                 const year = date.getFullYear();
                 const month = String(date.getMonth() + 1).padStart(2, '0');
                 const day = String(date.getDate()).padStart(2, '0');
@@ -1214,21 +1178,32 @@ export default function StaffDashboard() {
                 const report = dailyReports.find(
                   (r) => r.report_date === dateStr
                 );
+
                 const isFuture = date > now;
-                const isToday = dateStr === now.toLocaleDateString('en-CA');
+                const isToday = dateStr === todayStr;
+
+                const netSales =
+                  Number(report?.total_sales || 0) -
+                  Number(report?.discount_total || 0);
 
                 return (
                   <div
-                    key={i}
+                    key={dateStr}
                     className={`p-4 rounded-2xl border transition-all ${
                       isFuture
                         ? 'opacity-40 bg-slate-900/20 border-white/5'
                         : !report
                         ? 'bg-red-500/5 border-red-500/20'
+                        : isToday
+                        ? 'bg-emerald-500/20 border-emerald-400 ring-2 ring-emerald-400 shadow-2xl shadow-emerald-500/30 scale-[1.03]'
                         : 'bg-slate-900/40 border-white/5'
                     }`}
                   >
-                    <span className="text-[8px] font-black text-slate-500 uppercase block mb-1">
+                    <span
+                      className={`text-[8px] font-black uppercase block mb-1 ${
+                        isToday ? 'text-emerald-400' : 'text-slate-500'
+                      }`}
+                    >
                       {isToday
                         ? 'TODAY'
                         : date
@@ -1239,35 +1214,39 @@ export default function StaffDashboard() {
                             .toUpperCase()}
                     </span>
 
-                    <div className="space-y-1 mb-3 border-b border-white/5 pb-2">
-                      <div className="flex justify-between text-[9px] font-bold">
+                    <div className="space-y-1 mb-3 border-b border-white/5 pb-2 text-[9px] font-bold">
+                      <div className="flex justify-between">
                         <span className="text-slate-500">GEN</span>
                         <span className="text-white">
-                          ₱
-                          {Number(report?.generic_sales || 0).toLocaleString(
-                            undefined,
-                            { minimumFractionDigits: 2 }
-                          )}
+                          ₱{Number(report?.generic_sales || 0).toLocaleString()}
                         </span>
                       </div>
-                      <div className="flex justify-between text-[9px] font-bold">
+                      <div className="flex justify-between">
                         <span className="text-slate-500">BRD</span>
                         <span className="text-white">
-                          ₱
-                          {Number(report?.branded_sales || 0).toLocaleString(
-                            undefined,
-                            { minimumFractionDigits: 2 }
-                          )}
+                          ₱{Number(report?.branded_sales || 0).toLocaleString()}
                         </span>
                       </div>
-                      <div className="flex justify-between text-[10px] font-black pt-1">
-                        <span className="text-emerald-500">TTL</span>
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">TTL</span>
+                        <span className="text-white">
+                          ₱{Number(report?.total_sales || 0).toLocaleString()}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-orange-400">DISC</span>
+                        <span className="text-orange-400">
+                          ₱
+                          {Number(report?.discount_total || 0).toLocaleString()}
+                        </span>
+                      </div>
+                      <div className="flex justify-between pt-1 border-t border-white/10 font-black">
+                        <span className="text-emerald-500">ACTUAL</span>
                         <span className="text-emerald-500">
                           ₱
-                          {Number(report?.total_sales || 0).toLocaleString(
-                            undefined,
-                            { minimumFractionDigits: 2 }
-                          )}
+                          {netSales.toLocaleString(undefined, {
+                            minimumFractionDigits: 2,
+                          })}
                         </span>
                       </div>
                     </div>
