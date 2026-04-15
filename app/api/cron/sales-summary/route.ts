@@ -149,44 +149,60 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
+        console.log('🚀 Starting STOCK_ADVISORY message build...');
+
         message = `<b>📦 TOP 30 ITEMS TO RESTOCK</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
 
         group.branches.forEach((b: any) => {
-          const toOrder = products
-            ?.filter((p: any) => p.branch_id === b.id)
-            .sort((a: any, b: any) => {
-              const stockA = Number(a.stock || 0);
-              const stockB = Number(b.stock || 0);
-              const soldA = Number(a.sold_weekly || 0);
-              const soldB = Number(b.sold_weekly || 0);
+          try {
+            const branchInventory = (products || []).filter(
+              (p: any) => String(p?.branch_id) === String(b?.id)
+            );
 
-              // Most urgent first
-              if (stockA <= 0 && stockB > 0) return -1;
-              if (stockB <= 0 && stockA > 0) return 1;
+            console.log(
+              `   📍 Branch: ${b?.branch_name} → ${branchInventory.length} items`
+            );
 
-              // Highest sold_weekly next
-              if (soldB !== soldA) return soldB - soldA;
+            const toOrder = branchInventory
+              .sort((a: any, b: any) => {
+                const stockA = Number(a?.stock || 0);
+                const stockB = Number(b?.stock || 0);
+                const soldA = Number(a?.sold_weekly || 0);
+                const soldB = Number(b?.sold_weekly || 0);
 
-              // Lowest stock as tie-breaker
-              return stockA - stockB;
-            })
-            .slice(0, 30);
+                if (stockA <= 0 && stockB > 0) return -1;
+                if (stockB <= 0 && stockA > 0) return 1;
+                if (soldB !== soldA) return soldB - soldA;
+                return stockA - stockB;
+              })
+              .slice(0, 30);
 
-          message += `<b>📍 ${b.branch_name.toUpperCase()}</b>\n`;
+            message += `<b>📍 ${
+              b?.branch_name?.toUpperCase() || 'Unknown Branch'
+            }</b>\n`;
 
-          if (toOrder && toOrder.length > 0) {
-            toOrder.forEach((p: any) => {
-              const stock = Number(p.stock || 0);
-              const sold = Number(p.sold_weekly || 0);
-              const icon = stock <= 0 ? '🚨' : '⚠️';
-              const itemName = p.item_name || 'Unnamed Item';
-              message += `${icon} ${itemName}: ${stock} left (Sold ${sold}/wk)\n`;
-            });
-          } else {
-            message += `✅ <i>No inventory data for this branch</i>\n`;
+            if (toOrder.length > 0) {
+              toOrder.forEach((p: any) => {
+                const stock = Number(p?.stock || 0);
+                const sold = Number(p?.sold_weekly || 0);
+                const icon = stock <= 0 ? '🚨' : '⚠️';
+                const itemName = p?.item_name || 'Unnamed Item';
+                message += `${icon} ${itemName}: ${stock} left (Sold ${sold}/wk)\n`;
+              });
+            } else {
+              message += `✅ <i>No inventory data for this branch</i>\n`;
+            }
+          } catch (branchErr) {
+            console.error(
+              `Error processing branch ${b?.branch_name}:`,
+              branchErr
+            );
+            message += `⚠️ Error processing this branch\n`;
           }
           message += `━━━━━━━━━━━━━━━━━━\n`;
         });
+
+        console.log('✅ STOCK_ADVISORY message built successfully');
       } else {
         let header = '';
         switch (type) {
