@@ -149,42 +149,25 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        message = `<b>📦 TOP 30 ITEMS TO RESTOCK</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
-
+        message = `<b>📦 WEEKLY STOCK RECOMMENDATIONS</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
         group.branches.forEach((b: any) => {
-          // Extra safety
-          const branchInventory = (products || []).filter(
-            (p: any) => p?.branch_id === b.id
-          );
+          const toOrder = products
+            ?.filter(
+              (p: any) =>
+                p.branch_id === b.id &&
+                (Number(p.current_stock) <= Number(p.sold_weekly || 0) ||
+                  Number(p.current_stock) < 5)
+            )
+            .slice(0, 10);
 
-          const toOrder = branchInventory
-            .sort((a: any, b: any) => {
-              const stockA = Number(a?.stock || a?.stock_quantity || 0);
-              const stockB = Number(b?.stock || b?.stock_quantity || 0);
-              const soldA = Number(a?.sold_weekly || 0);
-              const soldB = Number(b?.sold_weekly || 0);
-
-              if (stockA <= 0 && stockB > 0) return -1;
-              if (stockB <= 0 && stockA > 0) return 1;
-              if (soldB !== soldA) return soldB - soldA;
-              return stockA - stockB;
-            })
-            .slice(0, 30);
-
-          message += `<b>📍 ${
-            b.branch_name?.toUpperCase() || 'Unknown Branch'
-          }</b>\n`;
-
-          if (toOrder.length > 0) {
+          message += `<b>📍 ${b.branch_name.toUpperCase()}</b>\n`;
+          if (toOrder && toOrder.length > 0) {
             toOrder.forEach((p: any) => {
-              const stock = Number(p?.stock || p?.stock_quantity || 0);
-              const sold = Number(p?.sold_weekly || 0);
-              const icon = stock <= 0 ? '🚨' : '⚠️';
-              const itemName = p?.item_name || 'Unnamed Item';
-              message += `${icon} ${itemName}: ${stock} left (Sold ${sold}/wk)\n`;
+              const icon = Number(p.current_stock) <= 0 ? '🚨' : '⚠️';
+              message += `${icon} ${p.name}: ${p.current_stock} left (Sold ${p.sold_weekly}/wk)\n`;
             });
           } else {
-            message += `✅ <i>No inventory data for this branch</i>\n`;
+            message += `✅ <i>Stock levels healthy</i>\n`;
           }
           message += `━━━━━━━━━━━━━━━━━━\n`;
         });
