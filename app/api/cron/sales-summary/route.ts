@@ -150,7 +150,7 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        console.log('🚀 STOCK_ADVISORY - alphabetical sort + GENERIC/BRANDED');
+        console.log('🚀 STOCK_ADVISORY - high sold_weekly priority + alphabetical');
 
         for (const b of group.branches) {
           const { data: branchInventory } = await supabaseAdmin
@@ -167,20 +167,26 @@ export async function GET(request: Request) {
             return sold > 0 && stock < sold * 2;
           });
 
-          // Split + Alphabetical sort (A to Z)
+          // Split + Sort: highest sold_weekly first, then alphabetical
           const genericItems = meaningfulItems
             .filter((p: any) => String(p?.item_type || '').toUpperCase().trim() === 'GENERIC')
-            .sort((a: any, b: any) => 
-              (a?.item_name || '').localeCompare(b?.item_name || '')
-            )
-            .slice(0, 20);
+            .sort((a: any, b: any) => {
+              const soldA = Number(a?.sold_weekly || 0);
+              const soldB = Number(b?.sold_weekly || 0);
+              if (soldB !== soldA) return soldB - soldA;                    // highest sold first
+              return (a?.item_name || '').localeCompare(b?.item_name || ''); // then alphabetical
+            })
+            .slice(0, 40);   // increased limit
 
           const brandedItems = meaningfulItems
             .filter((p: any) => String(p?.item_type || '').toUpperCase().trim() === 'BRANDED')
-            .sort((a: any, b: any) => 
-              (a?.item_name || '').localeCompare(b?.item_name || '')
-            )
-            .slice(0, 10);
+            .sort((a: any, b: any) => {
+              const soldA = Number(a?.sold_weekly || 0);
+              const soldB = Number(b?.sold_weekly || 0);
+              if (soldB !== soldA) return soldB - soldA;                    // highest sold first
+              return (a?.item_name || '').localeCompare(b?.item_name || ''); // then alphabetical
+            })
+            .slice(0, 20);   // increased limit
 
           let branchMessage = `<b>📦 TOP TO RESTOCK</b>\n`;
           branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
@@ -226,7 +232,7 @@ export async function GET(request: Request) {
             console.error(`❌ Send failed:`, err);
           }
         }
-      }else {
+      } else {
         let header = '';
         switch (type) {
           case 'REPORT_CHECKER':
