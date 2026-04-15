@@ -149,18 +149,35 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        console.log('🚀 STOCK_ADVISORY - using stock < sold_weekly * 2');
+        console.log('🚀 STOCK_ADVISORY DEBUG STARTED');
 
         for (const b of group.branches) {
           const branchInventory = (products || []).filter(
             (p: any) => String(p?.branch_id) === String(b?.id)
           );
 
+          console.log(
+            `📍 Branch: ${b.branch_name} | Total items: ${branchInventory.length}`
+          );
+
+          // Count how many items have sales this week
+          const itemsWithSales = branchInventory.filter(
+            (p) => Number(p?.sold_weekly || 0) > 0
+          );
+          console.log(
+            `   → Items with sold_weekly > 0: ${itemsWithSales.length}`
+          );
+
           const meaningfulItems = branchInventory.filter((p: any) => {
             const sold = Number(p?.sold_weekly || 0);
             const stock = Number(p?.stock || 0);
-            return sold > 0 && stock < sold * 2; // ← YOUR NEW RULE
+            // More lenient for now: stock < sold_weekly * 3
+            return sold > 0 && stock < sold * 3;
           });
+
+          console.log(
+            `   → Items that meet criteria (stock < sold*3): ${meaningfulItems.length}`
+          );
 
           // Split into Generic and Branded
           const genericItems = meaningfulItems
@@ -196,39 +213,35 @@ export async function GET(request: Request) {
           let branchMessage = `<b>📦 TOP TO RESTOCK</b>\n`;
           branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
 
-          // GENERIC SECTION
           branchMessage += `<b>🟦 GENERIC ITEMS</b>\n`;
           if (genericItems.length > 0) {
             genericItems.forEach((p: any) => {
               const stock = Number(p?.stock || 0);
               const sold = Number(p?.sold_weekly || 0);
               const icon = stock <= 0 ? '🚨' : '⚠️';
-              const itemName = p?.item_name || 'Unnamed Item';
-              branchMessage += `${icon} ${itemName}: ${stock} left (Sold ${sold}/wk)\n`;
+              branchMessage += `${icon} ${p?.item_name}: ${stock} left (Sold ${sold}/wk)\n`;
             });
           } else {
             branchMessage += `✅ No generic items need restock\n`;
           }
           branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
 
-          // BRANDED SECTION
           branchMessage += `<b>🟪 BRANDED ITEMS</b>\n`;
           if (brandedItems.length > 0) {
             brandedItems.forEach((p: any) => {
               const stock = Number(p?.stock || 0);
               const sold = Number(p?.sold_weekly || 0);
               const icon = stock <= 0 ? '🚨' : '⚠️';
-              const itemName = p?.item_name || 'Unnamed Item';
-              branchMessage += `${icon} ${itemName}: ${stock} left (Sold ${sold}/wk)\n`;
+              branchMessage += `${icon} ${p?.item_name}: ${stock} left (Sold ${sold}/wk)\n`;
             });
           } else {
             branchMessage += `✅ No branded items need restock\n`;
           }
           branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
 
-          // Send one message per branch
+          // Send message
           try {
-            const response = await fetch(
+            await fetch(
               `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
               {
                 method: 'POST',
@@ -240,14 +253,13 @@ export async function GET(request: Request) {
                 }),
               }
             );
-            const result = await response.json();
-            console.log(
-              `✅ Sent to ${b.branch_name}: ${result.ok ? 'OK' : 'FAILED'}`
-            );
+            console.log(`✅ Sent advisory for ${b.branch_name}`);
           } catch (err) {
-            console.error(`❌ Failed to send for ${b.branch_name}:`, err);
+            console.error(`❌ Send failed for ${b.branch_name}:`, err);
           }
         }
+
+        console.log('✅ STOCK_ADVISORY DEBUG FINISHED');
       } else {
         let header = '';
         switch (type) {
