@@ -150,53 +150,35 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        console.log(
-          '🚀 STOCK_ADVISORY - querying inventory PER BRANCH (13k+ rows safe)'
-        );
+        console.log('🚀 STOCK_ADVISORY - alphabetical sort + GENERIC/BRANDED');
 
         for (const b of group.branches) {
-          // ← Query only this branch's inventory
           const { data: branchInventory } = await supabaseAdmin
             .from('inventory')
             .select('*')
             .eq('branch_id', b.id)
             .order('sold_weekly', { ascending: false });
 
-          console.log(
-            `📍 Branch: ${b?.branch_name} | Items loaded: ${
-              branchInventory?.length || 0
-            }`
-          );
+          console.log(`📍 Branch: ${b?.branch_name} | Items loaded: ${branchInventory?.length || 0}`);
 
           const meaningfulItems = (branchInventory || []).filter((p: any) => {
             const sold = Number(p?.sold_weekly || 0);
             const stock = Number(p?.stock || 0);
-            return sold > 0 && stock < sold * 3; // you can change *3 back to *2 later
+            return sold > 0 && stock < sold * 2;
           });
 
+          // Split + Alphabetical sort (A to Z)
           const genericItems = meaningfulItems
-            .filter(
-              (p: any) =>
-                String(p?.item_type || '')
-                  .toUpperCase()
-                  .trim() === 'GENERIC'
-            )
-            .sort(
-              (a: any, b: any) =>
-                Number(b?.sold_weekly || 0) - Number(a?.sold_weekly || 0)
+            .filter((p: any) => String(p?.item_type || '').toUpperCase().trim() === 'GENERIC')
+            .sort((a: any, b: any) => 
+              (a?.item_name || '').localeCompare(b?.item_name || '')
             )
             .slice(0, 20);
 
           const brandedItems = meaningfulItems
-            .filter(
-              (p: any) =>
-                String(p?.item_type || '')
-                  .toUpperCase()
-                  .trim() === 'BRANDED'
-            )
-            .sort(
-              (a: any, b: any) =>
-                Number(b?.sold_weekly || 0) - Number(a?.sold_weekly || 0)
+            .filter((p: any) => String(p?.item_type || '').toUpperCase().trim() === 'BRANDED')
+            .sort((a: any, b: any) => 
+              (a?.item_name || '').localeCompare(b?.item_name || '')
             )
             .slice(0, 10);
 
@@ -229,26 +211,22 @@ export async function GET(request: Request) {
           }
           branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
 
-          // Send
           try {
-            await fetch(
-              `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-              {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  chat_id: group.chatId,
-                  text: branchMessage,
-                  parse_mode: 'HTML',
-                }),
-              }
-            );
+            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: group.chatId,
+                text: branchMessage,
+                parse_mode: 'HTML',
+              }),
+            });
             console.log(`✅ Sent to ${b.branch_name}`);
           } catch (err) {
             console.error(`❌ Send failed:`, err);
           }
         }
-      } else {
+      }else {
         let header = '';
         switch (type) {
           case 'REPORT_CHECKER':
