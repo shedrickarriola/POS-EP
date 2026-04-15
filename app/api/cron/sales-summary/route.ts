@@ -76,7 +76,8 @@ export async function GET(request: Request) {
       supabaseAdmin
         .from('inventory')
         .select('*')
-        .order('sold_weekly', { ascending: false }),
+        .order('sold_weekly', { ascending: false })
+        .range(0, 9999),
     ]);
 
     // 2. STAFF MAPPING
@@ -149,68 +150,58 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        console.log('🚀 STOCK_ADVISORY - HEAVY DEBUG for your 500-sold item');
+        console.log(
+          '🚀 STOCK_ADVISORY - querying inventory PER BRANCH (13k+ rows safe)'
+        );
 
         for (const b of group.branches) {
-          const branchInventory = (products || []).filter(
-            (p: any) => String(p?.branch_id) === String(b?.id)
-          );
+          // ← Query only this branch's inventory
+          const { data: branchInventory } = await supabaseAdmin
+            .from('inventory')
+            .select('*')
+            .eq('branch_id', b.id)
+            .order('sold_weekly', { ascending: false });
 
           console.log(
-            `📍 Branch: ${b?.branch_name} | Total items loaded: ${branchInventory.length}`
+            `📍 Branch: ${b?.branch_name} | Items loaded: ${
+              branchInventory?.length || 0
+            }`
           );
 
-          // === DEBUG: Show every item with sold_weekly >= 100 ===
-          const highSold = branchInventory.filter(
-            (p) => Number(p?.sold_weekly || 0) >= 100
-          );
-          console.log(`   🔥 High sold_weekly items found: ${highSold.length}`);
-
-          highSold.forEach((p: any) => {
+          const meaningfulItems = (branchInventory || []).filter((p: any) => {
             const sold = Number(p?.sold_weekly || 0);
             const stock = Number(p?.stock || 0);
-            console.log(
-              `     → ${
-                p?.item_name
-              } | sold=${sold} | stock=${stock} | item_type=${
-                p?.item_type || 'null'
-              }`
-            );
+            return sold > 0 && stock < sold * 3; // you can change *3 back to *2 later
           });
 
-          // === YOUR CRITERIA ===
-          const toOrder = branchInventory
-            .filter((p: any) => {
-              const sold = Number(p?.sold_weekly || 0);
-              const stock = Number(p?.stock || 0);
-              return sold > 0 && stock < sold * 2;
-            })
+          const genericItems = meaningfulItems
+            .filter(
+              (p: any) =>
+                String(p?.item_type || '')
+                  .toUpperCase()
+                  .trim() === 'GENERIC'
+            )
             .sort(
               (a: any, b: any) =>
                 Number(b?.sold_weekly || 0) - Number(a?.sold_weekly || 0)
             )
-            .slice(0, 30);
+            .slice(0, 20);
 
-          console.log(
-            `   → Items that passed "stock < sold_weekly * 2": ${toOrder.length}`
-          );
+          const brandedItems = meaningfulItems
+            .filter(
+              (p: any) =>
+                String(p?.item_type || '')
+                  .toUpperCase()
+                  .trim() === 'BRANDED'
+            )
+            .sort(
+              (a: any, b: any) =>
+                Number(b?.sold_weekly || 0) - Number(a?.sold_weekly || 0)
+            )
+            .slice(0, 10);
 
-          // === MESSAGE BUILDING ===
           let branchMessage = `<b>📦 TOP TO RESTOCK</b>\n`;
           branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
-
-          const genericItems = toOrder.filter(
-            (p) =>
-              String(p?.item_type || '')
-                .toUpperCase()
-                .trim() === 'GENERIC'
-          );
-          const brandedItems = toOrder.filter(
-            (p) =>
-              String(p?.item_type || '')
-                .toUpperCase()
-                .trim() === 'BRANDED'
-          );
 
           branchMessage += `<b>🟦 GENERIC ITEMS</b>\n`;
           if (genericItems.length > 0) {
