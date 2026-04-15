@@ -149,60 +149,70 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        console.log('🚀 Starting STOCK_ADVISORY message build...');
+        console.log(
+          '🚀 STOCK_ADVISORY - sending per branch to avoid char limit'
+        );
 
-        message = `<b>📦 TOP 30 ITEMS TO RESTOCK</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
+        group.branches.forEach(async (b: any) => {
+          // ← note: async
+          const branchInventory = (products || []).filter(
+            (p: any) => String(p?.branch_id) === String(b?.id)
+          );
 
-        group.branches.forEach((b: any) => {
-          try {
-            const branchInventory = (products || []).filter(
-              (p: any) => String(p?.branch_id) === String(b?.id)
-            );
+          const toOrder = branchInventory
+            .sort((a: any, b: any) => {
+              const stockA = Number(a?.stock || 0);
+              const stockB = Number(b?.stock || 0);
+              const soldA = Number(a?.sold_weekly || 0);
+              const soldB = Number(b?.sold_weekly || 0);
 
-            console.log(
-              `   📍 Branch: ${b?.branch_name} → ${branchInventory.length} items`
-            );
+              if (stockA <= 0 && stockB > 0) return -1;
+              if (stockB <= 0 && stockA > 0) return 1;
+              if (soldB !== soldA) return soldB - soldA;
+              return stockA - stockB;
+            })
+            .slice(0, 30);
 
-            const toOrder = branchInventory
-              .sort((a: any, b: any) => {
-                const stockA = Number(a?.stock || 0);
-                const stockB = Number(b?.stock || 0);
-                const soldA = Number(a?.sold_weekly || 0);
-                const soldB = Number(b?.sold_weekly || 0);
+          let branchMessage = `<b>📦 TOP 30 TO RESTOCK</b>\n`;
+          branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
 
-                if (stockA <= 0 && stockB > 0) return -1;
-                if (stockB <= 0 && stockA > 0) return 1;
-                if (soldB !== soldA) return soldB - soldA;
-                return stockA - stockB;
-              })
-              .slice(0, 30);
-
-            message += `<b>📍 ${
-              b?.branch_name?.toUpperCase() || 'Unknown Branch'
-            }</b>\n`;
-
-            if (toOrder.length > 0) {
-              toOrder.forEach((p: any) => {
-                const stock = Number(p?.stock || 0);
-                const sold = Number(p?.sold_weekly || 0);
-                const icon = stock <= 0 ? '🚨' : '⚠️';
-                const itemName = p?.item_name || 'Unnamed Item';
-                message += `${icon} ${itemName}: ${stock} left (Sold ${sold}/wk)\n`;
-              });
-            } else {
-              message += `✅ <i>No inventory data for this branch</i>\n`;
-            }
-          } catch (branchErr) {
-            console.error(
-              `Error processing branch ${b?.branch_name}:`,
-              branchErr
-            );
-            message += `⚠️ Error processing this branch\n`;
+          if (toOrder.length > 0) {
+            toOrder.forEach((p: any) => {
+              const stock = Number(p?.stock || 0);
+              const sold = Number(p?.sold_weekly || 0);
+              const icon = stock <= 0 ? '🚨' : '⚠️';
+              const itemName = p?.item_name || 'Unnamed Item';
+              branchMessage += `${icon} ${itemName}: ${stock} left (Sold ${sold}/wk)\n`;
+            });
+          } else {
+            branchMessage += `✅ <i>No inventory data</i>\n`;
           }
-          message += `━━━━━━━━━━━━━━━━━━\n`;
+          branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
+
+          // Send immediately (one message per branch)
+          try {
+            const response = await fetch(
+              `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: group.chatId,
+                  text: branchMessage,
+                  parse_mode: 'HTML',
+                }),
+              }
+            );
+            const result = await response.json();
+            console.log(
+              `✅ Sent to ${b.branch_name}: ${result.ok ? 'OK' : 'FAILED'}`
+            );
+          } catch (err) {
+            console.error(`❌ Failed to send for ${b.branch_name}:`, err);
+          }
         });
 
-        console.log('✅ STOCK_ADVISORY message built successfully');
+        return; // ← important: skip the old send code below
       } else {
         let header = '';
         switch (type) {
