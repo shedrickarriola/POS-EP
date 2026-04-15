@@ -149,25 +149,41 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        message = `<b>📦 WEEKLY STOCK RECOMMENDATIONS</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
+        message = `<b>📦 TOP 30 ITEMS TO RESTOCK</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
+
         group.branches.forEach((b: any) => {
           const toOrder = products
-            ?.filter(
-              (p: any) =>
-                p.branch_id === b.id &&
-                (Number(p.stock) <= Number(p.sold_weekly || 0) ||
-                  Number(p.stock) < 5)
-            )
-            .slice(0, 10);
+            ?.filter((p: any) => p.branch_id === b.id)
+            .sort((a: any, b: any) => {
+              const stockA = Number(a.stock || 0);
+              const stockB = Number(b.stock || 0);
+              const soldA = Number(a.sold_weekly || 0);
+              const soldB = Number(b.sold_weekly || 0);
+
+              // Most urgent first
+              if (stockA <= 0 && stockB > 0) return -1;
+              if (stockB <= 0 && stockA > 0) return 1;
+
+              // Highest sold_weekly next
+              if (soldB !== soldA) return soldB - soldA;
+
+              // Lowest stock as tie-breaker
+              return stockA - stockB;
+            })
+            .slice(0, 30);
 
           message += `<b>📍 ${b.branch_name.toUpperCase()}</b>\n`;
+
           if (toOrder && toOrder.length > 0) {
             toOrder.forEach((p: any) => {
-              const icon = Number(p.stock) <= 0 ? '🚨' : '⚠️';
-              message += `${icon} ${p.name}: ${p.stock} left (Sold ${p.sold_weekly}/wk)\n`;
+              const stock = Number(p.stock || 0);
+              const sold = Number(p.sold_weekly || 0);
+              const icon = stock <= 0 ? '🚨' : '⚠️';
+              const itemName = p.item_name || 'Unnamed Item';
+              message += `${icon} ${itemName}: ${stock} left (Sold ${sold}/wk)\n`;
             });
           } else {
-            message += `✅ <i>Stock levels healthy</i>\n`;
+            message += `✅ <i>No inventory data for this branch</i>\n`;
           }
           message += `━━━━━━━━━━━━━━━━━━\n`;
         });
