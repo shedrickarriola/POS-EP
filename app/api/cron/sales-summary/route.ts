@@ -155,16 +155,16 @@ export async function GET(request: Request) {
             ?.filter(
               (p: any) =>
                 p.branch_id === b.id &&
-                (Number(p.current_stock) <= Number(p.sold_weekly || 0) ||
-                  Number(p.current_stock) < 5)
+                (Number(p.stock) <= Number(p.sold_weekly || 0) ||
+                  Number(p.stock) < 5)
             )
             .slice(0, 10);
 
           message += `<b>📍 ${b.branch_name.toUpperCase()}</b>\n`;
           if (toOrder && toOrder.length > 0) {
             toOrder.forEach((p: any) => {
-              const icon = Number(p.current_stock) <= 0 ? '🚨' : '⚠️';
-              message += `${icon} ${p.name}: ${p.current_stock} left (Sold ${p.sold_weekly}/wk)\n`;
+              const icon = Number(p.stock) <= 0 ? '🚨' : '⚠️';
+              message += `${icon} ${p.name}: ${p.stock} left (Sold ${p.sold_weekly}/wk)\n`;
             });
           } else {
             message += `✅ <i>Stock levels healthy</i>\n`;
