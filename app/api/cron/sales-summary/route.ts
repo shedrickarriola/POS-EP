@@ -149,7 +149,7 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        console.log('🚀 STOCK_ADVISORY DEBUG STARTED');
+        console.log('🚀 STOCK_ADVISORY - FIXED VERSION (stock < sold*2)');
 
         for (const b of group.branches) {
           const branchInventory = (products || []).filter(
@@ -157,38 +157,41 @@ export async function GET(request: Request) {
           );
 
           console.log(
-            `📍 Branch: ${b.branch_name} | Total items: ${branchInventory.length}`
-          );
-
-          // Count how many items have sales this week
-          const itemsWithSales = branchInventory.filter(
-            (p) => Number(p?.sold_weekly || 0) > 0
-          );
-          console.log(
-            `   → Items with sold_weekly > 0: ${itemsWithSales.length}`
+            `📍 Branch: ${b?.branch_name} | Total items loaded: ${branchInventory.length}`
           );
 
           const meaningfulItems = branchInventory.filter((p: any) => {
             const sold = Number(p?.sold_weekly || 0);
-            const stock = Number(p?.stock || 0);
-            // More lenient for now: stock < sold_weekly * 3
-            return sold > 0 && stock < sold * 3;
+            const stock = Number(p?.stock || p?.stock_quantity || 0); // ← safe for both columns
+            const needsRestock = sold > 0 && stock < sold * 2;
+
+            // Debug high-volume items
+            if (sold >= 100) {
+              console.log(
+                `   🔥 HIGH VOLUME ITEM → ${p?.item_name} | Sold: ${sold} | Stock: ${stock} | Needs restock: ${needsRestock}`
+              );
+            }
+
+            return needsRestock;
           });
 
           console.log(
-            `   → Items that meet criteria (stock < sold*3): ${meaningfulItems.length}`
+            `   → Items that meet "stock < sold_weekly * 2": ${meaningfulItems.length}`
           );
 
-          // Split into Generic and Branded
+          // Split into Generic and Branded (case-insensitive)
           const genericItems = meaningfulItems
             .filter(
-              (p: any) => String(p?.item_type || '').toUpperCase() === 'GENERIC'
+              (p: any) =>
+                String(p?.item_type || '')
+                  .toUpperCase()
+                  .trim() === 'GENERIC'
             )
             .sort((a: any, b: any) => {
               const soldA = Number(a?.sold_weekly || 0);
               const soldB = Number(b?.sold_weekly || 0);
-              const stockA = Number(a?.stock || 0);
-              const stockB = Number(b?.stock || 0);
+              const stockA = Number(a?.stock || a?.stock_quantity || 0);
+              const stockB = Number(b?.stock || b?.stock_quantity || 0);
               if (soldB !== soldA) return soldB - soldA;
               if (stockA !== stockB) return stockA - stockB;
               return (a?.item_name || '').localeCompare(b?.item_name || '');
@@ -197,26 +200,30 @@ export async function GET(request: Request) {
 
           const brandedItems = meaningfulItems
             .filter(
-              (p: any) => String(p?.item_type || '').toUpperCase() === 'BRANDED'
+              (p: any) =>
+                String(p?.item_type || '')
+                  .toUpperCase()
+                  .trim() === 'BRANDED'
             )
             .sort((a: any, b: any) => {
               const soldA = Number(a?.sold_weekly || 0);
               const soldB = Number(b?.sold_weekly || 0);
-              const stockA = Number(a?.stock || 0);
-              const stockB = Number(b?.stock || 0);
+              const stockA = Number(a?.stock || a?.stock_quantity || 0);
+              const stockB = Number(b?.stock || b?.stock_quantity || 0);
               if (soldB !== soldA) return soldB - soldA;
               if (stockA !== stockB) return stockA - stockB;
               return (a?.item_name || '').localeCompare(b?.item_name || '');
             })
             .slice(0, 10);
 
+          // Build message
           let branchMessage = `<b>📦 TOP TO RESTOCK</b>\n`;
           branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
 
           branchMessage += `<b>🟦 GENERIC ITEMS</b>\n`;
           if (genericItems.length > 0) {
             genericItems.forEach((p: any) => {
-              const stock = Number(p?.stock || 0);
+              const stock = Number(p?.stock || p?.stock_quantity || 0);
               const sold = Number(p?.sold_weekly || 0);
               const icon = stock <= 0 ? '🚨' : '⚠️';
               branchMessage += `${icon} ${p?.item_name}: ${stock} left (Sold ${sold}/wk)\n`;
@@ -229,7 +236,7 @@ export async function GET(request: Request) {
           branchMessage += `<b>🟪 BRANDED ITEMS</b>\n`;
           if (brandedItems.length > 0) {
             brandedItems.forEach((p: any) => {
-              const stock = Number(p?.stock || 0);
+              const stock = Number(p?.stock || p?.stock_quantity || 0);
               const sold = Number(p?.sold_weekly || 0);
               const icon = stock <= 0 ? '🚨' : '⚠️';
               branchMessage += `${icon} ${p?.item_name}: ${stock} left (Sold ${sold}/wk)\n`;
@@ -239,7 +246,7 @@ export async function GET(request: Request) {
           }
           branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
 
-          // Send message
+          // Send
           try {
             await fetch(
               `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
@@ -255,11 +262,9 @@ export async function GET(request: Request) {
             );
             console.log(`✅ Sent advisory for ${b.branch_name}`);
           } catch (err) {
-            console.error(`❌ Send failed for ${b.branch_name}:`, err);
+            console.error(`❌ Send failed:`, err);
           }
         }
-
-        console.log('✅ STOCK_ADVISORY DEBUG FINISHED');
       } else {
         let header = '';
         switch (type) {
