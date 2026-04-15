@@ -74,7 +74,7 @@ export async function GET(request: Request) {
         .or('is_checked.eq.false,is_checked.is.null'),
 
       supabaseAdmin
-        .from('products')
+        .from('inventory')
         .select('*')
         .order('sold_weekly', { ascending: false }),
     ]);
