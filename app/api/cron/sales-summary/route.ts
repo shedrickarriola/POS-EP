@@ -149,7 +149,7 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        console.log('🚀 STOCK_ADVISORY DEBUG - Checking raw inventory data');
+        console.log('🚀 STOCK_ADVISORY - SIMPLE TOP 30 BY SOLD (no filter)');
 
         for (const b of group.branches) {
           const branchInventory = (products || []).filter(
@@ -157,52 +157,20 @@ export async function GET(request: Request) {
           );
 
           console.log(
-            `📍 Branch: ${b?.branch_name} | Total items loaded: ${branchInventory.length}`
+            `📍 Branch: ${b?.branch_name} | Total items: ${branchInventory.length}`
           );
 
-          // Show structure of the first item
-          if (branchInventory.length > 0) {
-            console.log(`   First item keys:`, Object.keys(branchInventory[0]));
-          }
-
-          // Show top 5 highest sold_weekly items (so we can see real values)
-          const topSold = [...branchInventory]
+          const toOrder = branchInventory
             .sort(
-              (a, b) =>
+              (a: any, b: any) =>
                 Number(b?.sold_weekly || 0) - Number(a?.sold_weekly || 0)
             )
-            .slice(0, 5);
-
-          console.log(`   Top 5 highest sold_weekly items:`);
-          topSold.forEach((p: any) => {
-            console.log(
-              `     → ${p?.item_name} | sold_weekly=${p?.sold_weekly} | stock=${p?.stock} | stock_quantity=${p?.stock_quantity} | item_type=${p?.item_type}`
-            );
-          });
-
-          // Your filter
-          const toOrder = branchInventory
-            .filter((p: any) => {
-              const sold = Number(p?.sold_weekly || 0);
-              const stock = Number(p?.stock || 0); // you confirmed it's "stock"
-              return sold > 0 && stock < sold * 2;
-            })
-            .sort((a: any, b: any) => {
-              const soldA = Number(a?.sold_weekly || 0);
-              const soldB = Number(b?.sold_weekly || 0);
-              const stockA = Number(a?.stock || 0);
-              const stockB = Number(b?.stock || 0);
-              if (soldB !== soldA) return soldB - soldA;
-              if (stockA !== stockB) return stockA - stockB;
-              return (a?.item_name || '').localeCompare(b?.item_name || '');
-            })
             .slice(0, 30);
 
           console.log(
-            `   → Items meeting "stock < sold_weekly * 2": ${toOrder.length}`
+            `   → Showing top ${toOrder.length} highest sold_weekly items`
           );
 
-          // Build message
           let branchMessage = `<b>📦 TOP 30 TO RESTOCK</b>\n`;
           branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
 
@@ -215,7 +183,7 @@ export async function GET(request: Request) {
               branchMessage += `${icon} ${itemName}: ${stock} left (Sold ${sold}/wk)\n`;
             });
           } else {
-            branchMessage += `✅ No items need restock this week\n`;
+            branchMessage += `✅ No items found in inventory\n`;
           }
           branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
 
