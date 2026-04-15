@@ -149,34 +149,28 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        message = `<b>📦 WEEKLY STOCK RECOMMENDATIONS (Top 30)</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
+        message = `<b>📦 TOP 30 ITEMS TO RESTOCK</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
 
         group.branches.forEach((b: any) => {
           const toOrder = products
             ?.filter((p: any) => p.branch_id === b.id)
-            .filter((p: any) => {
-              const stock = Number(p.stock || 0);
-              const sold = Number(p.sold_weekly || 0);
-              // Shows items that need re-ordering even right after weekly reset
-              return stock < 30 || stock <= sold || stock < 5;
-            })
             .sort((a: any, b: any) => {
               const stockA = Number(a.stock || 0);
               const stockB = Number(b.stock || 0);
               const soldA = Number(a.sold_weekly || 0);
               const soldB = Number(b.sold_weekly || 0);
 
-              // 1. Out-of-stock first (most urgent)
+              // 1. Out-of-stock items FIRST (most urgent)
               if (stockA <= 0 && stockB > 0) return -1;
               if (stockB <= 0 && stockA > 0) return 1;
 
-              // 2. Highest sold_weekly first
+              // 2. Highest sold_weekly next
               if (soldB !== soldA) return soldB - soldA;
 
-              // 3. Lowest stock as tie-breaker
+              // 3. Lowest stock as final tie-breaker
               return stockA - stockB;
             })
-            .slice(0, 30); // exactly 30 items
+            .slice(0, 30); // ← Always top 30
 
           message += `<b>📍 ${b.branch_name.toUpperCase()}</b>\n`;
 
@@ -189,7 +183,7 @@ export async function GET(request: Request) {
               message += `${icon} ${itemName}: ${stock} left (Sold ${sold}/wk)\n`;
             });
           } else {
-            message += `✅ <i>Stock levels healthy</i>\n`;
+            message += `✅ <i>No products found for this branch</i>\n`;
           }
           message += `━━━━━━━━━━━━━━━━━━\n`;
         });
