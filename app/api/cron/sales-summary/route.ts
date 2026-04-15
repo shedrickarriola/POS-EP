@@ -149,18 +149,17 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        console.log('🚀 STOCK_ADVISORY - GENERIC vs BRANDED separated');
+        console.log('🚀 STOCK_ADVISORY - using stock < sold_weekly * 2');
 
         for (const b of group.branches) {
           const branchInventory = (products || []).filter(
             (p: any) => String(p?.branch_id) === String(b?.id)
           );
 
-          // Filter meaningful items only
           const meaningfulItems = branchInventory.filter((p: any) => {
             const sold = Number(p?.sold_weekly || 0);
             const stock = Number(p?.stock || 0);
-            return sold > 0 && stock < 30; // ← only items that actually sold this week
+            return sold > 0 && stock < sold * 2; // ← YOUR NEW RULE
           });
 
           // Split into Generic and Branded
@@ -194,7 +193,6 @@ export async function GET(request: Request) {
             })
             .slice(0, 10);
 
-          // Build message with clear sections
           let branchMessage = `<b>📦 TOP TO RESTOCK</b>\n`;
           branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
 
