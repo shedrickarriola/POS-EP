@@ -149,42 +149,69 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        console.log(
-          '🚀 STOCK_ADVISORY - Top 30 by sold_weekly + GENERIC/BRANDED split'
-        );
+        console.log('🚀 STOCK_ADVISORY - HEAVY DEBUG for your 500-sold item');
 
         for (const b of group.branches) {
           const branchInventory = (products || []).filter(
             (p: any) => String(p?.branch_id) === String(b?.id)
           );
 
-          // Top 30 highest sold_weekly (this part was already working)
+          console.log(
+            `📍 Branch: ${b?.branch_name} | Total items loaded: ${branchInventory.length}`
+          );
+
+          // === DEBUG: Show every item with sold_weekly >= 100 ===
+          const highSold = branchInventory.filter(
+            (p) => Number(p?.sold_weekly || 0) >= 100
+          );
+          console.log(`   🔥 High sold_weekly items found: ${highSold.length}`);
+
+          highSold.forEach((p: any) => {
+            const sold = Number(p?.sold_weekly || 0);
+            const stock = Number(p?.stock || 0);
+            console.log(
+              `     → ${
+                p?.item_name
+              } | sold=${sold} | stock=${stock} | item_type=${
+                p?.item_type || 'null'
+              }`
+            );
+          });
+
+          // === YOUR CRITERIA ===
           const toOrder = branchInventory
+            .filter((p: any) => {
+              const sold = Number(p?.sold_weekly || 0);
+              const stock = Number(p?.stock || 0);
+              return sold > 0 && stock < sold * 2;
+            })
             .sort(
               (a: any, b: any) =>
                 Number(b?.sold_weekly || 0) - Number(a?.sold_weekly || 0)
             )
             .slice(0, 30);
 
-          // Split into Generic and Branded
+          console.log(
+            `   → Items that passed "stock < sold_weekly * 2": ${toOrder.length}`
+          );
+
+          // === MESSAGE BUILDING ===
+          let branchMessage = `<b>📦 TOP TO RESTOCK</b>\n`;
+          branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
+
           const genericItems = toOrder.filter(
-            (p: any) =>
+            (p) =>
               String(p?.item_type || '')
                 .toUpperCase()
                 .trim() === 'GENERIC'
           );
-
           const brandedItems = toOrder.filter(
-            (p: any) =>
+            (p) =>
               String(p?.item_type || '')
                 .toUpperCase()
                 .trim() === 'BRANDED'
           );
 
-          let branchMessage = `<b>📦 TOP 30 TO RESTOCK</b>\n`;
-          branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
-
-          // GENERIC SECTION
           branchMessage += `<b>🟦 GENERIC ITEMS</b>\n`;
           if (genericItems.length > 0) {
             genericItems.forEach((p: any) => {
@@ -194,11 +221,10 @@ export async function GET(request: Request) {
               branchMessage += `${icon} ${p?.item_name}: ${stock} left (Sold ${sold}/wk)\n`;
             });
           } else {
-            branchMessage += `✅ No generic items\n`;
+            branchMessage += `✅ No generic items need restock\n`;
           }
           branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
 
-          // BRANDED SECTION
           branchMessage += `<b>🟪 BRANDED ITEMS</b>\n`;
           if (brandedItems.length > 0) {
             brandedItems.forEach((p: any) => {
@@ -208,7 +234,7 @@ export async function GET(request: Request) {
               branchMessage += `${icon} ${p?.item_name}: ${stock} left (Sold ${sold}/wk)\n`;
             });
           } else {
-            branchMessage += `✅ No branded items\n`;
+            branchMessage += `✅ No branded items need restock\n`;
           }
           branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
 
