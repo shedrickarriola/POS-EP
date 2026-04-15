@@ -151,17 +151,16 @@ export async function GET(request: Request) {
       if (type === 'STOCK_ADVISORY') {
         console.log('🚀 STOCK_ADVISORY - improved priority sorting');
 
-        group.branches.forEach(async (b: any) => {
+        for (const b of group.branches) {
           const branchInventory = (products || []).filter(
             (p: any) => String(p?.branch_id) === String(b?.id)
           );
 
-          // Filter + Sort: meaningful items only
           const toOrder = branchInventory
             .filter((p: any) => {
               const sold = Number(p?.sold_weekly || 0);
               const stock = Number(p?.stock || 0);
-              return sold > 0 || stock < 10; // ← only meaningful items
+              return sold > 0 || stock < 10; // only meaningful items
             })
             .sort((a: any, b: any) => {
               const soldA = Number(a?.sold_weekly || 0);
@@ -169,10 +168,10 @@ export async function GET(request: Request) {
               const stockA = Number(a?.stock || 0);
               const stockB = Number(b?.stock || 0);
 
-              // 1. Highest sold_weekly first
+              // 1. Highest sold first
               if (soldB !== soldA) return soldB - soldA;
 
-              // 2. Then lowest stock
+              // 2. Lowest stock next
               if (stockA !== stockB) return stockA - stockB;
 
               // 3. Alphabetical by item_name
@@ -217,9 +216,7 @@ export async function GET(request: Request) {
           } catch (err) {
             console.error(`❌ Failed to send for ${b.branch_name}:`, err);
           }
-        });
-
-        return; // skip old send code
+        }
       } else {
         let header = '';
         switch (type) {
