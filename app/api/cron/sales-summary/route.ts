@@ -149,27 +149,34 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        console.log(
-          '🚀 STOCK_ADVISORY - sending per branch to avoid char limit'
-        );
+        console.log('🚀 STOCK_ADVISORY - improved priority sorting');
 
         group.branches.forEach(async (b: any) => {
-          // ← note: async
           const branchInventory = (products || []).filter(
             (p: any) => String(p?.branch_id) === String(b?.id)
           );
 
+          // Filter + Sort: meaningful items only
           const toOrder = branchInventory
+            .filter((p: any) => {
+              const sold = Number(p?.sold_weekly || 0);
+              const stock = Number(p?.stock || 0);
+              return sold > 0 || stock < 10; // ← only meaningful items
+            })
             .sort((a: any, b: any) => {
-              const stockA = Number(a?.stock || 0);
-              const stockB = Number(b?.stock || 0);
               const soldA = Number(a?.sold_weekly || 0);
               const soldB = Number(b?.sold_weekly || 0);
+              const stockA = Number(a?.stock || 0);
+              const stockB = Number(b?.stock || 0);
 
-              if (stockA <= 0 && stockB > 0) return -1;
-              if (stockB <= 0 && stockA > 0) return 1;
+              // 1. Highest sold_weekly first
               if (soldB !== soldA) return soldB - soldA;
-              return stockA - stockB;
+
+              // 2. Then lowest stock
+              if (stockA !== stockB) return stockA - stockB;
+
+              // 3. Alphabetical by item_name
+              return (a?.item_name || '').localeCompare(b?.item_name || '');
             })
             .slice(0, 30);
 
@@ -185,11 +192,11 @@ export async function GET(request: Request) {
               branchMessage += `${icon} ${itemName}: ${stock} left (Sold ${sold}/wk)\n`;
             });
           } else {
-            branchMessage += `✅ <i>No inventory data</i>\n`;
+            branchMessage += `✅ <i>All stock levels healthy this week</i>\n`;
           }
           branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
 
-          // Send immediately (one message per branch)
+          // Send one message per branch
           try {
             const response = await fetch(
               `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
@@ -212,7 +219,7 @@ export async function GET(request: Request) {
           }
         });
 
-        return; // ← important: skip the old send code below
+        return; // skip old send code
       } else {
         let header = '';
         switch (type) {
