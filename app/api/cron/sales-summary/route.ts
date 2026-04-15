@@ -149,41 +149,59 @@ export async function GET(request: Request) {
       let message = '';
 
       if (type === 'STOCK_ADVISORY') {
-        console.log('🚀 STOCK_ADVISORY - improved priority sorting');
+        console.log('🚀 STOCK_ADVISORY - GENERIC vs BRANDED separated');
 
         for (const b of group.branches) {
           const branchInventory = (products || []).filter(
             (p: any) => String(p?.branch_id) === String(b?.id)
           );
 
-          const toOrder = branchInventory
-            .filter((p: any) => {
-              const sold = Number(p?.sold_weekly || 0);
-              const stock = Number(p?.stock || 0);
-              return sold > 0 || stock < 10; // only meaningful items
-            })
+          // Filter meaningful items only
+          const meaningfulItems = branchInventory.filter((p: any) => {
+            const sold = Number(p?.sold_weekly || 0);
+            const stock = Number(p?.stock || 0);
+            return sold > 0 && stock < 30; // ← only items that actually sold this week
+          });
+
+          // Split into Generic and Branded
+          const genericItems = meaningfulItems
+            .filter(
+              (p: any) => String(p?.item_type || '').toUpperCase() === 'GENERIC'
+            )
             .sort((a: any, b: any) => {
               const soldA = Number(a?.sold_weekly || 0);
               const soldB = Number(b?.sold_weekly || 0);
               const stockA = Number(a?.stock || 0);
               const stockB = Number(b?.stock || 0);
-
-              // 1. Highest sold first
               if (soldB !== soldA) return soldB - soldA;
-
-              // 2. Lowest stock next
               if (stockA !== stockB) return stockA - stockB;
-
-              // 3. Alphabetical by item_name
               return (a?.item_name || '').localeCompare(b?.item_name || '');
             })
-            .slice(0, 30);
+            .slice(0, 20);
 
-          let branchMessage = `<b>📦 TOP 30 TO RESTOCK</b>\n`;
+          const brandedItems = meaningfulItems
+            .filter(
+              (p: any) => String(p?.item_type || '').toUpperCase() === 'BRANDED'
+            )
+            .sort((a: any, b: any) => {
+              const soldA = Number(a?.sold_weekly || 0);
+              const soldB = Number(b?.sold_weekly || 0);
+              const stockA = Number(a?.stock || 0);
+              const stockB = Number(b?.stock || 0);
+              if (soldB !== soldA) return soldB - soldA;
+              if (stockA !== stockB) return stockA - stockB;
+              return (a?.item_name || '').localeCompare(b?.item_name || '');
+            })
+            .slice(0, 10);
+
+          // Build message with clear sections
+          let branchMessage = `<b>📦 TOP TO RESTOCK</b>\n`;
           branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
 
-          if (toOrder.length > 0) {
-            toOrder.forEach((p: any) => {
+          // GENERIC SECTION
+          branchMessage += `<b>🟦 GENERIC ITEMS</b>\n`;
+          if (genericItems.length > 0) {
+            genericItems.forEach((p: any) => {
               const stock = Number(p?.stock || 0);
               const sold = Number(p?.sold_weekly || 0);
               const icon = stock <= 0 ? '🚨' : '⚠️';
@@ -191,7 +209,22 @@ export async function GET(request: Request) {
               branchMessage += `${icon} ${itemName}: ${stock} left (Sold ${sold}/wk)\n`;
             });
           } else {
-            branchMessage += `✅ <i>All stock levels healthy this week</i>\n`;
+            branchMessage += `✅ No generic items need restock\n`;
+          }
+          branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
+
+          // BRANDED SECTION
+          branchMessage += `<b>🟪 BRANDED ITEMS</b>\n`;
+          if (brandedItems.length > 0) {
+            brandedItems.forEach((p: any) => {
+              const stock = Number(p?.stock || 0);
+              const sold = Number(p?.sold_weekly || 0);
+              const icon = stock <= 0 ? '🚨' : '⚠️';
+              const itemName = p?.item_name || 'Unnamed Item';
+              branchMessage += `${icon} ${itemName}: ${stock} left (Sold ${sold}/wk)\n`;
+            });
+          } else {
+            branchMessage += `✅ No branded items need restock\n`;
           }
           branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
 
