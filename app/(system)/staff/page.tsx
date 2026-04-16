@@ -330,6 +330,12 @@ export default function StaffDashboard() {
             const parsedBranch = JSON.parse(savedBranch);
             setSelectedBranch(parsedBranch);
             await checkNewSalePermission(parsedBranch.id);
+            if (profile?.id) {
+              await supabase
+                .from('profiles')
+                .update({ active_branch_id: branch.id })
+                .eq('id', profile.id);
+            }
             // --- TRIGGER INITIAL LOGIN LOG ---
             logSystemActivity(
               'LOGIN',
@@ -496,6 +502,12 @@ export default function StaffDashboard() {
     setSelectedBranch(branch);
     localStorage.setItem('active_branch', JSON.stringify(branch));
 
+    if (profile?.id) {
+      await supabase
+        .from('profiles')
+        .update({ active_branch_id: branch.id })
+        .eq('id', profile.id);
+    }
     // Reset UI immediately
     setCanCreateNewSale(true); // ← Default to true
     setBlockingReason('');
