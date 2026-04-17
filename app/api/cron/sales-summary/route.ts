@@ -352,7 +352,7 @@ export async function GET(request: Request) {
           message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
 
           if (type === 'REPORT_CHECKER') {
-            message += `• Reports: ${stats.pendingDRs} | Orders: ${stats.pendingOrders}\n`;
+            message += `• Reports : ${stats.pendingDRs} | Orders: ${stats.pendingOrders}\n`;
             if (stats.pendingPOs > 0)
               message += `• PO Verification: ${stats.pendingPOs}\n`;
             if (!hasPending) message += `• <i>No pending tasks</i>\n`;
