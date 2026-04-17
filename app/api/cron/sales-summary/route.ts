@@ -212,7 +212,7 @@ export async function GET(request: Request) {
             genericItems.forEach((p: any) => {
               const stock = Number(p?.stock || 0);
               const sold = Number(p?.sold_weekly || 0);
-              const icon = stock <= 0 ? '🚨' : '-';
+              const icon = stock <= 0 ? '🚨' : '>';
               branchMessage += `${icon} ${p?.item_name}: ${stock} left (Sold ${sold}/wk)\n`;
             });
           } else {
@@ -225,7 +225,7 @@ export async function GET(request: Request) {
             brandedItems.forEach((p: any) => {
               const stock = Number(p?.stock || 0);
               const sold = Number(p?.sold_weekly || 0);
-              const icon = stock <= 0 ? '🚨' : '-';
+              const icon = stock <= 0 ? '🚨' : '>';
               branchMessage += `${icon} ${p?.item_name}: ${stock} left (Sold ${sold}/wk)\n`;
             });
           } else {
@@ -259,7 +259,7 @@ export async function GET(request: Request) {
             genericItems.forEach((p: any) => {
               const stock = Number(p?.stock || 0);
               const sold = Number(p?.sold_weekly || 0);
-              const icon = stock <= 0 ? '🚨' : '-';
+              const icon = stock <= 0 ? '🚨' : '>';
               fullEmailHtml += `${icon} ${p?.item_name}: ${stock} left (Sold ${sold}/wk)<br>`;
             });
           } else {
@@ -272,7 +272,7 @@ export async function GET(request: Request) {
             brandedItems.forEach((p: any) => {
               const stock = Number(p?.stock || 0);
               const sold = Number(p?.sold_weekly || 0);
-              const icon = stock <= 0 ? '🚨' : '-';
+              const icon = stock <= 0 ? '🚨' : '>';
               fullEmailHtml += `${icon} ${p?.item_name}: ${stock} left (Sold ${sold}/wk)<br>`;
             });
           } else {
@@ -387,7 +387,7 @@ export async function GET(request: Request) {
 
     return NextResponse.json({ success: true });
   } catch (err: any) {
-    console.error('Telegram Report Error :', err);
+    console.error('Telegram Report Error:', err);
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
