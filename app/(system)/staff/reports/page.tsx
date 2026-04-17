@@ -63,7 +63,7 @@ export default function ReportsAuditPage() {
 
     let activeBranch: any = null;
 
-    // Priority 1: localStorage (your original behavior)
+    // Priority 1: localStorage
     const savedBranch = localStorage.getItem('active_branch');
     if (savedBranch) {
       try {
@@ -75,7 +75,7 @@ export default function ReportsAuditPage() {
       } catch (e) {}
     }
 
-    // Priority 2: profiles.active_branch_id (new column)
+    // Priority 2: profiles.active_branch_id
     if (!activeBranch && profileData.active_branch_id) {
       const { data: branchData } = await supabase
         .from('branches')
@@ -89,12 +89,12 @@ export default function ReportsAuditPage() {
       }
     }
 
-    // Priority 3: Fallback to first branch the user belongs to
+    // Priority 3: Fallback
     if (!activeBranch) {
       const { data: branchesData } = await supabase
         .from('branches')
         .select('*')
-        .eq('org_id', profileData.org_id); // adjust if you use different field
+        .eq('org_id', profileData.org_id);
 
       if (branchesData && branchesData.length > 0) {
         activeBranch = branchesData[0];
@@ -117,12 +117,17 @@ export default function ReportsAuditPage() {
         0
       );
 
+      // ✅ PHT-FORCED formatter (Asia/Manila)
+      const formatPHTDate = (date: Date): string => {
+        return date.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
+      };
+
       const { data: reportsData } = await supabase
         .from('daily_reports')
         .select('*')
         .eq('branch_id', activeBranch.id)
-        .gte('report_date', start.toISOString().split('T')[0])
-        .lte('report_date', end.toISOString().split('T')[0])
+        .gte('report_date', formatPHTDate(start))
+        .lte('report_date', formatPHTDate(end))
         .order('report_date', { ascending: true });
 
       setReports(reportsData || []);
@@ -132,6 +137,7 @@ export default function ReportsAuditPage() {
 
     setLoading(false);
   };
+
   // Toggle verification (OFF = no modal, ON = show modal)
   const toggleVerification = async (id: string, currentlyChecked: boolean) => {
     const userRole = profile?.role?.toLowerCase();
