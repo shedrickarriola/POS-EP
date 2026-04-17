@@ -291,7 +291,7 @@ export async function GET(request: Request) {
           if (emailList.length > 0) {
             try {
               await resend.emails.send({
-                from: 'Drugstore Stock Alert <alerts@econo-pos.com>', // ← change domain if you verified another one
+                from: 'Drugstore Stock Alert <stock@alerts.econo-pos.com>', // ← change domain if you verified another one
                 to: emailList,
                 subject: `📦 TOP TO RESTOCK - ${group.name.toUpperCase()}`,
                 html: fullEmailHtml,
