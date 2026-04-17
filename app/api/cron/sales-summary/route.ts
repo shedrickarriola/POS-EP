@@ -1,6 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
-import { Resend } from 'resend'; // ← add this if not there
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -15,10 +14,11 @@ export async function GET(request: Request) {
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
-  const resend = new Resend(process.env.RESEND_API_KEY!);
+
   try {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
-
+    const { Resend } = await import('resend');
+    const resend = new Resend(process.env.RESEND_API_KEY!);
     // Get reliable PHT date for today
     const { data: todayPHT, error: dateError } = await supabaseAdmin.rpc(
       'get_current_pht_date'
@@ -352,7 +352,7 @@ export async function GET(request: Request) {
           message += `<b>📍 ${bNameFull} ${statusIcon}</b>\n`;
 
           if (type === 'REPORT_CHECKER') {
-            message += `• Reports : ${stats.pendingDRs} | Orders: ${stats.pendingOrders}\n`;
+            message += `• Reports: ${stats.pendingDRs} | Orders: ${stats.pendingOrders}\n`;
             if (stats.pendingPOs > 0)
               message += `• PO Verification: ${stats.pendingPOs}\n`;
             if (!hasPending) message += `• <i>No pending tasks</i>\n`;
