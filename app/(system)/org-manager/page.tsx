@@ -49,6 +49,21 @@ export default function ExecutiveTerminal() {
     org: false,
     quota: false,
     status: false,
+    auditor: false, // NEW
+    orderingEmail: false, // NEW
+    reportEmail: false, // NEW
+  });
+
+  // NEW FORM STATES
+  const [auditorForm, setAuditorForm] = useState({
+    profile_id: '',
+    is_auditor: false,
+  });
+
+  const [emailForm, setEmailForm] = useState({
+    org_id: '',
+    ordering_email: '',
+    owner_email: '',
   });
 
   const [branchForm, setBranchForm] = useState({
@@ -327,7 +342,56 @@ export default function ExecutiveTerminal() {
       fetchInitialData();
     }
   };
+  const handleToggleAuditor = async () => {
+    if (!auditorForm.profile_id) return alert('Please select a staff member');
 
+    const { error } = await supabase
+      .from('profiles')
+      .update({ auditor: auditorForm.is_auditor })
+      .eq('id', auditorForm.profile_id);
+
+    if (error) {
+      alert(`Error: ${error.message}`);
+    } else {
+      showSuccess('Auditor status updated');
+      setModals({ ...modals, auditor: false });
+      fetchInitialData();
+    }
+  };
+
+  // NEW: Update Ordering Email
+  const handleUpdateOrderingEmail = async () => {
+    if (!emailForm.org_id) return alert('Please select an organization');
+
+    const { error } = await supabase
+      .from('organizations')
+      .update({ ordering_email: emailForm.ordering_email })
+      .eq('id', emailForm.org_id);
+
+    if (error) alert(`Error: ${error.message}`);
+    else {
+      showSuccess('Ordering email saved');
+      setModals({ ...modals, orderingEmail: false });
+      fetchInitialData();
+    }
+  };
+
+  // NEW: Update Report Email (weekly report)
+  const handleUpdateReportEmail = async () => {
+    if (!emailForm.org_id) return alert('Please select an organization');
+
+    const { error } = await supabase
+      .from('organizations')
+      .update({ owner_email: emailForm.owner_email })
+      .eq('id', emailForm.org_id);
+
+    if (error) alert(`Error: ${error.message}`);
+    else {
+      showSuccess('Weekly Report email saved');
+      setModals({ ...modals, reportEmail: false });
+      fetchInitialData();
+    }
+  };
   const allStaff = organizations.flatMap(
     (org) =>
       org.branches?.flatMap(
@@ -423,7 +487,37 @@ export default function ExecutiveTerminal() {
               <UserPlus size={14} className="inline mr-2 text-purple-500" /> Add
               Staff
             </button>
+            <button
+              onClick={() => setModals({ ...modals, staff: true })}
+              className="bg-slate-900 px-5 py-3 rounded-2xl text-[9px] font-black uppercase text-slate-300 border border-white/5 hover:border-purple-500/50 transition-all"
+            >
+              <UserPlus size={14} className="inline mr-2 text-purple-500" /> Add
+              Staff
+            </button>
 
+            {/* NEW BUTTONS */}
+            <button
+              onClick={() => setModals({ ...modals, auditor: true })}
+              className="bg-slate-900 px-5 py-3 rounded-2xl text-[9px] font-black uppercase text-slate-300 border border-white/5 hover:border-amber-500/50 transition-all flex items-center gap-2"
+            >
+              <ShieldCheck size={14} className="text-amber-500" /> Auditor
+            </button>
+
+            <button
+              onClick={() => setModals({ ...modals, orderingEmail: true })}
+              className="bg-slate-900 px-5 py-3 rounded-2xl text-[9px] font-black uppercase text-slate-300 border border-white/5 hover:border-cyan-500/50 transition-all flex items-center gap-2"
+            >
+              <ShoppingCart size={14} className="text-cyan-500" /> Ordering
+              Email
+            </button>
+
+            <button
+              onClick={() => setModals({ ...modals, reportEmail: true })}
+              className="bg-slate-900 px-5 py-3 rounded-2xl text-[9px] font-black uppercase text-slate-300 border border-white/5 hover:border-violet-500/50 transition-all flex items-center gap-2"
+            >
+              <FileBarChart size={14} className="text-violet-500" /> Report
+              Email
+            </button>
             <button
               onClick={() => setModals({ ...modals, status: true })}
               className="bg-slate-900 px-5 py-3 rounded-2xl text-[9px] font-black uppercase text-slate-300 border border-white/5 hover:border-orange-500/50 transition-all flex items-center gap-2"
@@ -936,6 +1030,264 @@ export default function ExecutiveTerminal() {
 
               <button
                 onClick={() => setModals({ ...modals, status: false })}
+                className="w-full text-[10px] font-black uppercase text-slate-500 mt-2 text-center"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====================== NEW MODALS ====================== */}
+
+      {/* AUDITOR MODAL */}
+      {modals.auditor && (
+        <div className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-amber-500/20 p-8 rounded-[2.5rem] w-full max-w-md">
+            <h3 className="text-xl font-black text-white uppercase italic mb-6 tracking-tighter">
+              Auditor Management
+            </h3>
+            <div className="space-y-4">
+              <select
+                className="w-full bg-black/50 border border-slate-800 p-4 rounded-2xl text-white outline-none text-xs font-bold"
+                value={auditorForm.profile_id}
+                onChange={(e) => {
+                  const profile = allStaff.find(
+                    (s: any) => s.id === e.target.value
+                  );
+                  setAuditorForm({
+                    profile_id: e.target.value,
+                    is_auditor: profile?.auditor || false,
+                  });
+                }}
+              >
+                <option value="">Select Staff Member...</option>
+                {allStaff.map((s: any) => (
+                  <option key={s.id} value={s.id}>
+                    {s.full_name} — {s.email} ({s.role})
+                  </option>
+                ))}
+              </select>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() =>
+                    setAuditorForm({ ...auditorForm, is_auditor: true })
+                  }
+                  className={`flex-1 py-4 rounded-2xl font-black text-xs tracking-widest ${
+                    auditorForm.is_auditor
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  ✅ Auditor
+                </button>
+                <button
+                  onClick={() =>
+                    setAuditorForm({ ...auditorForm, is_auditor: false })
+                  }
+                  className={`flex-1 py-4 rounded-2xl font-black text-xs tracking-widest ${
+                    !auditorForm.is_auditor
+                      ? 'bg-red-600 text-white'
+                      : 'bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  ❌ Not Auditor
+                </button>
+              </div>
+
+              <button
+                onClick={handleToggleAuditor}
+                className="w-full bg-amber-600 hover:bg-amber-500 py-5 rounded-2xl text-white font-black uppercase text-xs tracking-widest transition-all"
+              >
+                Update Auditor Status
+              </button>
+
+              <button
+                onClick={() => setModals({ ...modals, auditor: false })}
+                className="w-full text-[10px] font-black uppercase text-slate-500 mt-2 text-center"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ORDERING EMAIL MODAL */}
+      {modals.orderingEmail && (
+        <div className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-cyan-500/20 p-8 rounded-[2.5rem] w-full max-w-md">
+            <h3 className="text-xl font-black text-white uppercase italic mb-6 tracking-tighter">
+              Set Ordering Email
+            </h3>
+            <div className="space-y-4">
+              <select
+                className="w-full bg-black/50 border border-slate-800 p-4 rounded-2xl text-white outline-none text-xs font-bold"
+                value={emailForm.org_id}
+                onChange={(e) => {
+                  const selectedOrg = organizations.find(
+                    (o: any) => o.id === e.target.value
+                  );
+                  setEmailForm({
+                    org_id: e.target.value,
+                    ordering_email: selectedOrg?.ordering_email || '',
+                    owner_email: emailForm.owner_email,
+                  });
+                }}
+              >
+                <option value="">Select Organization...</option>
+                {organizations.map((org: any) => (
+                  <option key={org.id} value={org.id}>
+                    {org.name}
+                  </option>
+                ))}
+              </select>
+
+              <input
+                className="w-full bg-black/50 border border-slate-800 p-4 rounded-2xl text-white outline-none text-xs font-bold"
+                placeholder="ordering_email (comma separated)"
+                value={emailForm.ordering_email}
+                onChange={(e) =>
+                  setEmailForm({ ...emailForm, ordering_email: e.target.value })
+                }
+              />
+
+              <button
+                onClick={handleUpdateOrderingEmail}
+                className="w-full bg-cyan-600 hover:bg-cyan-500 py-5 rounded-2xl text-white font-black uppercase text-xs tracking-widest transition-all"
+              >
+                Save Ordering Email
+              </button>
+
+              <button
+                onClick={() => setModals({ ...modals, orderingEmail: false })}
+                className="w-full text-[10px] font-black uppercase text-slate-500 mt-2 text-center"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* REPORT EMAIL MODAL (Weekly Report - with tags) */}
+      {modals.reportEmail && (
+        <div className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-violet-500/20 p-8 rounded-[2.5rem] w-full max-w-md">
+            <h3 className="text-xl font-black text-white uppercase italic mb-6 tracking-tighter">
+              Weekly Report Emails
+            </h3>
+
+            <div className="space-y-4">
+              <select
+                className="w-full bg-black/50 border border-slate-800 p-4 rounded-2xl text-white outline-none text-xs font-bold"
+                value={emailForm.org_id}
+                onChange={(e) => {
+                  const selectedOrg = organizations.find(
+                    (o: any) => o.id === e.target.value
+                  );
+                  setEmailForm({
+                    org_id: e.target.value,
+                    ordering_email: emailForm.ordering_email,
+                    owner_email: selectedOrg?.owner_email || '',
+                  });
+                }}
+              >
+                <option value="">Select Organization...</option>
+                {organizations.map((org: any) => (
+                  <option key={org.id} value={org.id}>
+                    {org.name}
+                  </option>
+                ))}
+              </select>
+
+              {/* Current emails as removable tags */}
+              <div className="flex flex-wrap gap-2 min-h-[50px] bg-black/30 border border-slate-800 rounded-2xl p-3">
+                {emailForm.owner_email
+                  .split(',')
+                  .map((email) => email.trim())
+                  .filter(Boolean)
+                  .map((email, index) => (
+                    <div
+                      key={index}
+                      className="bg-slate-800 text-white text-xs px-3 py-1 rounded-xl flex items-center gap-2"
+                    >
+                      {email}
+                      <button
+                        onClick={() => {
+                          const updated = emailForm.owner_email
+                            .split(',')
+                            .map((e) => e.trim())
+                            .filter((e) => e !== email)
+                            .join(',');
+                          setEmailForm({ ...emailForm, owner_email: updated });
+                        }}
+                        className="text-red-400 hover:text-red-500"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+              </div>
+
+              {/* Add new email */}
+              <div className="flex gap-2">
+                <input
+                  id="new-report-email"
+                  className="flex-1 bg-black/50 border border-slate-800 p-4 rounded-2xl text-white outline-none text-xs font-bold"
+                  placeholder="Add new email..."
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const newEmail = (
+                        e.target as HTMLInputElement
+                      ).value.trim();
+                      if (newEmail) {
+                        const current = emailForm.owner_email
+                          ? emailForm.owner_email + ','
+                          : '';
+                        setEmailForm({
+                          ...emailForm,
+                          owner_email: current + newEmail,
+                        });
+                        (e.target as HTMLInputElement).value = '';
+                      }
+                    }
+                  }}
+                />
+                <button
+                  onClick={() => {
+                    const input = document.getElementById(
+                      'new-report-email'
+                    ) as HTMLInputElement;
+                    const newEmail = input.value.trim();
+                    if (newEmail) {
+                      const current = emailForm.owner_email
+                        ? emailForm.owner_email + ','
+                        : '';
+                      setEmailForm({
+                        ...emailForm,
+                        owner_email: current + newEmail,
+                      });
+                      input.value = '';
+                    }
+                  }}
+                  className="bg-violet-600 hover:bg-violet-500 px-6 rounded-2xl text-white text-xs font-black"
+                >
+                  Add
+                </button>
+              </div>
+
+              <button
+                onClick={handleUpdateReportEmail}
+                className="w-full bg-violet-600 hover:bg-violet-500 py-5 rounded-2xl text-white font-black uppercase text-xs tracking-widest transition-all"
+              >
+                Save Weekly Report Emails
+              </button>
+
+              <button
+                onClick={() => setModals({ ...modals, reportEmail: false })}
                 className="w-full text-[10px] font-black uppercase text-slate-500 mt-2 text-center"
               >
                 Cancel
