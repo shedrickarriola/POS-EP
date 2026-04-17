@@ -387,7 +387,7 @@ export async function GET(request: Request) {
 
     return NextResponse.json({ success: true });
   } catch (err: any) {
-    console.error('Telegram Report Error:', err);
+    console.error('Telegram Report Error :', err);
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }

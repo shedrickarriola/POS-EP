@@ -370,7 +370,7 @@ export default function ExecutiveTerminal() {
 
     if (error) alert(`Error: ${error.message}`);
     else {
-      showSuccess('Ordering email saved');
+      showSuccess('Ordering email saved!');
       setModals({ ...modals, orderingEmail: false });
       fetchInitialData();
     }
