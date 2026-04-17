@@ -39,53 +39,99 @@ export default function ReportsAuditPage() {
     } = await supabase.auth.getUser();
     if (!user) return router.push('/login');
 
-    const { data: profileData } = await supabase
+    console.log('🔍 Current user ID:', user.id);
+
+    // Fetch profile WITHOUT joining branches (to avoid ambiguity)
+    const { data: profileData, error: profileError } = await supabase
       .from('profiles')
-      .select('*, branches(*)')
+      .select('*, active_branch_id')
       .eq('id', user.id)
       .single();
 
-    if (profileData) {
-      setProfile(profileData);
+    if (profileError) {
+      console.error('❌ Profile query error:', profileError);
+    }
 
-      const savedBranch = localStorage.getItem('active_branch');
-      let activeBranch: any = null;
+    if (!profileData) {
+      console.error('🚨 No profile row found for this user!');
+      setLoading(false);
+      return;
+    }
 
-      if (savedBranch) {
+    setProfile(profileData);
+    console.log('📋 Profile loaded successfully');
+
+    let activeBranch: any = null;
+
+    // Priority 1: localStorage (your original behavior)
+    const savedBranch = localStorage.getItem('active_branch');
+    if (savedBranch) {
+      try {
         activeBranch = JSON.parse(savedBranch);
-      } else if (profileData.branches?.[0]) {
-        activeBranch = profileData.branches[0];
-      }
-
-      if (activeBranch?.id) {
-        setBranch(activeBranch);
-
-        const start = new Date(
-          currentDate.getFullYear(),
-          currentDate.getMonth(),
-          1
+        console.log(
+          '✅ Using branch from localStorage:',
+          activeBranch.branch_name
         );
-        const end = new Date(
-          currentDate.getFullYear(),
-          currentDate.getMonth() + 1,
-          0
-        );
+      } catch (e) {}
+    }
 
-        const { data: reportsData } = await supabase
-          .from('daily_reports')
-          .select('*')
-          .eq('branch_id', activeBranch.id)
-          .gte('report_date', start.toISOString().split('T')[0])
-          .lte('report_date', end.toISOString().split('T')[0])
-          .order('report_date', { ascending: true });
+    // Priority 2: profiles.active_branch_id (new column)
+    if (!activeBranch && profileData.active_branch_id) {
+      const { data: branchData } = await supabase
+        .from('branches')
+        .select('*')
+        .eq('id', profileData.active_branch_id)
+        .single();
 
-        setReports(reportsData || []);
+      if (branchData) {
+        activeBranch = branchData;
+        console.log('✅ Using branch from profiles.active_branch_id');
       }
+    }
+
+    // Priority 3: Fallback to first branch the user belongs to
+    if (!activeBranch) {
+      const { data: branchesData } = await supabase
+        .from('branches')
+        .select('*')
+        .eq('org_id', profileData.org_id); // adjust if you use different field
+
+      if (branchesData && branchesData.length > 0) {
+        activeBranch = branchesData[0];
+        console.log('✅ Using first available branch as fallback');
+      }
+    }
+
+    if (activeBranch?.id) {
+      setBranch(activeBranch);
+      console.log('✅ Active branch set:', activeBranch.branch_name);
+
+      const start = new Date(
+        currentDate.getFullYear(),
+        currentDate.getMonth(),
+        1
+      );
+      const end = new Date(
+        currentDate.getFullYear(),
+        currentDate.getMonth() + 1,
+        0
+      );
+
+      const { data: reportsData } = await supabase
+        .from('daily_reports')
+        .select('*')
+        .eq('branch_id', activeBranch.id)
+        .gte('report_date', start.toISOString().split('T')[0])
+        .lte('report_date', end.toISOString().split('T')[0])
+        .order('report_date', { ascending: true });
+
+      setReports(reportsData || []);
+    } else {
+      console.error('❌ Could not determine active branch');
     }
 
     setLoading(false);
   };
-
   // Toggle verification (OFF = no modal, ON = show modal)
   const toggleVerification = async (id: string, currentlyChecked: boolean) => {
     const userRole = profile?.role?.toLowerCase();
@@ -272,7 +318,12 @@ export default function ReportsAuditPage() {
               const rowActual = week.reduce((sum, day) => {
                 const dStr = day.date.toLocaleDateString('en-CA');
                 const r = reports.find((rep) => rep.report_date === dStr);
-                return sum + Number(r?.generic_sales || 0);
+
+                const generic = Number(r?.generic_sales || 0);
+                const discount = Number(r?.discount_total || 0);
+                const actualGeneric = generic - discount;
+
+                return sum + actualGeneric;
               }, 0);
 
               return (
@@ -330,32 +381,21 @@ export default function ReportsAuditPage() {
 
                         {report ? (
                           <div className="flex-1 text-[10px] space-y-1 font-mono">
-                            <div className="flex justify-between bg-emerald-500/10 px-2 py-1 rounded">
-                              <span className="font-black text-emerald-400">
-                                GENERIC
-                              </span>
-                              <span className="font-black text-white">
-                                ₱{Number(report.generic_sales).toLocaleString()}
-                              </span>
-                            </div>
-
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">Branded</span>
-                              <span className="font-medium">
-                                ₱{Number(report.branded_sales).toLocaleString()}
-                              </span>
-                            </div>
-
-                            <div className="flex justify-between">
+                            {/* Gross Generic - now de-emphasized */}
+                            <div className="flex justify-between px-2 py-1">
                               <span className="text-slate-400">
-                                Total Sales
+                                GENERIC (Gross)
                               </span>
-                              <span className="font-medium">
-                                ₱{Number(report.total_sales).toLocaleString()}
+                              <span className="font-medium text-slate-300">
+                                ₱
+                                {Number(
+                                  report.generic_sales || 0
+                                ).toLocaleString()}
                               </span>
                             </div>
 
-                            <div className="flex justify-between">
+                            {/* Discounts */}
+                            <div className="flex justify-between px-2 py-1">
                               <span className="text-slate-400">Discounts</span>
                               <span className="font-medium text-orange-400">
                                 ₱
@@ -365,30 +405,83 @@ export default function ReportsAuditPage() {
                               </span>
                             </div>
 
-                            <div className="flex justify-between">
+                            {/* ACTUAL GENERIC - NOW HIGHLIGHTED (this is what you wanted) */}
+                            <div className="flex justify-between bg-emerald-500/10 px-2 py-1.5 rounded border border-emerald-500/30">
+                              <span className="font-black text-emerald-400">
+                                ACTUAL GENERIC
+                              </span>
+                              <span className="font-black text-white">
+                                ₱
+                                {(
+                                  Number(report.generic_sales || 0) -
+                                  Number(report.discount_total || 0)
+                                ).toLocaleString()}
+                              </span>
+                            </div>
+
+                            {/* Branded */}
+                            <div className="flex justify-between px-2 py-1">
+                              <span className="text-slate-400">BRANDED</span>
+                              <span className="font-medium">
+                                ₱
+                                {Number(
+                                  report.branded_sales || 0
+                                ).toLocaleString()}
+                              </span>
+                            </div>
+
+                            {/* Actual Sales */}
+                            <div className="flex justify-between px-2 py-1 border-t border-white/10 pt-1">
+                              <span className="font-black text-emerald-400">
+                                ACTUAL SALES
+                              </span>
+                              <span className="font-black text-white">
+                                ₱
+                                {(
+                                  Number(report.generic_sales || 0) -
+                                  Number(report.discount_total || 0) +
+                                  Number(report.branded_sales || 0)
+                                ).toLocaleString()}
+                              </span>
+                            </div>
+
+                            {/* Actual Cash */}
+                            <div className="flex justify-between px-2 py-1">
                               <span className="text-slate-400">
                                 Actual Cash
                               </span>
                               <span className="font-medium">
-                                ₱{Number(report.actual_cash).toLocaleString()}
+                                ₱
+                                {Number(
+                                  report.actual_cash || 0
+                                ).toLocaleString()}
                               </span>
                             </div>
 
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">Excess</span>
-                              <span className="font-medium text-emerald-400">
-                                ₱{Number(report.excess || 0).toLocaleString()}
-                              </span>
-                            </div>
-
-                            <div className="flex justify-between">
+                            {/* Expenses */}
+                            <div className="flex justify-between px-2 py-1">
                               <span className="text-slate-400">Expenses</span>
                               <span className="font-medium text-red-400">
                                 ₱{Number(report.expenses || 0).toLocaleString()}
                               </span>
                             </div>
 
-                            <div className="pt-2 border-t border-white/10 text-[9px] text-slate-500">
+                            {/* Excess */}
+                            <div className="flex justify-between px-2 py-1 border-t border-white/10 pt-1">
+                              <span className="text-slate-400">Excess</span>
+                              <span className="font-medium text-emerald-400">
+                                ₱
+                                {(
+                                  Number(report.actual_cash || 0) -
+                                  (Number(report.generic_sales || 0) -
+                                    Number(report.discount_total || 0) +
+                                    Number(report.branded_sales || 0))
+                                ).toLocaleString()}
+                              </span>
+                            </div>
+
+                            {/* Reported / Verified */}
+                            <div className="pt-2 border-t border-white/10 text-[9px] text-slate-500 mt-auto">
                               <div>
                                 Reported:{' '}
                                 <span className="text-white">
@@ -424,9 +517,10 @@ export default function ReportsAuditPage() {
                   })}
 
                   {/* Weekly Quota Column */}
+                  {/* Weekly Quota Column - Now based on Actual Generic */}
                   <div className="bg-emerald-500/5 border border-emerald-500/10 rounded-xl p-3 flex flex-col justify-center items-center shadow-inner">
                     <p className="text-[9px] font-black text-emerald-500/40 uppercase mb-1 tracking-tighter">
-                      Weekly_Total
+                      WEEKLY ACTUAL GENERIC
                     </p>
                     <p className="text-xs font-black text-white">
                       ₱{rowActual.toLocaleString()}
