@@ -29,11 +29,15 @@ export default function UpdatePurchaseOrder() {
   const [orderHeader, setOrderHeader] = useState<any>(null);
   const [items, setItems] = useState<any[]>([]);
   const [currentBranchId, setCurrentBranchId] = useState<string | null>(null);
-
+  // ====================== PRICE ANOMALY CONFIG ======================
+  const PRICE_ANOMALY_THRESHOLD = 3; // 3× current selling price = blocked
+  // =================================================================
   // Summary and Search State
   const [commitSummary, setCommitSummary] = useState<any[]>([]);
   const [inventoryResults, setInventoryResults] = useState<any[]>([]);
   const [activeSearchIdx, setActiveSearchIdx] = useState<number | null>(null);
+  const [showPriceError, setShowPriceError] = useState(false);
+  const [priceErrorItems, setPriceErrorItems] = useState<any[]>([]);
 
   useEffect(() => {
     const savedBranch = localStorage.getItem('active_branch');
@@ -51,7 +55,15 @@ export default function UpdatePurchaseOrder() {
     try {
       const { data: order, error } = await supabase
         .from('purchase_orders')
-        .select(`*, purchase_order_items (*)`)
+        .select(
+          `
+          *,
+          purchase_order_items (
+            *,
+            inventory:inventory_id (price, buy_cost)
+          )
+        `
+        )
         .eq('po_number', searchTerm.trim())
         .eq('branch_id', currentBranchId)
         .single();
@@ -60,7 +72,35 @@ export default function UpdatePurchaseOrder() {
         alert('Order not found in this branch.');
       } else {
         setOrderHeader(order);
-        setItems(order.purchase_order_items || []);
+
+        // === AUTO ANOMALY CHECK + ENRICH ON LOAD ===
+        const enrichedItems = (order.purchase_order_items || []).map(
+          (item: any) => {
+            const currentBuyCost = Number(item.buy_cost) || 0;
+            const currSellingPrice = Number(item.inventory?.price) || 0;
+
+            let price_anomaly = false;
+            let price_ratio = 1;
+
+            if (currSellingPrice > 0) {
+              price_ratio = Number(
+                (currentBuyCost / currSellingPrice).toFixed(1)
+              );
+              price_anomaly =
+                currentBuyCost > currSellingPrice * PRICE_ANOMALY_THRESHOLD;
+            }
+
+            return {
+              ...item,
+              current_price: currSellingPrice,
+              original_buy_cost: currentBuyCost,
+              price_anomaly,
+              price_ratio,
+            };
+          }
+        );
+
+        setItems(enrichedItems);
       }
     } finally {
       setLoading(false);
@@ -68,11 +108,11 @@ export default function UpdatePurchaseOrder() {
   };
 
   const searchInventory = async (query: string, index: number) => {
-    updateItemLocal(index, 'item_name', query);
+    updateItem(index, 'item_name', query);
 
     // Flag as unlinked if user starts typing a new name
     if (items[index].inventory_id) {
-      updateItemLocal(index, 'inventory_id', null);
+      updateItem(index, 'inventory_id', null);
     }
 
     if (query.length < 2) {
@@ -98,18 +138,40 @@ export default function UpdatePurchaseOrder() {
       inventory_id: invItem.id,
       item_name: invItem.item_name,
       item_type: invItem.item_type,
+      current_price: invItem.price || 0, // ← NEW: for anomaly check
     };
     setItems(newItems);
     setInventoryResults([]);
     setActiveSearchIdx(null);
   };
 
-  const updateItemLocal = (index: number, field: string, value: any) => {
+  const updateItem = (index: number, field: string, value: any) => {
     const newItems = [...items];
-    newItems[index] = { ...newItems[index], [field]: value };
+    const item = { ...newItems[index] };
+
+    // Update the field
+    item[field] = value;
+
+    // Recalculate subtotal (always live)
+    const qty = Number(item.quantity) || 0;
+    const cost = Number(item.buy_cost) || 0;
+    // We don't store subtotal in state — it's calculated on render
+
+    // ====================== PRICE ANOMALY DETECTION ======================
+    const currPrice = Number(item.current_price) || 0;
+    if (currPrice > 0) {
+      const ratio = Number((cost / currPrice).toFixed(1));
+      item.price_anomaly = cost > currPrice * PRICE_ANOMALY_THRESHOLD;
+      item.price_ratio = ratio;
+    } else {
+      item.price_anomaly = false;
+      item.price_ratio = 1;
+    }
+    // =====================================================================
+
+    newItems[index] = item;
     setItems(newItems);
   };
-
   const addNewRow = () => {
     setItems([
       ...items,
@@ -120,6 +182,10 @@ export default function UpdatePurchaseOrder() {
         buy_cost: 0,
         inventory_id: null,
         item_type: 'GENERIC',
+        current_price: 0, // needed for anomaly check
+        price_anomaly: false,
+        price_ratio: 1,
+        original_buy_cost: 0, // for the new column
       },
     ]);
   };
@@ -141,7 +207,6 @@ export default function UpdatePurchaseOrder() {
       { generic: 0, branded: 0, total: 0 }
     );
   };
-
   const handleUpdate = async () => {
     const hasUnlinked = items.some((i) => !i.inventory_id);
     if (hasUnlinked)
@@ -149,12 +214,21 @@ export default function UpdatePurchaseOrder() {
         'Cannot commit: One or more rows are not linked to a valid product.'
       );
 
+    // === HARD BLOCK ON PRICE ANOMALIES ===
+    const anomalousItems = items.filter((i) => i.price_anomaly);
+    if (anomalousItems.length > 0) {
+      setPriceErrorItems(anomalousItems);
+      setShowPriceError(true);
+      return;
+    }
+    // =====================================
+
     setIsSaving(true);
     const totals = calculateTotals();
     const syncLog: any[] = [];
 
     try {
-      // 1. REVERSAL: Undo stock of existing items in the DB
+      // 1. REVERSAL (unchanged)
       const { data: dbItems } = await supabase
         .from('purchase_order_items')
         .select('inventory_id, quantity, item_name')
@@ -178,7 +252,7 @@ export default function UpdatePurchaseOrder() {
         });
       }
 
-      // 2. RE-SYNC: Update Header and replace all items
+      // 2. RE-SYNC Header
       await supabase
         .from('purchase_orders')
         .update({
@@ -193,28 +267,45 @@ export default function UpdatePurchaseOrder() {
         .delete()
         .eq('purchase_order_id', orderHeader.id);
 
+      // 3. INSERT NEW ITEMS + CONDITIONAL INVENTORY BUY_COST UPDATE
       for (const item of items) {
+        const newBuyCost = Number(item.buy_cost) || 0;
+
+        // Insert into PO items (this is the buy_cost for the PO)
         await supabase.from('purchase_order_items').insert([
           {
             purchase_order_id: orderHeader.id,
             inventory_id: item.inventory_id,
             item_name: item.item_name,
             quantity: Number(item.quantity),
-            buy_cost: Number(item.buy_cost),
+            buy_cost: newBuyCost,
             item_type: item.item_type,
           },
         ]);
 
+        // Update stock
         const { data: inv } = await supabase
           .from('inventory')
-          .select('stock')
+          .select('stock, buy_cost')
           .eq('id', item.inventory_id)
           .single();
+
         const appliedStock = (inv?.stock || 0) + Number(item.quantity);
         await supabase
           .from('inventory')
           .update({ stock: appliedStock })
           .eq('id', item.inventory_id);
+
+        // === NEW: Update inventory.buy_cost ONLY IF HIGHER ===
+        const currentInvBuyCost = Number(inv?.buy_cost) || 0;
+        if (newBuyCost > currentInvBuyCost) {
+          await supabase
+            .from('inventory')
+            .update({ buy_cost: newBuyCost })
+            .eq('id', item.inventory_id);
+        }
+        // ====================================================
+
         syncLog.push({
           name: item.item_name,
           action: 'APPLY',
@@ -247,11 +338,15 @@ export default function UpdatePurchaseOrder() {
 
             <div className="bg-black/40 rounded-2xl border border-white/5 overflow-hidden mb-8 max-h-60 overflow-y-auto font-mono text-[10px]">
               <table className="w-full text-left">
-                <thead className="bg-white/5 text-slate-500 font-black uppercase tracking-widest sticky top-0">
+                <thead className="bg-black/20 text-slate-500 text-[9px] uppercase font-black tracking-widest">
                   <tr>
-                    <th className="p-4">Action</th>
-                    <th className="p-4">Item</th>
-                    <th className="p-4 text-right">Adjustment</th>
+                    <th className="p-5">Inventory Product Name</th>
+                    <th className="p-5 text-center w-24">Qty</th>
+                    <th className="p-5 text-right w-32">Original Cost</th>{' '}
+                    {/* ← NEW COLUMN */}
+                    <th className="p-5 text-right w-32">Unit Cost (New)</th>
+                    <th className="p-5 text-right w-32">Subtotal</th>
+                    <th className="p-5 text-center w-16"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
@@ -443,20 +538,37 @@ export default function UpdatePurchaseOrder() {
                           className="w-full bg-slate-950/50 border border-white/5 p-3 rounded-xl text-center font-mono text-xs"
                           value={item.quantity}
                           onChange={(e) =>
-                            updateItemLocal(idx, 'quantity', e.target.value)
+                            updateItem(idx, 'quantity', e.target.value)
                           }
                         />
                       </td>
-                      <td className="p-4">
+
+                      {/* === NEW COLUMN: Original Cost (non-editable) === */}
+                      <td className="p-4 text-right font-mono text-slate-400 text-xs">
+                        ₱{Number(item.original_buy_cost || 0).toFixed(2)}
+                      </td>
+
+                      <td className="p-4 relative">
                         <input
                           type="number"
-                          className="w-full bg-slate-950/50 border border-white/5 p-3 rounded-xl text-right font-mono text-xs"
+                          className={`w-full bg-slate-950/50 border p-3 rounded-xl text-right font-mono text-xs transition-all ${
+                            item.price_anomaly
+                              ? 'border-red-500 bg-red-500/10'
+                              : 'border-white/5'
+                          }`}
                           value={item.buy_cost}
                           onChange={(e) =>
-                            updateItemLocal(idx, 'buy_cost', e.target.value)
+                            updateItem(idx, 'buy_cost', e.target.value)
                           }
                         />
+                        {item.price_anomaly && (
+                          <div className="absolute -top-1 right-2 bg-red-500 text-white text-[10px] font-black px-1.5 py-px rounded flex items-center gap-1 shadow-md">
+                            <AlertCircle size={12} />
+                            <span>{item.price_ratio}x</span>
+                          </div>
+                        )}
                       </td>
+
                       <td className="p-4 text-right font-black font-mono text-emerald-500 text-sm">
                         ₱
                         {(
@@ -499,6 +611,65 @@ export default function UpdatePurchaseOrder() {
           </div>
         )}
       </div>
+      {/* === PRICE ANOMALY ERROR MODAL (same style as New PO) === */}
+      {showPriceError && (
+        <div className="fixed inset-0 z-[3000] flex items-center justify-center bg-slate-950/90 backdrop-blur-xl">
+          <div className="max-w-lg w-full bg-slate-900 border border-red-500/30 rounded-3xl p-8 shadow-2xl">
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-10 h-10 bg-red-500/10 rounded-2xl flex items-center justify-center">
+                <AlertCircle className="text-red-400" size={28} />
+              </div>
+              <div>
+                <h2 className="text-2xl font-black text-red-400 tracking-tighter">
+                  UPDATE BLOCKED
+                </h2>
+                <p className="text-slate-400 text-sm">Price anomaly detected</p>
+              </div>
+            </div>
+
+            <div className="bg-slate-950 rounded-2xl p-5 mb-8 border border-red-500/20">
+              <p className="text-red-400 text-sm font-bold mb-4">
+                {priceErrorItems.length} item(s) have unrealistic buy cost (over{' '}
+                {PRICE_ANOMALY_THRESHOLD}× current selling price)
+              </p>
+              <ul className="space-y-3 text-sm max-h-64 overflow-y-auto">
+                {priceErrorItems.map((item, i) => (
+                  <li
+                    key={i}
+                    className="flex justify-between bg-white/5 px-4 py-3 rounded-xl"
+                  >
+                    <span className="font-bold text-white">
+                      {item.item_name}
+                    </span>
+                    <span className="font-black text-red-400">
+                      {item.price_ratio}x
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <p className="text-slate-400 text-center mb-8 leading-relaxed">
+              This is almost always caused by a leftover{' '}
+              <strong>box price</strong> from the original PO.
+              <br />
+              Please correct the{' '}
+              <span className="text-emerald-400 font-bold">Unit Cost</span>{' '}
+              field.
+            </p>
+
+            <button
+              onClick={() => {
+                setShowPriceError(false);
+                setPriceErrorItems([]);
+              }}
+              className="w-full bg-red-500 hover:bg-red-600 text-white font-black uppercase tracking-widest py-5 rounded-2xl transition-all active:scale-95"
+            >
+              GOT IT — I’LL FIX THE PRICES
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
