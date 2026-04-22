@@ -117,6 +117,8 @@ export default function StaffDashboard() {
         'syr',
         'syrup',
         'suspension',
+        'pills',
+        'pill',
       ];
 
       const isMedicine = medicineKeywords.some((keyword) =>
