@@ -50,7 +50,7 @@ export default function SalesOrderList() {
   // Pagination & Filter States
   const [currentPage, setCurrentPage] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
-  const [pageSize] = useState(12);
+  const [pageSize] = useState(30);
   const [searchTerm, setSearchTerm] = useState('');
   const [searchTotals, setSearchTotals] = useState({
     total: 0,
@@ -380,16 +380,15 @@ export default function SalesOrderList() {
     getStaff();
   }, [currentBranchId]);
   // 1. Create a "sliced" version of your orders based on the current page
+  // Replace the old paginatedOrders with this:
+  // Replace the entire paginatedOrders with this:
   const paginatedOrders = useMemo(() => {
-    // If we are in 'day' view, we show EVERYTHING (the whole month)
-    // If we are in 'order' view, we show 10 per page
-    if (view === 'day') return orders;
+    if (viewMode === 'days') {
+      return orders; // Day View = full month
+    }
+    return orders; // Order View = already paginated by Supabase
+  }, [orders, viewMode]);
 
-    const startIndex = currentPage * 10;
-    return orders.slice(startIndex, startIndex + 10);
-  }, [orders, currentPage, view]);
-
-  // CRITICAL: Update your <tbody> to map over 'paginatedOrders' instead of 'orders'
   const fetchData = async () => {
     if (!currentBranchId) return;
     setLoading(true);
@@ -397,27 +396,28 @@ export default function SalesOrderList() {
     try {
       let query = supabase
         .from('orders')
-        .select('*, order_items(*, inventory!product_id(item_name))')
+        .select('*, order_items(*, inventory!product_id(item_name))', {
+          count: 'exact',
+        })
         .eq('branch_id', currentBranchId);
 
-      // --- APPLY DATE RANGE FILTERS (Universal) ---
-      if (startDate) {
-        query = query.gte('created_date_pht', startDate);
-      }
-      if (endDate) {
-        query = query.lte('created_date_pht', endDate);
-      }
+      // Date filters
+      if (startDate) query = query.gte('created_date_pht', startDate);
+      if (endDate) query = query.lte('created_date_pht', endDate);
 
-      if (view === 'order') {
+      if (viewMode === 'orders') {
+        // ORDER VIEW — clean server-side pagination
         if (searchTerm) {
           query = query.or(
             `order_number.ilike.%${searchTerm}%,client_name.ilike.%${searchTerm}%`
           );
         }
-        // Apply sorting but DO NOT add a strict limit if you want to see all filtered results
-        query = query.order('created_at', { ascending: false });
+        const from = currentPage * pageSize;
+        query = query
+          .order('created_at', { ascending: false })
+          .range(from, from + pageSize - 1);
       } else {
-        // DAY VIEW: If no date range is selected, default to the currentMonth view
+        // DAY VIEW — full month, no artificial limit
         if (!startDate && !endDate) {
           const year = currentMonth.getFullYear();
           const month = String(currentMonth.getMonth() + 1).padStart(2, '0');
@@ -434,16 +434,16 @@ export default function SalesOrderList() {
               `${year}-${month}-${String(lastDay).padStart(2, '0')}`
             );
         }
-        query = query.order('created_date_pht', { ascending: false });
+        query = query
+          .order('created_date_pht', { ascending: false })
+          .limit(20000);
       }
 
-      const { data, error } = await query;
+      const { data, error, count } = await query;
       if (error) throw error;
 
       setOrders(data || []);
-      setTotalCount(data?.length || 0);
-
-      // ... (rest of your totals calculation code)
+      setTotalCount(count || data?.length || 0);
     } catch (err) {
       console.error('Fetch Error:', err);
     } finally {
@@ -454,7 +454,7 @@ export default function SalesOrderList() {
     if (currentBranchId) fetchData();
   }, [
     currentPage,
-    view,
+    viewMode,
     currentMonth,
     searchTerm,
     startDate,
@@ -1849,74 +1849,81 @@ export default function SalesOrderList() {
           {loading ? 'SYNCING...' : `TOTAL_SOs: ${orders.length}`}
         </p>
 
-        <div className="flex items-center gap-2">
-          {/* PREVIOUS BUTTON */}
-          <button
-            disabled={loading || (view === 'order' && currentPage === 0)}
-            onClick={() => {
-              if (view === 'order') {
-                setCurrentPage((p) => Math.max(0, p - 1));
-              } else {
-                // DAY VIEW: Safely calculate previous month
-                const baseDate = currentMonth || new Date();
-                setCurrentMonth(
-                  new Date(baseDate.getFullYear(), baseDate.getMonth() - 1, 1)
-                );
-                setCurrentPage(0);
-              }
-            }}
-            className="p-2 bg-slate-900/50 border border-white/5 rounded-lg disabled:opacity-20 text-blue-500"
-          >
-            <ChevronLeft size={16} />
-          </button>
+        {/* FOOTER NAVIGATION */}
+        <div className="flex flex-col sm:flex-row justify-between items-center px-2 gap-4 mt-6">
+          <p className="text-[9px] font-black text-slate-700 uppercase tracking-widest">
+            {loading ? 'SYNCING...' : `TOTAL_SOs: ${totalCount}`}
+          </p>
 
-          <div className="flex flex-col items-center">
-            <div className="bg-slate-900/50 border border-white/5 px-4 py-1.5 rounded-lg font-mono text-[10px] font-black uppercase text-slate-400 min-w-[140px] text-center">
-              {view === 'order' ? (
-                <>
-                  PAGE {currentPage + 1} /{' '}
-                  {Math.max(1, Math.ceil(orders.length / 10))}
-                </>
-              ) : (
-                /* Safeguard UI with Optional Chaining and Fallback */
-                currentMonth?.toLocaleString('default', {
-                  month: 'long',
-                  year: 'numeric',
-                }) || 'LOADING...'
+          <div className="flex items-center gap-2">
+            {/* PREVIOUS BUTTON */}
+            <button
+              disabled={loading}
+              onClick={() => {
+                if (viewMode === 'orders') {
+                  setCurrentPage((p) => Math.max(0, p - 1));
+                } else {
+                  // DAY VIEW: Previous month
+                  const baseDate = currentMonth || new Date();
+                  setCurrentMonth(
+                    new Date(baseDate.getFullYear(), baseDate.getMonth() - 1, 1)
+                  );
+                  setCurrentPage(0);
+                }
+              }}
+              className="p-2 bg-slate-900/50 border border-white/5 rounded-lg disabled:opacity-20 text-blue-500 hover:bg-slate-800 transition-colors"
+            >
+              <ChevronLeft size={16} />
+            </button>
+
+            <div className="flex flex-col items-center">
+              <div className="bg-slate-900/50 border border-white/5 px-4 py-1.5 rounded-lg font-mono text-[10px] font-black uppercase text-slate-400 min-w-[160px] text-center">
+                {viewMode === 'orders' ? (
+                  <>
+                    PAGE {currentPage + 1} /{' '}
+                    {Math.max(1, Math.ceil(totalCount / pageSize))}
+                  </>
+                ) : (
+                  currentMonth?.toLocaleString('default', {
+                    month: 'long',
+                    year: 'numeric',
+                  }) || 'LOADING...'
+                )}
+              </div>
+
+              {viewMode === 'days' && (
+                <button
+                  onClick={() => {
+                    setCurrentMonth(new Date());
+                    setCurrentPage(0);
+                  }}
+                  className="text-[9px] text-blue-500 mt-1 uppercase font-black hover:underline"
+                >
+                  Jump to Today
+                </button>
               )}
             </div>
-            {view === 'day' && (
-              <button
-                onClick={() => setCurrentMonth(new Date())}
-                className="text-[9px] text-blue-500 mt-1 uppercase font-black"
-              >
-                Jump to Today
-              </button>
-            )}
-          </div>
 
-          {/* NEXT BUTTON */}
-          <button
-            disabled={
-              loading ||
-              (view === 'order' && (currentPage + 1) * 10 >= orders.length)
-            }
-            onClick={() => {
-              if (view === 'order') {
-                setCurrentPage((p) => p + 1);
-              } else {
-                // DAY VIEW: Safely calculate next month
-                const baseDate = currentMonth || new Date();
-                setCurrentMonth(
-                  new Date(baseDate.getFullYear(), baseDate.getMonth() + 1, 1)
-                );
-                setCurrentPage(0);
-              }
-            }}
-            className="p-2 bg-slate-900/50 border border-white/5 rounded-lg disabled:opacity-20 text-blue-500"
-          >
-            <ChevronRight size={16} />
-          </button>
+            {/* NEXT BUTTON */}
+            <button
+              disabled={loading}
+              onClick={() => {
+                if (viewMode === 'orders') {
+                  setCurrentPage((p) => p + 1);
+                } else {
+                  // DAY VIEW: Next month
+                  const baseDate = currentMonth || new Date();
+                  setCurrentMonth(
+                    new Date(baseDate.getFullYear(), baseDate.getMonth() + 1, 1)
+                  );
+                  setCurrentPage(0);
+                }
+              }}
+              className="p-2 bg-slate-900/50 border border-white/5 rounded-lg disabled:opacity-20 text-blue-500 hover:bg-slate-800 transition-colors"
+            >
+              <ChevronRight size={16} />
+            </button>
+          </div>
         </div>
       </div>
     </div>
