@@ -19,7 +19,10 @@ import {
 } from 'lucide-react';
 import { parseInvoiceImage } from '@/app/actions/parseInvoice';
 // Bulletproof Levenshtein distance to handle typos in medicine keywords
-
+// ====================== PRICE ANOMALY CONFIG ======================
+// Change this number if you want stricter/looser blocking
+const PRICE_ANOMALY_THRESHOLD = 3; // 3× = 300% higher than current selling price
+// =================================================================
 const EMPTY_ITEM = {
   inventory_id: '',
   item_name: '',
@@ -34,6 +37,9 @@ const EMPTY_ITEM = {
   current_price: 0,
   new_price: 0,
   remaining_stock: 0,
+  // === NEW: Price anomaly safeguard ===
+  price_anomaly: false,
+  price_ratio: 1,
 };
 
 const calculateMarkup = (
@@ -230,6 +236,8 @@ export default function NewPurchaseOrder() {
   const [currentBranchId, setCurrentBranchId] = useState<string | null>(null);
   const [finalGenericAmt, setFinalGenericAmt] = useState(0);
   const [finalBrandedAmt, setFinalBrandedAmt] = useState(0);
+  const [showPriceError, setShowPriceError] = useState(false);
+  const [priceErrorItems, setPriceErrorItems] = useState<any[]>([]);
 
   const getNextPoNumber = useCallback(async () => {
     // 1. Fetch the total count of all purchase orders in the system
@@ -435,6 +443,21 @@ export default function NewPurchaseOrder() {
       Number(item.current_price) || 0
     );
 
+    // ====================== PRICE ANOMALY DETECTION (HARD BLOCK) ======================
+    // This forces staff to fix box-vs-per-piece mistakes immediately
+    const currPrice = Number(item.current_price) || 0;
+    const newPriceVal = Number(item.new_price) || 0;
+
+    if (currPrice > 0) {
+      item.price_ratio = Number((newPriceVal / currPrice).toFixed(1));
+      item.price_anomaly = newPriceVal > currPrice * PRICE_ANOMALY_THRESHOLD;
+    } else {
+      // New items (no current price yet) never trigger anomaly
+      item.price_anomaly = false;
+      item.price_ratio = 1;
+    }
+    // ===============================================================================
+
     newItems[index] = item;
     setItems(newItems);
   };
@@ -483,122 +506,148 @@ export default function NewPurchaseOrder() {
         const extracted = await parseInvoiceImage(fileData, file.type);
 
         if (extracted && Array.isArray(extracted)) {
-          const aiMappedItems = extracted.map((extractedItem: any) => {
-            const aiName = (extractedItem.item_name || '').trim();
-            // normalizedAi is now guaranteed to be UPPERCASE
-            const normalizedAi = normalizeMedicineName(aiName);
+          const aiMappedItems = extracted
+            .map((extractedItem: any) => {
+              const aiName = (extractedItem.item_name || '').trim();
+              // normalizedAi is now guaranteed to be UPPERCASE
+              const normalizedAi = normalizeMedicineName(aiName);
 
-            let bestMatch: any = null;
-            let bestScore = 999;
+              let bestMatch: any = null;
+              let bestScore = 999;
 
-            if (Array.isArray(inventoryList) && inventoryList.length > 0) {
-              // 1. PREPARE AI DATA
-              // Strip 'S' numbers (e.g., 30S) for dosage check
-              const cleanAiForNumbers = normalizedAi.replace(/\b\d+S\b/gi, '');
-              const aiNumbers = cleanAiForNumbers.match(/\d+/g) || [];
-
-              // Extract core medicine keywords (UPPERCASE)
-              const aiKeywords = normalizedAi
-                .split(' ')
-                .filter((w) => w.length > 3 && isNaN(Number(w)));
-
-              for (const inv of inventoryList) {
-                if (!inv?.item_name) continue;
-
-                // Ensure DB name is normalized to UPPERCASE
-                const normalizedDb = normalizeMedicineName(inv.item_name);
-
-                // PRIORITY 1: EXACT MATCH (Case-insensitive because both are UPPERCASE)
-                if (normalizedAi === normalizedDb) {
-                  bestMatch = inv;
-                  bestScore = 0;
-                  break;
-                }
-
-                // PRIORITY 2: CORE NAME GUARD
-                // DB must contain at least one AI keyword (e.g., "FEBUXOSTAT")
-                const hasCoreNameMatch =
-                  aiKeywords.length === 0 ||
-                  aiKeywords.some((word) => normalizedDb.includes(word));
-
-                if (!hasCoreNameMatch) continue;
-
-                let distance = getLevenshteinDistance(
-                  normalizedAi,
-                  normalizedDb
-                );
-
-                // PRIORITY 3: DOSAGE GUARD (Lenient)
-                const cleanDbForNumbers = normalizedDb.replace(
+              if (Array.isArray(inventoryList) && inventoryList.length > 0) {
+                // 1. PREPARE AI DATA
+                // Strip 'S' numbers (e.g., 30S) for dosage check
+                const cleanAiForNumbers = normalizedAi.replace(
                   /\b\d+S\b/gi,
                   ''
                 );
-                const dbNumbers = cleanDbForNumbers.match(/\d+/g) || [];
+                const aiNumbers = cleanAiForNumbers.match(/\d+/g) || [];
 
-                const hasDosageMatch =
-                  aiNumbers.length === 0 ||
-                  aiNumbers.some((num) => dbNumbers.includes(num));
+                // Extract core medicine keywords (UPPERCASE)
+                const aiKeywords = normalizedAi
+                  .split(' ')
+                  .filter((w) => w.length > 3 && isNaN(Number(w)));
 
-                if (!hasDosageMatch) {
-                  distance += 100; // Penalty for mismatching strength
-                }
+                for (const inv of inventoryList) {
+                  if (!inv?.item_name) continue;
 
-                // PRIORITY 4: SUBSTRING BONUS
-                if (distance < 100) {
-                  if (
-                    normalizedAi.includes(normalizedDb) ||
-                    normalizedDb.includes(normalizedAi)
-                  ) {
-                    distance = Math.min(distance, 1);
+                  // Ensure DB name is normalized to UPPERCASE
+                  const normalizedDb = normalizeMedicineName(inv.item_name);
+
+                  // PRIORITY 1: EXACT MATCH (Case-insensitive because both are UPPERCASE)
+                  if (normalizedAi === normalizedDb) {
+                    bestMatch = inv;
+                    bestScore = 0;
+                    break;
+                  }
+
+                  // PRIORITY 2: CORE NAME GUARD
+                  // DB must contain at least one AI keyword (e.g., "FEBUXOSTAT")
+                  const hasCoreNameMatch =
+                    aiKeywords.length === 0 ||
+                    aiKeywords.some((word) => normalizedDb.includes(word));
+
+                  if (!hasCoreNameMatch) continue;
+
+                  let distance = getLevenshteinDistance(
+                    normalizedAi,
+                    normalizedDb
+                  );
+
+                  // PRIORITY 3: DOSAGE GUARD (Lenient)
+                  const cleanDbForNumbers = normalizedDb.replace(
+                    /\b\d+S\b/gi,
+                    ''
+                  );
+                  const dbNumbers = cleanDbForNumbers.match(/\d+/g) || [];
+
+                  const hasDosageMatch =
+                    aiNumbers.length === 0 ||
+                    aiNumbers.some((num) => dbNumbers.includes(num));
+
+                  if (!hasDosageMatch) {
+                    distance += 100; // Penalty for mismatching strength
+                  }
+
+                  // PRIORITY 4: SUBSTRING BONUS
+                  if (distance < 100) {
+                    if (
+                      normalizedAi.includes(normalizedDb) ||
+                      normalizedDb.includes(normalizedAi)
+                    ) {
+                      distance = Math.min(distance, 1);
+                    }
+                  }
+
+                  if (distance < bestScore) {
+                    bestScore = distance;
+                    bestMatch = inv;
                   }
                 }
-
-                if (distance < bestScore) {
-                  bestScore = distance;
-                  bestMatch = inv;
-                }
               }
-            }
 
-            console.log(
-              `AI: "${normalizedAi}" | Match: "${
-                bestMatch?.item_name?.toUpperCase() || 'NONE'
-              }" | Score: ${bestScore}`
-            );
+              console.log(
+                `AI: "${normalizedAi}" | Match: "${
+                  bestMatch?.item_name?.toUpperCase() || 'NONE'
+                }" | Score: ${bestScore}`
+              );
 
-            const price = Math.max(0, Number(extractedItem.invoice_price) || 0);
-            const qty = Math.max(1, Number(extractedItem.qty) || 1);
+              const price = Math.max(
+                0,
+                Number(extractedItem.invoice_price) || 0
+              );
+              const qty = Math.max(1, Number(extractedItem.qty) || 1);
 
-            // Threshold: 25 is safe because mismatching dosages are +100
-            const matchedItem = bestScore <= 25 ? bestMatch : null;
+              // Threshold: 25 is safe because mismatching dosages are +100
+              const matchedItem = bestScore <= 25 ? bestMatch : null;
 
-            // Force the final displayed name to be UPPERCASE
-            const finalName = (matchedItem?.item_name || aiName).toUpperCase();
+              // Force the final displayed name to be UPPERCASE
+              const finalName = (
+                matchedItem?.item_name || aiName
+              ).toUpperCase();
 
-            const markupVal = calculateMarkup(
-              matchedItem?.item_type || 'GENERIC',
-              finalName
-            );
+              const markupVal = calculateMarkup(
+                matchedItem?.item_type || 'GENERIC',
+                finalName
+              );
 
-            return {
-              ...EMPTY_ITEM,
-              inventory_id: matchedItem?.id || '',
-              item_name: finalName,
-              item_type: (matchedItem?.item_type || 'GENERIC').toUpperCase(),
-              qty,
-              invoice_price: price,
-              buy_cost: price,
-              buy_cost_total: qty * price,
-              match_score: matchedItem ? Math.round(bestScore) : 999,
-              markup: markupVal,
-              new_price: Math.max(
-                Math.ceil(price * (1 + markupVal / 100)),
-                matchedItem?.price || 0
-              ),
-              current_price: matchedItem?.price || 0,
-              remaining_stock: matchedItem?.stock || 0,
-            };
-          });
+              return {
+                ...EMPTY_ITEM,
+                inventory_id: matchedItem?.id || '',
+                item_name: finalName,
+                item_type: (matchedItem?.item_type || 'GENERIC').toUpperCase(),
+                qty,
+                invoice_price: price,
+                buy_cost: price,
+                buy_cost_total: qty * price,
+                match_score: matchedItem ? Math.round(bestScore) : 999,
+                markup: markupVal,
+                current_price: matchedItem?.price || 0,
+                remaining_stock: matchedItem?.stock || 0,
+
+                // === PRICE ANOMALY DETECTION (HARD BLOCK) ===
+                new_price: Math.max(
+                  Math.ceil(price * (1 + markupVal / 100)),
+                  matchedItem?.price || 0
+                ),
+              };
+            })
+            .map((item) => {
+              // Final anomaly calculation (same logic as updateItem)
+              const currPrice = Number(item.current_price) || 0;
+              const newPriceVal = Number(item.new_price) || 0;
+
+              if (currPrice > 0) {
+                item.price_ratio = Number((newPriceVal / currPrice).toFixed(1));
+                item.price_anomaly =
+                  newPriceVal > currPrice * PRICE_ANOMALY_THRESHOLD;
+              } else {
+                item.price_anomaly = false;
+                item.price_ratio = 1;
+              }
+              return item;
+            });
 
           setItems(aiMappedItems);
           setSearchTerms(aiMappedItems.map((i: any) => i.item_name));
@@ -631,6 +680,15 @@ export default function NewPurchaseOrder() {
     if (!supplierSearch?.trim())
       return alert('Please enter or select a supplier.');
 
+    // === HARD BLOCK ON PRICE ANOMALIES ===
+    const anomalousItems = items.filter((i) => i.price_anomaly);
+    if (anomalousItems.length > 0) {
+      setPriceErrorItems(anomalousItems);
+      setShowPriceError(true);
+      return;
+    }
+    // =====================================
+
     if (items.some((i) => !i.inventory_id))
       return alert('Some items are not matched to inventory.');
 
@@ -640,7 +698,6 @@ export default function NewPurchaseOrder() {
       if (!currentBranchId) throw new Error('Branch ID is missing');
       if (!profile?.id) throw new Error('User profile is missing');
 
-      // 1. Calculate split totals
       const splitTotals = items.reduce(
         (acc, item) => {
           const amount = Number(item.buy_cost_total) || 0;
@@ -651,11 +708,9 @@ export default function NewPurchaseOrder() {
         { generic: 0, branded: 0 }
       );
 
-      // 2. PHT Date as clean YYYY-MM-DD string (converted to DATE in Postgres)
       const nowPHT = new Date(Date.now() + 8 * 60 * 60 * 1000);
       const phtDateString = nowPHT.toISOString().split('T')[0];
 
-      // 3. Prepare items for RPC
       const mappedItems = items.map((item) => ({
         inventory_id: item.inventory_id,
         item_name: item.item_name,
@@ -670,7 +725,6 @@ export default function NewPurchaseOrder() {
             : Number(item.current_price),
       }));
 
-      // 4. Call RPC
       const { data, error } = await supabase.rpc(
         'process_branch_purchase_order',
         {
@@ -681,7 +735,7 @@ export default function NewPurchaseOrder() {
           p_branded_amt: splitTotals.branded,
           p_branch_id: currentBranchId,
           p_created_by: profile.id,
-          p_created_date_pht: phtDateString, // ← Clean string (will be cast to DATE)
+          p_created_date_pht: phtDateString,
           p_items_json: mappedItems,
         }
       );
@@ -691,7 +745,6 @@ export default function NewPurchaseOrder() {
         throw new Error(error.message || 'Failed to process purchase order');
       }
 
-      // Success
       setFinalGenericAmt(splitTotals.generic);
       setFinalBrandedAmt(splitTotals.branded);
       setIsSuccess(true);
@@ -1049,7 +1102,7 @@ export default function NewPurchaseOrder() {
                             </div>
                           )}
 
-                          {/* + Add New Button hello */}
+                          {/* + Add New Button */}
                           {!hasInventoryId &&
                             searchTerms[idx] !== '' &&
                             activeSearchIndex !== idx && (
@@ -1164,8 +1217,24 @@ export default function NewPurchaseOrder() {
                             }
                           />
                         </td>
-                        <td className="px-1 text-right font-black text-emerald-400 text-[12px]">
+
+                        <td
+                          className={`px-1 text-right font-black text-emerald-400 text-[12px] relative ${
+                            item.price_anomaly
+                              ? 'bg-red-500/10 ring-1 ring-red-400/50'
+                              : ''
+                          }`}
+                        >
                           ₱{(item.new_price || 0).toFixed(2)}
+                          {item.price_anomaly && (
+                            <div
+                              className="absolute -top-1 right-1 bg-red-500 text-white text-[10px] font-black px-2 py-px rounded flex items-center gap-1 shadow-md cursor-help"
+                              title={`🚫 BLOCKED: Suggested price is ${item.price_ratio}x current selling price!\n\nThis is almost always caused by entering the BOX price (100s/50s/30s) instead of per-piece price.\n\nPlease correct the Invoice Price field.`}
+                            >
+                              <AlertCircle size={14} />
+                              <span>{item.price_ratio}x</span>
+                            </div>
+                          )}
                         </td>
 
                         <td className="px-1 text-center text-slate-500 text-[11px] font-black">
@@ -1203,6 +1272,68 @@ export default function NewPurchaseOrder() {
           </button>
         </section>
       </main>
+
+      {/* === PRICE ANOMALY ERROR MODAL === */}
+      {showPriceError && (
+        <div className="fixed inset-0 z-[3000] flex items-center justify-center bg-slate-950/90 backdrop-blur-xl">
+          <div className="max-w-lg w-full bg-slate-900 border border-red-500/30 rounded-3xl p-8 shadow-2xl">
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-10 h-10 bg-red-500/10 rounded-2xl flex items-center justify-center">
+                <AlertCircle className="text-red-400" size={28} />
+              </div>
+              <div>
+                <h2 className="text-2xl font-black text-red-400 tracking-tighter">
+                  PURCHASE ORDER BLOCKED
+                </h2>
+                <p className="text-slate-400 text-sm">Price anomaly detected</p>
+              </div>
+            </div>
+
+            <div className="bg-slate-950 rounded-2xl p-5 mb-8 border border-red-500/20">
+              <p className="text-red-400 text-sm font-bold mb-4">
+                {priceErrorItems.length} item(s) have unrealistic price jumps
+                (over {PRICE_ANOMALY_THRESHOLD}× current selling price)
+              </p>
+              <ul className="space-y-3 text-sm max-h-64 overflow-y-auto">
+                {priceErrorItems.map((item, i) => (
+                  <li
+                    key={i}
+                    className="flex justify-between bg-white/5 px-4 py-3 rounded-xl"
+                  >
+                    <span className="font-bold text-white">
+                      {item.item_name}
+                    </span>
+                    <span className="font-black text-red-400">
+                      {item.price_ratio}x
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <p className="text-slate-400 text-center mb-8 leading-relaxed">
+              This is almost always caused by entering the{' '}
+              <strong>BOX price</strong> (100s / 50s / 30s) instead of the{' '}
+              <strong>per-piece price</strong>.<br />
+              Please correct the{' '}
+              <span className="text-emerald-400 font-bold">
+                Invoice Price
+              </span>{' '}
+              field.
+            </p>
+
+            <button
+              onClick={() => {
+                setShowPriceError(false);
+                setPriceErrorItems([]);
+              }}
+              className="w-full bg-red-500 hover:bg-red-600 text-white font-black uppercase tracking-widest py-5 rounded-2xl transition-all active:scale-95"
+            >
+              GOT IT — I’LL FIX THE PRICES
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
