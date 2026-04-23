@@ -927,7 +927,7 @@ export default function PurchaseOrderList() {
         </div>
       )}
 
-      {/* FOOTER PAGINATION */}
+      {/* FOOTER PAGINATION12 */}
       <div className="flex flex-col sm:flex-row justify-between items-center px-2 gap-4">
         <p className="text-[9px] font-black text-slate-700 uppercase tracking-widest">
           {loading
