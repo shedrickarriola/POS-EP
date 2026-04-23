@@ -476,9 +476,204 @@ export default function PurchaseOrderList() {
       </div>
       {/* MAIN CONTENT - Order View OR Invoice View */}
       {viewMode === 'orders' ? (
-        // === EXISTING ORDER VIEW TABLE (unchanged) ===
+        // === ORDER VIEW (restored from your original working version) ===
         <div className="bg-slate-900/30 border border-white/5 rounded-2xl overflow-hidden shadow-xl mb-4">
-          {/* ... your existing table code stays exactly the same ... */}
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse">
+              <thead>
+                <tr className="border-b border-white/5 bg-white/5 text-left text-[9px] font-black uppercase text-slate-500 tracking-[0.2em]">
+                  <th className="p-4 w-12"></th>
+                  <th className="p-4">PO Ref / Date</th>
+                  <th className="p-4">Supplier & Operator</th>
+                  <th className="p-4 text-right text-indigo-400/50 uppercase">
+                    Generic
+                  </th>
+                  <th className="p-4 text-right text-amber-400/50 uppercase">
+                    Branded
+                  </th>
+                  <th className="p-4 text-center">Verification</th>
+                  <th className="p-4 text-right text-white">Grand Total</th>
+                  <th className="p-4 w-12"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {orders.length === 0 && !loading && (
+                  <tr>
+                    <td
+                      colSpan={8}
+                      className="p-16 text-center text-slate-600 font-mono text-xs tracking-widest"
+                    >
+                      NO_ARCHIVE_DATA_FOUND
+                    </td>
+                  </tr>
+                )}
+                {orders.map((order) => (
+                  <React.Fragment key={order.id}>
+                    <tr
+                      onClick={() =>
+                        setExpandedRow(
+                          expandedRow === order.id ? null : order.id
+                        )
+                      }
+                      className={`cursor-pointer transition-all duration-150 group ${
+                        expandedRow === order.id
+                          ? 'bg-blue-600/5'
+                          : 'hover:bg-white/[0.02]'
+                      }`}
+                    >
+                      <td className="p-4 text-center">
+                        <Layers
+                          size={12}
+                          className={
+                            expandedRow === order.id
+                              ? 'text-blue-400'
+                              : 'text-slate-700'
+                          }
+                        />
+                      </td>
+                      <td className="p-4">
+                        <div className="flex flex-col font-mono leading-tight">
+                          <span className="text-blue-400 font-black text-xs uppercase">
+                            {order.po_number}
+                          </span>
+                          <span className="text-[9px] text-slate-500 uppercase mt-0.5">
+                            {new Date(
+                              order.created_date_pht
+                            ).toLocaleDateString()}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="p-4">
+                        <div className="flex flex-col leading-tight">
+                          <span className="text-[10px] font-black uppercase text-slate-300 flex items-center gap-1">
+                            <Truck size={10} className="text-blue-500" />{' '}
+                            {order.supplier_name}
+                          </span>
+                          <span className="text-[9px] font-bold text-slate-500 uppercase flex items-center gap-1">
+                            <User size={10} /> {order.profiles?.full_name}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="p-4 text-right font-mono text-xs text-indigo-400/80">
+                        ₱{(order.generic_amt || 0).toLocaleString()}
+                      </td>
+                      <td className="p-4 text-right font-mono text-xs text-amber-400/80">
+                        ₱{(order.branded_amt || 0).toLocaleString()}
+                      </td>
+                      <td className="p-4 text-center">
+                        {order.is_checked ? (
+                          <div className="flex flex-col items-center">
+                            <div className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded text-[8px] font-black uppercase flex items-center gap-1">
+                              <CheckCircle2 size={10} /> Checked
+                            </div>
+                            <span className="text-[7px] text-slate-600 uppercase mt-1 italic">
+                              {order.checked_by_name}
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="bg-slate-800 text-slate-500 px-2 py-0.5 rounded text-[8px] font-black uppercase inline-flex items-center gap-1">
+                            <Clock size={10} /> Pending
+                          </div>
+                        )}
+                      </td>
+                      <td className="p-4 text-right font-black text-emerald-400 font-mono text-sm tracking-tighter">
+                        ₱
+                        {order.total_amount?.toLocaleString(undefined, {
+                          minimumFractionDigits: 2,
+                        })}
+                      </td>
+                      <td className="p-4 text-slate-700 group-hover:text-blue-500 transition-colors">
+                        {expandedRow === order.id ? (
+                          <ChevronUp size={16} />
+                        ) : (
+                          <ChevronDown size={16} />
+                        )}
+                      </td>
+                    </tr>
+
+                    {/* EXPANDED SECTION: ITEM LIST */}
+                    {expandedRow === order.id && (
+                      <tr>
+                        <td
+                          colSpan={8}
+                          className="bg-black/40 border-y border-blue-500/10 p-5"
+                        >
+                          <div className="flex flex-col gap-4">
+                            <div className="flex justify-between items-center border-b border-white/5 pb-2">
+                              <div>
+                                <h3 className="text-[9px] font-black text-blue-500 uppercase tracking-widest flex items-center gap-2">
+                                  <Layers size={12} /> Itemized Procurement
+                                </h3>
+                                <p className="text-[8px] text-slate-600 font-bold uppercase mt-1">
+                                  Invoice: {order.invoice_id || 'N/A'}
+                                </p>
+                              </div>
+                              {canVerify && !order.is_checked && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleVerifyOrder(order.id);
+                                  }}
+                                  disabled={isVerifying === order.id}
+                                  className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest flex items-center gap-2 transition-all shadow-lg"
+                                >
+                                  {isVerifying === order.id ? (
+                                    'Processing...'
+                                  ) : (
+                                    <>
+                                      <ShieldCheck size={12} /> Tag as Verified
+                                    </>
+                                  )}
+                                </button>
+                              )}
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                              {order.purchase_order_items &&
+                              order.purchase_order_items.length > 0 ? (
+                                order.purchase_order_items.map((item: any) => (
+                                  <div
+                                    key={item.id}
+                                    className="flex justify-between items-center bg-white/[0.02] p-3 rounded-lg border border-white/5"
+                                  >
+                                    <div className="flex flex-col">
+                                      <span className="text-[10px] font-black text-slate-300 uppercase">
+                                        {item.item_name}
+                                      </span>
+                                      <span className="text-[8px] font-black text-slate-600 uppercase tracking-tighter">
+                                        {item.item_type || 'GENERIC'}
+                                      </span>
+                                    </div>
+                                    <div className="text-right">
+                                      <span className="text-[9px] text-slate-600 font-mono block">
+                                        QTY: {item.quantity} @ ₱
+                                        {Number(item.buy_cost).toFixed(2)}
+                                      </span>
+                                      <span className="text-xs font-black text-emerald-500/80 font-mono">
+                                        ₱
+                                        {(
+                                          item.quantity * item.buy_cost
+                                        ).toFixed(2)}
+                                      </span>
+                                    </div>
+                                  </div>
+                                ))
+                              ) : (
+                                <div className="col-span-full py-8 text-center border border-dashed border-white/10 rounded-xl">
+                                  <p className="text-[9px] text-slate-600 uppercase font-mono tracking-widest">
+                                    No_Products_Found_For_PO: {order.po_number}
+                                  </p>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
         // === WEEK → INVOICE → PO ITEMS VIEW ===
