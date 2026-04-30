@@ -182,12 +182,12 @@ export async function GET(request: Request) {
             .eq('branch_id', b.id)
             .order('sold_weekly', { ascending: false });
 
-          // Filter - sold_weekly is the main reference
+          // LENIENT FILTER - prioritize sold_weekly_snapshot when sold_weekly is 0
           const meaningfulItems = (branchInventory || [])
             .filter((p: any) => {
               const stock = Number(p?.stock || 0);
               const soldWeekly = Number(p?.sold_weekly || 0);
-              const baselineWeekly = Number(p?.sold_weekly_snapshot || 0);
+              const snapshot = Number(p?.sold_weekly_snapshot || 0);
 
               const itemNameUpper = String(p?.item_name || '').toUpperCase();
               const isSyrup = /\b(SYRUP|SYR)\b/.test(itemNameUpper);
@@ -201,18 +201,18 @@ export async function GET(request: Request) {
                   86400000
               );
 
+              // sold_weekly_snapshot is main reference when sold_weekly is 0
               let weeklyDemand =
                 soldWeekly ||
-                baselineWeekly ||
+                snapshot ||
                 Number(p?.sold_monthly || 0) / 4.3 ||
                 0;
 
-              const hasSalesHistory = soldWeekly > 0 || baselineWeekly > 0;
+              const hasSalesHistory = soldWeekly > 0 || snapshot > 0;
 
               return (
-                (weeklyDemand > 0 && stock < weeklyDemand * 2) || // main low-stock rule
-                (stock <= 10 && hasSalesHistory) ||
-                (isSyrup && soldWeekly > 0)
+                hasSalesHistory &&
+                ((weeklyDemand > 0 && stock < weeklyDemand * 2) || stock <= 10)
               );
             })
             .sort((a: any, b: any) => {
@@ -222,7 +222,7 @@ export async function GET(request: Request) {
               const soldB =
                 Number(b?.sold_weekly || 0) ||
                 Number(b?.sold_weekly_snapshot || 0);
-              return soldB - soldA; // highest sold_weekly first
+              return soldB - soldA; // highest sold first
             });
 
           // Normal items first, SYRUP at the bottom
@@ -276,7 +276,7 @@ export async function GET(request: Request) {
               .slice(0, 5),
           ].slice(0, 20);
 
-          // Suggestion logic (purely based on sold_weekly)
+          // Suggestion + Cost (strict buy_cost)
           let totalEstimatedCost = 0;
           const getSuggestion = (p: any) => {
             let weekly = Number(p?.sold_weekly || 0);
@@ -288,19 +288,13 @@ export async function GET(request: Request) {
 
             let suggested = weekly;
 
-            if (weekly < 5) {
-              suggested = weekly;
-            } else if (weekly < 100) {
-              suggested = Math.ceil(suggested / 10) * 10;
-            } else {
-              suggested = Math.ceil(suggested / 100) * 100;
-            }
+            if (weekly < 5) suggested = weekly;
+            else if (weekly < 100) suggested = Math.ceil(suggested / 10) * 10;
+            else suggested = Math.ceil(suggested / 100) * 100;
 
             const buyCost = Number(p?.buy_cost || 0);
-            const price = Number(p?.price || 0);
-            const unitCost = buyCost > 0 ? buyCost : price; // ← fallback to price if buy_cost is 0/null
+            const cost = suggested * buyCost; // strict buy_cost (0 if null)
 
-            const cost = suggested * unitCost;
             totalEstimatedCost += cost;
 
             const isBox = suggested >= 100;
@@ -323,7 +317,9 @@ export async function GET(request: Request) {
             genericItems.forEach((p: any) => {
               const { displayQty, cost } = getSuggestion(p);
               const stock = Number(p?.stock || 0);
-              const weekly = Number(p?.sold_weekly || 0);
+              const weekly =
+                Number(p?.sold_weekly || 0) ||
+                Number(p?.sold_weekly_snapshot || 0);
               const itemNameUpper = String(p?.item_name || '').toUpperCase();
               const isSyrup = /\b(SYRUP|SYR)\b/.test(itemNameUpper);
               const lastRestockStr = p?.last_restock_date;
@@ -358,7 +354,9 @@ export async function GET(request: Request) {
             brandedItems.forEach((p: any) => {
               const { displayQty, cost } = getSuggestion(p);
               const stock = Number(p?.stock || 0);
-              const weekly = Number(p?.sold_weekly || 0);
+              const weekly =
+                Number(p?.sold_weekly || 0) ||
+                Number(p?.sold_weekly_snapshot || 0);
               const itemNameUpper = String(p?.item_name || '').toUpperCase();
               const isSyrup = /\b(SYRUP|SYR)\b/.test(itemNameUpper);
               const lastRestockStr = p?.last_restock_date;
@@ -388,7 +386,6 @@ export async function GET(request: Request) {
           }
           branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
 
-          // Send Telegram
           try {
             await fetch(
               `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
@@ -407,7 +404,6 @@ export async function GET(request: Request) {
             console.error(`❌ Telegram failed:`, err);
           }
 
-          // Email
           fullEmailHtml += `<h3>🏢 ${b.branch_name.toUpperCase()} &nbsp;&nbsp;&nbsp; 💰 EST. TOTAL: ₱${Math.round(
             totalEstimatedCost
           ).toLocaleString()}</h3>`;
