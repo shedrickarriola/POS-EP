@@ -153,19 +153,22 @@ export async function GET(request: Request) {
     for (const group of Object.values(orgGroups) as any[]) {
       let message = '';
       if (type === 'STOCK_ADVISORY') {
-        console.log('🚀 STOCK_ADVISORY → Telegram (per branch) + Email (consolidated)');
+        console.log(
+          '🚀 STOCK_ADVISORY → Telegram (per branch) + Email (consolidated)'
+        );
 
-        // ────── MONDAY SNAPSHOT ──────
+        // MONDAY SNAPSHOT
         const todayDate = new Date(todayPHT);
         const isMonday = todayDate.getDay() === 1;
 
         if (isMonday) {
-          console.log('📸 Monday snapshot → last_restock_date + sold_weekly_snapshot');
+          console.log('📸 Monday snapshot running...');
           const { error: snapshotError } = await supabaseAdmin.rpc(
             'snapshot_monday_inventory',
             { p_today: todayPHT }
           );
-          if (snapshotError) console.error('❌ Snapshot failed:', snapshotError);
+          if (snapshotError)
+            console.error('❌ Snapshot failed:', snapshotError);
           else console.log('✅ Monday snapshot completed');
         }
 
@@ -179,87 +182,147 @@ export async function GET(request: Request) {
             .eq('branch_id', b.id)
             .order('sold_weekly', { ascending: false });
 
-          // Filter with *2 buffer for everything
-          const meaningfulItems = (branchInventory || []).filter((p: any) => {
-            const stock = Number(p?.stock || 0);
-            const soldWeekly = Number(p?.sold_weekly || 0);
-            const baselineWeekly = Number(p?.sold_weekly_snapshot || 0);
+          // ────── LENIENT FILTER (sold_weekly is main reference) ──────
+          const meaningfulItems = (branchInventory || [])
+            .filter((p: any) => {
+              const stock = Number(p?.stock || 0);
+              const soldWeekly = Number(p?.sold_weekly || 0);
+              const baselineWeekly = Number(p?.sold_weekly_snapshot || 0);
 
-            const itemNameUpper = String(p?.item_name || '').toUpperCase();
-            const isSyrup = itemNameUpper.includes('SYRUP') || itemNameUpper.includes('SYR');
+              const itemNameUpper = String(p?.item_name || '').toUpperCase();
+              const isSyrup =
+                itemNameUpper.includes('SYRUP') ||
+                itemNameUpper.includes('SYR');
 
-            const lastRestockStr = p?.last_restock_date;
-            const lastRestock = lastRestockStr ? new Date(lastRestockStr) : new Date('2020-01-01');
-            const daysSinceRestock = Math.floor((new Date(todayPHT).getTime() - lastRestock.getTime()) / 86400000);
+              const lastRestockStr = p?.last_restock_date;
+              const lastRestock = lastRestockStr
+                ? new Date(lastRestockStr)
+                : new Date('2020-01-01');
+              const daysAgo = Math.floor(
+                (new Date(todayPHT).getTime() - lastRestock.getTime()) /
+                  86400000
+              );
 
-            let weeklyDemand = soldWeekly;
-            if (weeklyDemand < 5) {
-              weeklyDemand = baselineWeekly > 0 
-                ? baselineWeekly 
-                : (Number(p?.sold_monthly || 0) > 0 ? Number(p?.sold_monthly || 0) / 4.3 : Number(p?.sold_yearly || 0) / 52);
-            }
+              // Main reference = sold_weekly
+              let weeklyDemand = soldWeekly || baselineWeekly;
 
-            const hasSalesHistory = soldWeekly > 0 || baselineWeekly > 0 || 
-                                   Number(p?.sold_monthly || 0) > 0 || Number(p?.sold_yearly || 0) > 0;
+              const hasSalesHistory = soldWeekly > 0 || baselineWeekly > 0;
 
-            return (
-              (weeklyDemand > 0 && stock < weeklyDemand * 2) ||
-              (stock <= 8 && hasSalesHistory) ||
-              (stock <= 8 && daysSinceRestock > 14)
-            );
-          })
-          .sort((a: any, b: any) => {
-            const stockA = Number(a?.stock || 0);
-            const stockB = Number(b?.stock || 0);
-            const demandA = Number(a?.sold_weekly || 0) || Number(a?.sold_weekly_snapshot || 0) || (Number(a?.sold_monthly || 0) / 4.3) || 1;
-            const demandB = Number(b?.sold_weekly || 0) || Number(b?.sold_weekly_snapshot || 0) || (Number(b?.sold_monthly || 0) / 4.3) || 1;
-            return (stockA / demandA) - (stockB / demandB);
-          });
+              // LENIENT: show any item that is actually selling
+              return (
+                (weeklyDemand > 0 && stock < weeklyDemand * 3) || // relaxed buffer
+                (stock <= 15 && hasSalesHistory) || // low stock safety
+                (isSyrup && hasSalesHistory) // all selling syrups
+              );
+            })
+            .sort((a: any, b: any) => {
+              const soldA =
+                Number(a?.sold_weekly || 0) ||
+                Number(a?.sold_weekly_snapshot || 0);
+              const soldB =
+                Number(b?.sold_weekly || 0) ||
+                Number(b?.sold_weekly_snapshot || 0);
+              return soldB - soldA; // highest sold_weekly first
+            });
 
-          // Syrups first, then others (max 40 generic / 20 branded)
+          // Syrups first inside each category
           const genericItems = [
-            ...meaningfulItems.filter(p => String(p?.item_type || '').toUpperCase().trim() === 'GENERIC' &&
-                                         (String(p?.item_name || '').toUpperCase().includes('SYRUP') || String(p?.item_name || '').toUpperCase().includes('SYR'))).slice(0, 20),
-            ...meaningfulItems.filter(p => String(p?.item_type || '').toUpperCase().trim() === 'GENERIC' &&
-                                         !(String(p?.item_name || '').toUpperCase().includes('SYRUP') || String(p?.item_name || '').toUpperCase().includes('SYR'))).slice(0, 20)
+            ...meaningfulItems
+              .filter(
+                (p) =>
+                  String(p?.item_type || '')
+                    .toUpperCase()
+                    .trim() === 'GENERIC' &&
+                  (String(p?.item_name || '')
+                    .toUpperCase()
+                    .includes('SYRUP') ||
+                    String(p?.item_name || '')
+                      .toUpperCase()
+                      .includes('SYR'))
+              )
+              .slice(0, 20),
+            ...meaningfulItems
+              .filter(
+                (p) =>
+                  String(p?.item_type || '')
+                    .toUpperCase()
+                    .trim() === 'GENERIC' &&
+                  !(
+                    String(p?.item_name || '')
+                      .toUpperCase()
+                      .includes('SYRUP') ||
+                    String(p?.item_name || '')
+                      .toUpperCase()
+                      .includes('SYR')
+                  )
+              )
+              .slice(0, 20),
           ].slice(0, 40);
 
           const brandedItems = [
-            ...meaningfulItems.filter(p => String(p?.item_type || '').toUpperCase().trim() === 'BRANDED' &&
-                                         (String(p?.item_name || '').toUpperCase().includes('SYRUP') || String(p?.item_name || '').toUpperCase().includes('SYR'))).slice(0, 10),
-            ...meaningfulItems.filter(p => String(p?.item_type || '').toUpperCase().trim() === 'BRANDED' &&
-                                         !(String(p?.item_name || '').toUpperCase().includes('SYRUP') || String(p?.item_name || '').toUpperCase().includes('SYR'))).slice(0, 10)
+            ...meaningfulItems
+              .filter(
+                (p) =>
+                  String(p?.item_type || '')
+                    .toUpperCase()
+                    .trim() === 'BRANDED' &&
+                  (String(p?.item_name || '')
+                    .toUpperCase()
+                    .includes('SYRUP') ||
+                    String(p?.item_name || '')
+                      .toUpperCase()
+                      .includes('SYR'))
+              )
+              .slice(0, 10),
+            ...meaningfulItems
+              .filter(
+                (p) =>
+                  String(p?.item_type || '')
+                    .toUpperCase()
+                    .trim() === 'BRANDED' &&
+                  !(
+                    String(p?.item_name || '')
+                      .toUpperCase()
+                      .includes('SYRUP') ||
+                    String(p?.item_name || '')
+                      .toUpperCase()
+                      .includes('SYR')
+                  )
+              )
+              .slice(0, 10),
           ].slice(0, 20);
 
-          // Calculate total estimated cost
+          // Suggestion logic (sold_weekly is main reference)
           let totalEstimatedCost = 0;
-
           const getSuggestion = (p: any) => {
-            let weekly = Number(p?.sold_weekly || 0) || Number(p?.sold_weekly_snapshot || 0) ||
-                        (Number(p?.sold_monthly || 0) / 4.3) || 0;
-            let suggested = weekly * 2;
+            let weekly = Number(p?.sold_weekly || 0); // ← MAIN REFERENCE
+            if (weekly === 0)
+              weekly =
+                Number(p?.sold_weekly_snapshot || 0) ||
+                Number(p?.sold_monthly || 0) / 4.3 ||
+                0;
 
-            if (weekly < 5) {
-              suggested = weekly;
-            } else if (weekly < 100) {
-              suggested = Math.ceil(suggested / 10) * 10;
-            } else {
-              suggested = Math.ceil(suggested / 100) * 100;
-            }
+            let suggested = weekly * 2;
+            if (weekly < 5) suggested = weekly;
+            else if (weekly < 100) suggested = Math.ceil(suggested / 10) * 10;
+            else suggested = Math.ceil(suggested / 100) * 100;
 
             const buyCost = Number(p?.buy_cost || 0);
             const cost = suggested * buyCost;
             totalEstimatedCost += cost;
 
             const isBox = suggested >= 100;
-            const displayQty = isBox ? `${Math.round(suggested / 100)} boxes` : `${Math.round(suggested)} pcs`;
-
+            const displayQty = isBox
+              ? `${Math.round(suggested / 100)} boxes`
+              : `${Math.round(suggested)} pcs`;
             return { displayQty, cost };
           };
 
-          // ────── TELEGRAM ──────
+          // Telegram
           let branchMessage = `<b>📦 TOP TO RESTOCK</b>\n`;
-          branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>   💰 EST. TOTAL: ₱${Math.round(totalEstimatedCost).toLocaleString()}\n`;
+          branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>   💰 EST. TOTAL: ₱${Math.round(
+            totalEstimatedCost
+          ).toLocaleString()}\n`;
           branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
 
           branchMessage += `<b>🟦 GENERIC ITEMS</b>\n`;
@@ -267,20 +330,33 @@ export async function GET(request: Request) {
             genericItems.forEach((p: any) => {
               const { displayQty, cost } = getSuggestion(p);
               const stock = Number(p?.stock || 0);
-              const weekly = Number(p?.sold_weekly || 0) || Number(p?.sold_weekly_snapshot || 0) || (Number(p?.sold_monthly || 0) / 4.3) || 0;
+              const weekly = Number(p?.sold_weekly || 0);
               const itemNameUpper = String(p?.item_name || '').toUpperCase();
-              const isSyrup = itemNameUpper.includes('SYRUP') || itemNameUpper.includes('SYR');
+              const isSyrup =
+                itemNameUpper.includes('SYRUP') ||
+                itemNameUpper.includes('SYR');
               const lastRestockStr = p?.last_restock_date;
-              const daysAgo = lastRestockStr 
-                ? Math.floor((new Date(todayPHT).getTime() - new Date(lastRestockStr).getTime()) / 86400000)
+              const daysAgo = lastRestockStr
+                ? Math.floor(
+                    (new Date(todayPHT).getTime() -
+                      new Date(lastRestockStr).getTime()) /
+                      86400000
+                  )
                 : 999;
-              const restockText = daysAgo < 999 ? ` • restock ${daysAgo}d ago` : '';
+              const restockText =
+                daysAgo < 999 ? ` • restock ${daysAgo}d ago` : '';
 
-              const icon = stock <= 0 ? '🚨' : (stock <= 8 || daysAgo > 21 ? '🔥' : '>');
+              const icon =
+                stock <= 0 ? '🚨' : stock <= 8 || daysAgo > 21 ? '🔥' : '>';
               const syrupTag = isSyrup ? ' [SYRUP]' : '';
-              const demandText = weekly > 0 ? ` (~${weekly.toFixed(0)}/wk)` : '';
+              const demandText =
+                weekly > 0 ? ` (~${weekly.toFixed(0)}/wk)` : '';
 
-              branchMessage += `${icon} ${p?.item_name}${syrupTag}: ${stock} left${demandText}${restockText} → ${displayQty} [₱${Math.round(cost).toLocaleString()}]\n`;
+              branchMessage += `${icon} ${
+                p?.item_name
+              }${syrupTag}: ${stock} left${demandText}${restockText} → ${displayQty} [₱${Math.round(
+                cost
+              ).toLocaleString()}]\n`;
             });
           } else {
             branchMessage += `✅ No generic items need restock\n`;
@@ -292,20 +368,33 @@ export async function GET(request: Request) {
             brandedItems.forEach((p: any) => {
               const { displayQty, cost } = getSuggestion(p);
               const stock = Number(p?.stock || 0);
-              const weekly = Number(p?.sold_weekly || 0) || Number(p?.sold_weekly_snapshot || 0) || (Number(p?.sold_monthly || 0) / 4.3) || 0;
+              const weekly = Number(p?.sold_weekly || 0);
               const itemNameUpper = String(p?.item_name || '').toUpperCase();
-              const isSyrup = itemNameUpper.includes('SYRUP') || itemNameUpper.includes('SYR');
+              const isSyrup =
+                itemNameUpper.includes('SYRUP') ||
+                itemNameUpper.includes('SYR');
               const lastRestockStr = p?.last_restock_date;
-              const daysAgo = lastRestockStr 
-                ? Math.floor((new Date(todayPHT).getTime() - new Date(lastRestockStr).getTime()) / 86400000)
+              const daysAgo = lastRestockStr
+                ? Math.floor(
+                    (new Date(todayPHT).getTime() -
+                      new Date(lastRestockStr).getTime()) /
+                      86400000
+                  )
                 : 999;
-              const restockText = daysAgo < 999 ? ` • restock ${daysAgo}d ago` : '';
+              const restockText =
+                daysAgo < 999 ? ` • restock ${daysAgo}d ago` : '';
 
-              const icon = stock <= 0 ? '🚨' : (stock <= 8 || daysAgo > 21 ? '🔥' : '>');
+              const icon =
+                stock <= 0 ? '🚨' : stock <= 8 || daysAgo > 21 ? '🔥' : '>';
               const syrupTag = isSyrup ? ' [SYRUP]' : '';
-              const demandText = weekly > 0 ? ` (~${weekly.toFixed(0)}/wk)` : '';
+              const demandText =
+                weekly > 0 ? ` (~${weekly.toFixed(0)}/wk)` : '';
 
-              branchMessage += `${icon} ${p?.item_name}${syrupTag}: ${stock} left${demandText}${restockText} → ${displayQty} [₱${Math.round(cost).toLocaleString()}]\n`;
+              branchMessage += `${icon} ${
+                p?.item_name
+              }${syrupTag}: ${stock} left${demandText}${restockText} → ${displayQty} [₱${Math.round(
+                cost
+              ).toLocaleString()}]\n`;
             });
           } else {
             branchMessage += `✅ No branded items need restock\n`;
@@ -314,73 +403,35 @@ export async function GET(request: Request) {
 
           // Send Telegram
           try {
-            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ chat_id: group.chatId, text: branchMessage, parse_mode: 'HTML' }),
-            });
+            await fetch(
+              `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: group.chatId,
+                  text: branchMessage,
+                  parse_mode: 'HTML',
+                }),
+              }
+            );
             console.log(`✅ Telegram sent → ${b.branch_name}`);
           } catch (err) {
             console.error(`❌ Telegram failed:`, err);
           }
 
-          // ────── EMAIL (same format) ──────
-          fullEmailHtml += `<h3>🏢 ${b.branch_name.toUpperCase()} &nbsp;&nbsp;&nbsp; 💰 EST. TOTAL: ₱${Math.round(totalEstimatedCost).toLocaleString()}</h3>`;
-
-          fullEmailHtml += `<b>🟦 GENERIC ITEMS</b><br>`;
-          if (genericItems.length > 0) {
-            genericItems.forEach((p: any) => {
-              const { displayQty, cost } = getSuggestion(p);
-              const stock = Number(p?.stock || 0);
-              const weekly = Number(p?.sold_weekly || 0) || Number(p?.sold_weekly_snapshot || 0) || (Number(p?.sold_monthly || 0) / 4.3) || 0;
-              const itemNameUpper = String(p?.item_name || '').toUpperCase();
-              const isSyrup = itemNameUpper.includes('SYRUP') || itemNameUpper.includes('SYR');
-              const lastRestockStr = p?.last_restock_date;
-              const daysAgo = lastRestockStr 
-                ? Math.floor((new Date(todayPHT).getTime() - new Date(lastRestockStr).getTime()) / 86400000)
-                : 999;
-              const restockText = daysAgo < 999 ? ` • restock ${daysAgo}d ago` : '';
-
-              const icon = stock <= 0 ? '🚨' : (stock <= 8 || daysAgo > 21 ? '🔥' : '>');
-              const syrupTag = isSyrup ? ' [SYRUP]' : '';
-              const demandText = weekly > 0 ? ` (~${weekly.toFixed(0)}/wk)` : '';
-
-              fullEmailHtml += `${icon} ${p?.item_name}${syrupTag}: ${stock} left${demandText}${restockText} → ${displayQty} [₱${Math.round(cost).toLocaleString()}]<br>`;
-            });
-          } else {
-            fullEmailHtml += `✅ No generic items need restock<br>`;
-          }
-          fullEmailHtml += `<br>`;
-
-          fullEmailHtml += `<b>🟪 BRANDED ITEMS</b><br>`;
-          if (brandedItems.length > 0) {
-            brandedItems.forEach((p: any) => {
-              const { displayQty, cost } = getSuggestion(p);
-              const stock = Number(p?.stock || 0);
-              const weekly = Number(p?.sold_weekly || 0) || Number(p?.sold_weekly_snapshot || 0) || (Number(p?.sold_monthly || 0) / 4.3) || 0;
-              const itemNameUpper = String(p?.item_name || '').toUpperCase();
-              const isSyrup = itemNameUpper.includes('SYRUP') || itemNameUpper.includes('SYR');
-              const lastRestockStr = p?.last_restock_date;
-              const daysAgo = lastRestockStr 
-                ? Math.floor((new Date(todayPHT).getTime() - new Date(lastRestockStr).getTime()) / 86400000)
-                : 999;
-              const restockText = daysAgo < 999 ? ` • restock ${daysAgo}d ago` : '';
-
-              const icon = stock <= 0 ? '🚨' : (stock <= 8 || daysAgo > 21 ? '🔥' : '>');
-              const syrupTag = isSyrup ? ' [SYRUP]' : '';
-              const demandText = weekly > 0 ? ` (~${weekly.toFixed(0)}/wk)` : '';
-
-              fullEmailHtml += `${icon} ${p?.item_name}${syrupTag}: ${stock} left${demandText}${restockText} → ${displayQty} [₱${Math.round(cost).toLocaleString()}]<br>`;
-            });
-          } else {
-            fullEmailHtml += `✅ No branded items need restock<br>`;
-          }
-          fullEmailHtml += `<hr>`;
+          // Email header
+          fullEmailHtml += `<h3>🏢 ${b.branch_name.toUpperCase()} &nbsp;&nbsp;&nbsp; 💰 EST. TOTAL: ₱${Math.round(
+            totalEstimatedCost
+          ).toLocaleString()}</h3>`;
         }
 
         // Send consolidated email
         if (group.orderingEmail) {
-          const emailList = group.orderingEmail.split(',').map((e: string) => e.trim()).filter(Boolean);
+          const emailList = group.orderingEmail
+            .split(',')
+            .map((e: string) => e.trim())
+            .filter(Boolean);
           if (emailList.length > 0) {
             try {
               await resend.emails.send({
@@ -389,7 +440,6 @@ export async function GET(request: Request) {
                 subject: `📦 TOP TO RESTOCK - ${group.name.toUpperCase()}`,
                 html: fullEmailHtml,
               });
-              console.log(`✅ Email sent for ${group.name}`);
             } catch (err) {
               console.error(`❌ Email failed:`, err);
             }
