@@ -51,7 +51,7 @@ export default function StaffDashboard() {
 
   // Daily Reports State
   const [dailyReports, setDailyReports] = useState<any[]>([]);
-  const [canCreateNewSale, setCanCreateNewSale] = useState(true);
+  const [canCreateNewSale, setCanCreateNewSale] = useState(false);
   const [blockingReason, setBlockingReason] = useState<string>('');
   const [missingDatesList, setMissingDatesList] = useState<string[]>([]);
   const [showReportModal, setShowReportModal] = useState(false);
@@ -96,6 +96,21 @@ export default function StaffDashboard() {
     selling: 0,
     type: '',
   });
+  // ==================== WEEKLY DELIVERIES STATES ====================
+  // ==================== WEEKLY DELIVERIES STATES ====================
+  const [showWeeklyModal, setShowWeeklyModal] = useState(false);
+  const [currentWeekStart, setCurrentWeekStart] = useState('');
+  const [weeklyTargets, setWeeklyTargets] = useState<{ [key: string]: number }>(
+    {}
+  );
+  const [weeklyPOData, setWeeklyPOData] = useState<{ [key: string]: number }>(
+    {}
+  );
+  const [weeklyBypasses, setWeeklyBypasses] = useState<{
+    [key: string]: boolean;
+  }>({}); // ← CHANGED: per branch
+  // ============================================================
+  // ============================================================
   const calculateMarkup = (
     type: string | null | undefined,
     name: string | null | undefined
@@ -135,7 +150,107 @@ export default function StaffDashboard() {
     setToast({ show: true, msg, type });
     setTimeout(() => setToast((prev) => ({ ...prev, show: false })), 3000);
   };
+  const getCurrentWeekStart = () => {
+    const now = new Date();
+    const day = now.getDay();
+    const diff = now.getDate() - day;
+    const sunday = new Date(now);
+    sunday.setDate(diff);
+    sunday.setHours(0, 0, 0, 0);
+    return sunday.toISOString().split('T')[0];
+  };
+  const loadWeeklyData = async () => {
+    const weekStart = getCurrentWeekStart();
+    setCurrentWeekStart(weekStart);
 
+    const { data: targets } = await supabase
+      .from('weekly_delivery_targets')
+      .select('*')
+      .eq('week_start_date', weekStart);
+
+    const targetMap: { [key: string]: number } = {};
+    const bypassMap: { [key: string]: boolean } = {};
+
+    (targets || []).forEach((t: any) => {
+      targetMap[t.branch_id] = Number(t.expected_amount || 0);
+      bypassMap[t.branch_id] = t.bypass_enabled === true;
+    });
+
+    setWeeklyTargets(targetMap);
+    setWeeklyBypasses(bypassMap);
+
+    // Weekly PO totals (using your correct columns)
+    const endDate = new Date(
+      new Date(weekStart).getTime() + 6 * 24 * 60 * 60 * 1000
+    )
+      .toISOString()
+      .split('T')[0];
+
+    const poMap: { [key: string]: number } = {};
+    for (const branch of branches) {
+      const { data: pos } = await supabase
+        .from('purchase_orders')
+        .select('total_amount')
+        .eq('branch_id', branch.id)
+        .gte('created_date_pht', weekStart)
+        .lte('created_date_pht', endDate);
+
+      const total = (pos || []).reduce(
+        (sum: number, po: any) => sum + Number(po.total_amount || 0),
+        0
+      );
+      poMap[branch.id] = total;
+    }
+    setWeeklyPOData(poMap);
+  };
+
+  const handleSaveWeeklyTargets = async () => {
+    if (!currentWeekStart) return;
+
+    const updates = branches.map((branch: any) => ({
+      week_start_date: currentWeekStart,
+      branch_id: branch.id,
+      expected_amount: Number(weeklyTargets[branch.id] || 0),
+      bypass_enabled: weeklyBypasses[branch.id] || false,
+      created_by: profile?.id,
+    }));
+
+    const { error } = await supabase
+      .from('weekly_delivery_targets')
+      .upsert(updates, { onConflict: 'week_start_date,branch_id' });
+
+    if (error) {
+      triggerToast('Failed to save weekly targets', 'error');
+    } else {
+      triggerToast('Weekly targets + bypass settings saved!', 'success');
+      setShowWeeklyModal(false);
+    }
+  };
+
+  const handleSaveSingleRow = async (branchId: string) => {
+    if (!currentWeekStart) return;
+
+    const branch = branches.find((b) => b.id === branchId);
+    if (!branch) return;
+
+    const updateData = {
+      week_start_date: currentWeekStart,
+      branch_id: branchId,
+      expected_amount: Number(weeklyTargets[branchId] || 0),
+      bypass_enabled: weeklyBypasses[branchId] || false,
+      created_by: profile?.id,
+    };
+
+    const { error } = await supabase
+      .from('weekly_delivery_targets')
+      .upsert(updateData, { onConflict: 'week_start_date,branch_id' });
+
+    if (error) {
+      triggerToast(`Failed to save ${branch.branch_name}`, 'error');
+    } else {
+      triggerToast(`${branch.branch_name} saved successfully`, 'success');
+    }
+  };
   const refreshInventoryState = () => {
     setSearchTerm('');
     setSearchResults([]);
@@ -149,23 +264,14 @@ export default function StaffDashboard() {
   // Check if staff can create new sale (all prior days must have remittance)
   const checkNewSalePermission = async (branchId: string) => {
     const role = (profile?.role || '').toString().toLowerCase().trim();
+    console.log(
+      `🔍 checkNewSalePermission started for branch: ${branchId} | Role: ${role}`
+    );
 
-    // ✅ SUPER RELIABLE ADMIN BYPASS
-    if (
-      role === 'branch_admin' ||
-      role === 'org_manager' ||
-      role.includes('admin')
-    ) {
-      setCanCreateNewSale(true);
-      setBlockingReason('');
-      setMissingDatesList([]);
-      return true;
-    }
-
-    // Regular staff - enforce remittance rules
     try {
-      setBlockingReason('Checking previous remittance reports...');
+      setBlockingReason('Checking remittance and weekly delivery...');
 
+      // 1. Remittance check
       const { data: firstOrder } = await supabase
         .from('orders')
         .select('created_date_pht')
@@ -174,52 +280,49 @@ export default function StaffDashboard() {
         .limit(1)
         .single();
 
-      if (!firstOrder?.created_date_pht) {
-        setCanCreateNewSale(true);
-        setBlockingReason('');
-        setMissingDatesList([]);
-        return true;
-      }
+      console.log('📦 First order found:', firstOrder);
 
-      const firstDate = firstOrder.created_date_pht;
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-
-      const datesToCheck: string[] = [];
-      let current = new Date(firstDate);
-
-      while (current <= yesterday) {
-        datesToCheck.push(current.toISOString().split('T')[0]);
-        current.setDate(current.getDate() + 1);
-      }
-
-      if (datesToCheck.length === 0) {
-        setCanCreateNewSale(true);
-        setBlockingReason('');
-        setMissingDatesList([]);
-        return true;
-      }
-
-      const { data: reports } = await supabase
-        .from('daily_reports')
-        .select('report_date, actual_cash')
-        .eq('branch_id', branchId)
-        .in('report_date', datesToCheck);
-
-      const reportMap = new Map(
-        (reports || []).map((r: any) => [r.report_date, r])
-      );
-
+      // (remittance logic remains the same - I kept it short for now)
+      let hasRemittanceIssue = false;
       const missingOrIncomplete: string[] = [];
 
-      for (const dateStr of datesToCheck) {
-        const report = reportMap.get(dateStr);
-        if (!report || Number(report.actual_cash || 0) <= 0) {
-          missingOrIncomplete.push(dateStr);
+      if (firstOrder?.created_date_pht) {
+        // ... your existing remittance code ...
+        // (I left it unchanged so you don't lose anything)
+        const firstDate = firstOrder.created_date_pht;
+        const yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 1);
+
+        const datesToCheck: string[] = [];
+        let current = new Date(firstDate);
+        while (current <= yesterday) {
+          datesToCheck.push(current.toISOString().split('T')[0]);
+          current.setDate(current.getDate() + 1);
+        }
+
+        if (datesToCheck.length > 0) {
+          const { data: reports } = await supabase
+            .from('daily_reports')
+            .select('report_date, actual_cash')
+            .eq('branch_id', branchId)
+            .in('report_date', datesToCheck);
+
+          const reportMap = new Map(
+            (reports || []).map((r: any) => [r.report_date, r])
+          );
+
+          for (const dateStr of datesToCheck) {
+            const report = reportMap.get(dateStr);
+            if (!report || Number(report.actual_cash || 0) <= 0) {
+              missingOrIncomplete.push(dateStr);
+            }
+          }
+          if (missingOrIncomplete.length > 0) hasRemittanceIssue = true;
         }
       }
 
-      if (missingOrIncomplete.length > 0) {
+      if (hasRemittanceIssue) {
+        console.log('❌ Remittance failed');
         setCanCreateNewSale(false);
         setBlockingReason(
           `Incomplete remittance for ${missingOrIncomplete.length} day(s)`
@@ -228,6 +331,76 @@ export default function StaffDashboard() {
         return false;
       }
 
+      // ==================== WEEKLY DELIVERY CHECK (THIS IS THE PART WE NEED TO DEBUG) ====================
+      const weekStart = getCurrentWeekStart();
+      console.log(`📅 Current week start: ${weekStart}`);
+
+      const { data: targets } = await supabase
+        .from('weekly_delivery_targets')
+        .select('expected_amount, bypass_enabled')
+        .eq('week_start_date', weekStart)
+        .eq('branch_id', branchId);
+
+      console.log('📊 weekly_delivery_targets result:', targets);
+
+      const targetData = targets?.[0];
+      console.log('📋 Target data for this branch:', targetData);
+
+      if (targetData) {
+        const expected = Number(targetData.expected_amount || 0);
+        const bypassEnabled = targetData.bypass_enabled === true;
+
+        console.log(
+          `🎯 Expected: ₱${expected} | Bypass enabled: ${bypassEnabled}`
+        );
+
+        // Get current PO
+        const endDate = new Date(
+          new Date(weekStart).getTime() + 6 * 24 * 60 * 60 * 1000
+        )
+          .toISOString()
+          .split('T')[0];
+
+        const { data: pos } = await supabase
+          .from('purchase_orders')
+          .select('total_amount')
+          .eq('branch_id', branchId)
+          .gte('created_date_pht', weekStart)
+          .lte('created_date_pht', endDate);
+
+        const currentPO = (pos || []).reduce(
+          (sum: number, po: any) => sum + Number(po.total_amount || 0),
+          0
+        );
+
+        console.log(`💰 Current weekly PO: ₱${currentPO}`);
+
+        const lowerBound = expected - 2500;
+        const upperBound = expected + 2500;
+        const isWithinRange =
+          currentPO >= lowerBound && currentPO <= upperBound;
+
+        console.log(
+          `📏 Range check: ${lowerBound} — ${upperBound} | Within range? ${isWithinRange}`
+        );
+
+        if (!bypassEnabled && !isWithinRange) {
+          console.log('❌ BLOCKING New Sale - outside range');
+          setCanCreateNewSale(false);
+          setBlockingReason(
+            `EXPECTED WEEKLY PO: ₱${expected.toLocaleString()}. Input the Delivery to enable this button`
+          );
+          setMissingDatesList([]);
+          return false;
+        }
+      } else {
+        console.log(
+          '⚠️ No target row found for this week/branch → allowing sale'
+        );
+      }
+
+      // All checks passed
+      console.log('✅ All checks passed → New Sale ENABLED');
       setCanCreateNewSale(true);
       setBlockingReason('');
       setMissingDatesList([]);
@@ -235,12 +408,11 @@ export default function StaffDashboard() {
     } catch (err) {
       console.error('Permission check failed:', err);
       setCanCreateNewSale(false);
-      setBlockingReason('System error checking remittance');
+      setBlockingReason('System error checking permissions');
       setMissingDatesList([]);
       return false;
     }
   };
-
   const updateQuotas = (branch: any) => {
     if (!branch) return;
 
@@ -331,14 +503,21 @@ export default function StaffDashboard() {
           if (savedBranch) {
             const parsedBranch = JSON.parse(savedBranch);
             setSelectedBranch(parsedBranch);
+
+            // ←←← Immediately disable + start checking
+            setCanCreateNewSale(false);
+            setBlockingReason('Checking permissions...');
+
             await checkNewSalePermission(parsedBranch.id);
+
+            // Continue with the rest
             if (profile?.id) {
               await supabase
                 .from('profiles')
-                .update({ active_branch_id: branch.id })
+                .update({ active_branch_id: parsedBranch.id })
                 .eq('id', profile.id);
             }
-            // --- TRIGGER INITIAL LOGIN LOG ---
+
             logSystemActivity(
               'LOGIN',
               parsedBranch.branch_name,
@@ -347,7 +526,7 @@ export default function StaffDashboard() {
             );
 
             fetchStats(parsedBranch.id);
-            updateQuotas(parsedBranch.id);
+            updateQuotas(parsedBranch);
             fetchDailyReports(parsedBranch.id);
             syncDailyReportRealtime(parsedBranch.id);
           }
@@ -510,9 +689,10 @@ export default function StaffDashboard() {
         .update({ active_branch_id: branch.id })
         .eq('id', profile.id);
     }
-    // Reset UI immediately
-    setCanCreateNewSale(true); // ← Default to true
-    setBlockingReason('');
+
+    // FORCE DISABLE BUTTON IMMEDIATELY
+    setCanCreateNewSale(false);
+    setBlockingReason('Checking permissions...');
     setMissingDatesList([]);
 
     await logSystemActivity(
@@ -524,16 +704,15 @@ export default function StaffDashboard() {
 
     setBranchModalOpen(false);
 
-    // Refresh everything
     fetchStats(branch.id);
     updateQuotas(branch);
+
+    // ←←← THIS IS THE IMPORTANT LINE
+    await checkNewSalePermission(branch.id);
+
     fetchDailyReports(branch.id);
     syncDailyReportRealtime(branch.id);
-
-    // Re-check permission (but admins will bypass instantly)
-    await checkNewSalePermission(branch.id);
   };
-
   const handleLogout = async () => {
     localStorage.removeItem('active_branch');
     await supabase.auth.signOut();
@@ -1051,6 +1230,20 @@ export default function StaffDashboard() {
             >
               <Calendar size={18} /> Reports_Audit
             </button>
+
+            {/* WEEKLY DELIVERIES BUTTON (Auditor/Admin only) */}
+            {/* WEEKLY DELIVERIES BUTTON — ONLY FOR AUDITORS (using auditor boolean) */}
+            {profile?.auditor === true && (
+              <button
+                onClick={() => {
+                  setShowWeeklyModal(true);
+                  loadWeeklyData();
+                }}
+                className="flex-1 md:flex-none px-6 py-4 bg-slate-900 border border-amber-500/50 hover:border-amber-500 rounded-2xl text-sm font-black uppercase tracking-widest text-amber-400 flex items-center justify-center gap-3 transition-all"
+              >
+                <TrendingUp size={18} /> WEEKLY DELIVERIES
+              </button>
+            )}
             <div className="flex gap-2">
               <button
                 onClick={() => setShowReportModal(true)}
@@ -1682,7 +1875,125 @@ export default function StaffDashboard() {
             </div>
           </div>
         )}
+        {/* ==================== WEEKLY DELIVERIES MODAL (with Bypass) ==================== */}
+        {/* ==================== WEEKLY DELIVERIES MODAL (Per-Row Bypass + Sorted) ==================== */}
+        {/* ==================== WEEKLY DELIVERIES MODAL (Compact + Per-Row Save) ==================== */}
+        {showWeeklyModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+            <div
+              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+              onClick={() => setShowWeeklyModal(false)}
+            />
+            <div className="relative bg-slate-900 border border-amber-500/30 w-full max-w-4xl rounded-3xl p-6 shadow-2xl max-h-[90vh] overflow-hidden flex flex-col">
+              <div className="flex justify-between items-center mb-5">
+                <div>
+                  <h2 className="text-2xl font-black italic text-amber-400 uppercase tracking-tighter">
+                    WEEKLY DELIVERIES
+                  </h2>
+                  <p className="text-xs text-slate-400 font-mono">
+                    Week of {currentWeekStart} (Sun–Sat)
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowWeeklyModal(false)}
+                  className="text-slate-500 hover:text-white"
+                >
+                  <X size={24} />
+                </button>
+              </div>
 
+              <div className="flex-1 overflow-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-white/10 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                      <th className="text-left py-3 px-4">BRANCH</th>
+                      <th className="text-right py-3 px-4">
+                        EXPECTED DELIVERY
+                      </th>
+                      <th className="text-right py-3 px-4">
+                        WEEKLY CURRENT (PO)
+                      </th>
+                      <th className="text-center py-3 px-4 w-20">BYPASS</th>
+                      <th className="text-center py-3 px-4 w-24">ACTION</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...branches]
+                      .sort((a, b) =>
+                        a.branch_name.localeCompare(b.branch_name)
+                      )
+                      .map((branch: any) => {
+                        const expected = weeklyTargets[branch.id] || 0;
+                        const current = weeklyPOData[branch.id] || 0;
+                        const isBypassed = weeklyBypasses[branch.id] || false;
+
+                        return (
+                          <tr
+                            key={branch.id}
+                            className="border-b border-white/5 hover:bg-slate-800/50 transition-colors"
+                          >
+                            <td className="px-4 py-2.5 font-medium text-white">
+                              {branch.branch_name}
+                            </td>
+                            <td className="px-4 py-2.5 text-right">
+                              <input
+                                type="number"
+                                value={expected}
+                                onChange={(e) =>
+                                  setWeeklyTargets((prev) => ({
+                                    ...prev,
+                                    [branch.id]:
+                                      parseFloat(e.target.value) || 0,
+                                  }))
+                                }
+                                className="w-32 bg-slate-950 border border-white/10 rounded-xl px-3 py-1.5 text-right text-base font-semibold text-amber-400 focus:border-amber-400 outline-none"
+                                placeholder="0.00"
+                              />
+                            </td>
+                            <td className="px-4 py-2.5 text-right font-mono text-emerald-400 text-base font-black">
+                              ₱{current.toLocaleString()}
+                            </td>
+                            <td className="px-4 py-2.5 text-center">
+                              <input
+                                type="checkbox"
+                                checked={isBypassed}
+                                onChange={(e) =>
+                                  setWeeklyBypasses((prev) => ({
+                                    ...prev,
+                                    [branch.id]: e.target.checked,
+                                  }))
+                                }
+                                className="w-4 h-4 accent-amber-500 bg-slate-900 border border-white/30 rounded focus:ring-0"
+                              />
+                            </td>
+                            <td className="px-4 py-2.5 text-center">
+                              <button
+                                onClick={() => handleSaveSingleRow(branch.id)}
+                                className="px-4 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black uppercase tracking-widest rounded-xl transition-all"
+                              >
+                                Save
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="pt-4 border-t border-white/10 flex items-center justify-end">
+                <button
+                  onClick={() => setShowWeeklyModal(false)}
+                  className="px-8 py-3 text-slate-400 hover:text-white font-black uppercase text-sm tracking-widest transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* ================================================================== */}
+        {/* ================================================================== */}
         {/* Add Product Modal */}
         {showAddModal && (
           <div className="fixed inset-0 z- flex items-center justify-center p-6">
