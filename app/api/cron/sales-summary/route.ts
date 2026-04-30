@@ -182,7 +182,7 @@ export async function GET(request: Request) {
             .eq('branch_id', b.id)
             .order('sold_weekly', { ascending: false });
 
-          // Filter - sold_weekly is main reference
+          // Filter
           const meaningfulItems = (branchInventory || [])
             .filter((p: any) => {
               const stock = Number(p?.stock || 0);
@@ -275,7 +275,7 @@ export async function GET(request: Request) {
               .slice(0, 5),
           ].slice(0, 20);
 
-          // Suggestion + Cost (use buy_cost strictly)
+          // FIRST PASS: Calculate total estimated cost
           let totalEstimatedCost = 0;
           const getSuggestion = (p: any) => {
             let weekly = Number(p?.sold_weekly || 0);
@@ -286,7 +286,6 @@ export async function GET(request: Request) {
                 0;
 
             let suggested = weekly;
-
             if (weekly < 5) suggested = weekly;
             else if (weekly < 100) suggested = Math.ceil(suggested / 10) * 10;
             else suggested = Math.ceil(suggested / 100) * 100;
@@ -303,7 +302,7 @@ export async function GET(request: Request) {
             return { displayQty, cost };
           };
 
-          // ────── TELEGRAM (with inline total) ──────
+          // Telegram - now with correct total
           let branchMessage = `<b>📦 TOP TO RESTOCK</b>\n`;
           branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>   💰 EST. TOTAL: ₱${Math.round(
             totalEstimatedCost
@@ -403,7 +402,7 @@ export async function GET(request: Request) {
             console.error(`❌ Telegram failed:`, err);
           }
 
-          // ────── EMAIL (full item list) ──────
+          // Email (full list)
           fullEmailHtml += `<h3>🏢 ${b.branch_name.toUpperCase()} &nbsp;&nbsp;&nbsp; 💰 EST. TOTAL: ₱${Math.round(
             totalEstimatedCost
           ).toLocaleString()}</h3>`;
@@ -497,7 +496,6 @@ export async function GET(request: Request) {
                 subject: `📦 TOP TO RESTOCK - ${group.name.toUpperCase()}`,
                 html: fullEmailHtml,
               });
-              console.log(`✅ Email sent for ${group.name}`);
             } catch (err) {
               console.error(`❌ Email failed:`, err);
             }
