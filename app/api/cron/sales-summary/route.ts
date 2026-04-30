@@ -182,7 +182,7 @@ export async function GET(request: Request) {
             .eq('branch_id', b.id)
             .order('sold_weekly', { ascending: false });
 
-          // Filter
+          // Filter - sold_weekly is main reference
           const meaningfulItems = (branchInventory || [])
             .filter((p: any) => {
               const stock = Number(p?.stock || 0);
@@ -286,12 +286,14 @@ export async function GET(request: Request) {
                 0;
 
             let suggested = weekly;
+
             if (weekly < 5) suggested = weekly;
             else if (weekly < 100) suggested = Math.ceil(suggested / 10) * 10;
             else suggested = Math.ceil(suggested / 100) * 100;
 
             const buyCost = Number(p?.buy_cost || 0);
             const cost = suggested * buyCost;
+
             totalEstimatedCost += cost;
 
             const isBox = suggested >= 100;
@@ -302,7 +304,7 @@ export async function GET(request: Request) {
             return { displayQty, cost };
           };
 
-          // Telegram - now with correct total
+          // Telegram (total is now correct)
           let branchMessage = `<b>📦 TOP TO RESTOCK</b>\n`;
           branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>   💰 EST. TOTAL: ₱${Math.round(
             totalEstimatedCost
@@ -402,84 +404,10 @@ export async function GET(request: Request) {
             console.error(`❌ Telegram failed:`, err);
           }
 
-          // Email (full list)
+          // Email
           fullEmailHtml += `<h3>🏢 ${b.branch_name.toUpperCase()} &nbsp;&nbsp;&nbsp; 💰 EST. TOTAL: ₱${Math.round(
             totalEstimatedCost
           ).toLocaleString()}</h3>`;
-
-          fullEmailHtml += `<b>🟦 GENERIC ITEMS</b><br>`;
-          if (genericItems.length > 0) {
-            genericItems.forEach((p: any) => {
-              const { displayQty, cost } = getSuggestion(p);
-              const stock = Number(p?.stock || 0);
-              const weekly =
-                Number(p?.sold_weekly || 0) ||
-                Number(p?.sold_weekly_snapshot || 0);
-              const itemNameUpper = String(p?.item_name || '').toUpperCase();
-              const isSyrup = /\b(SYRUP|SYR)\b/.test(itemNameUpper);
-              const lastRestockStr = p?.last_restock_date;
-              const daysAgo = lastRestockStr
-                ? Math.floor(
-                    (new Date(todayPHT).getTime() -
-                      new Date(lastRestockStr).getTime()) /
-                      86400000
-                  )
-                : 999;
-              const restockText =
-                daysAgo < 999 ? ` • restock ${daysAgo}d ago` : '';
-
-              const icon = stock <= 0 ? '🚨' : '>';
-              const syrupTag = isSyrup ? ' [SYRUP]' : '';
-              const demandText =
-                weekly > 0 ? ` (~${weekly.toFixed(0)}/wk)` : '';
-
-              fullEmailHtml += `${icon} ${
-                p?.item_name
-              }${syrupTag}: ${stock} left${demandText}${restockText} → ${displayQty} [₱${Math.round(
-                cost
-              ).toLocaleString()}]<br>`;
-            });
-          } else {
-            fullEmailHtml += `✅ No generic items need restock<br>`;
-          }
-          fullEmailHtml += `<br>`;
-
-          fullEmailHtml += `<b>🟪 BRANDED ITEMS</b><br>`;
-          if (brandedItems.length > 0) {
-            brandedItems.forEach((p: any) => {
-              const { displayQty, cost } = getSuggestion(p);
-              const stock = Number(p?.stock || 0);
-              const weekly =
-                Number(p?.sold_weekly || 0) ||
-                Number(p?.sold_weekly_snapshot || 0);
-              const itemNameUpper = String(p?.item_name || '').toUpperCase();
-              const isSyrup = /\b(SYRUP|SYR)\b/.test(itemNameUpper);
-              const lastRestockStr = p?.last_restock_date;
-              const daysAgo = lastRestockStr
-                ? Math.floor(
-                    (new Date(todayPHT).getTime() -
-                      new Date(lastRestockStr).getTime()) /
-                      86400000
-                  )
-                : 999;
-              const restockText =
-                daysAgo < 999 ? ` • restock ${daysAgo}d ago` : '';
-
-              const icon = stock <= 0 ? '🚨' : '>';
-              const syrupTag = isSyrup ? ' [SYRUP]' : '';
-              const demandText =
-                weekly > 0 ? ` (~${weekly.toFixed(0)}/wk)` : '';
-
-              fullEmailHtml += `${icon} ${
-                p?.item_name
-              }${syrupTag}: ${stock} left${demandText}${restockText} → ${displayQty} [₱${Math.round(
-                cost
-              ).toLocaleString()}]<br>`;
-            });
-          } else {
-            fullEmailHtml += `✅ No branded items need restock<br>`;
-          }
-          fullEmailHtml += `<hr>`;
         }
 
         // Send consolidated email
