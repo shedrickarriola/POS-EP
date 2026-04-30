@@ -182,7 +182,7 @@ export async function GET(request: Request) {
             .eq('branch_id', b.id)
             .order('sold_weekly', { ascending: false });
 
-          // LENIENT FILTER - prioritize sold_weekly_snapshot when sold_weekly is 0
+          // Filter - sold_weekly is main reference
           const meaningfulItems = (branchInventory || [])
             .filter((p: any) => {
               const stock = Number(p?.stock || 0);
@@ -201,7 +201,6 @@ export async function GET(request: Request) {
                   86400000
               );
 
-              // sold_weekly_snapshot is main reference when sold_weekly is 0
               let weeklyDemand =
                 soldWeekly ||
                 snapshot ||
@@ -222,7 +221,7 @@ export async function GET(request: Request) {
               const soldB =
                 Number(b?.sold_weekly || 0) ||
                 Number(b?.sold_weekly_snapshot || 0);
-              return soldB - soldA; // highest sold first
+              return soldB - soldA;
             });
 
           // Normal items first, SYRUP at the bottom
@@ -276,7 +275,7 @@ export async function GET(request: Request) {
               .slice(0, 5),
           ].slice(0, 20);
 
-          // Suggestion + Cost (strict buy_cost)
+          // Suggestion + Cost (use buy_cost strictly)
           let totalEstimatedCost = 0;
           const getSuggestion = (p: any) => {
             let weekly = Number(p?.sold_weekly || 0);
@@ -293,8 +292,7 @@ export async function GET(request: Request) {
             else suggested = Math.ceil(suggested / 100) * 100;
 
             const buyCost = Number(p?.buy_cost || 0);
-            const cost = suggested * buyCost; // strict buy_cost (0 if null)
-
+            const cost = suggested * buyCost;
             totalEstimatedCost += cost;
 
             const isBox = suggested >= 100;
@@ -305,7 +303,7 @@ export async function GET(request: Request) {
             return { displayQty, cost };
           };
 
-          // Telegram
+          // ────── TELEGRAM (with inline total) ──────
           let branchMessage = `<b>📦 TOP TO RESTOCK</b>\n`;
           branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>   💰 EST. TOTAL: ₱${Math.round(
             totalEstimatedCost
@@ -386,6 +384,7 @@ export async function GET(request: Request) {
           }
           branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
 
+          // Send Telegram
           try {
             await fetch(
               `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
@@ -404,9 +403,84 @@ export async function GET(request: Request) {
             console.error(`❌ Telegram failed:`, err);
           }
 
+          // ────── EMAIL (full item list) ──────
           fullEmailHtml += `<h3>🏢 ${b.branch_name.toUpperCase()} &nbsp;&nbsp;&nbsp; 💰 EST. TOTAL: ₱${Math.round(
             totalEstimatedCost
           ).toLocaleString()}</h3>`;
+
+          fullEmailHtml += `<b>🟦 GENERIC ITEMS</b><br>`;
+          if (genericItems.length > 0) {
+            genericItems.forEach((p: any) => {
+              const { displayQty, cost } = getSuggestion(p);
+              const stock = Number(p?.stock || 0);
+              const weekly =
+                Number(p?.sold_weekly || 0) ||
+                Number(p?.sold_weekly_snapshot || 0);
+              const itemNameUpper = String(p?.item_name || '').toUpperCase();
+              const isSyrup = /\b(SYRUP|SYR)\b/.test(itemNameUpper);
+              const lastRestockStr = p?.last_restock_date;
+              const daysAgo = lastRestockStr
+                ? Math.floor(
+                    (new Date(todayPHT).getTime() -
+                      new Date(lastRestockStr).getTime()) /
+                      86400000
+                  )
+                : 999;
+              const restockText =
+                daysAgo < 999 ? ` • restock ${daysAgo}d ago` : '';
+
+              const icon = stock <= 0 ? '🚨' : '>';
+              const syrupTag = isSyrup ? ' [SYRUP]' : '';
+              const demandText =
+                weekly > 0 ? ` (~${weekly.toFixed(0)}/wk)` : '';
+
+              fullEmailHtml += `${icon} ${
+                p?.item_name
+              }${syrupTag}: ${stock} left${demandText}${restockText} → ${displayQty} [₱${Math.round(
+                cost
+              ).toLocaleString()}]<br>`;
+            });
+          } else {
+            fullEmailHtml += `✅ No generic items need restock<br>`;
+          }
+          fullEmailHtml += `<br>`;
+
+          fullEmailHtml += `<b>🟪 BRANDED ITEMS</b><br>`;
+          if (brandedItems.length > 0) {
+            brandedItems.forEach((p: any) => {
+              const { displayQty, cost } = getSuggestion(p);
+              const stock = Number(p?.stock || 0);
+              const weekly =
+                Number(p?.sold_weekly || 0) ||
+                Number(p?.sold_weekly_snapshot || 0);
+              const itemNameUpper = String(p?.item_name || '').toUpperCase();
+              const isSyrup = /\b(SYRUP|SYR)\b/.test(itemNameUpper);
+              const lastRestockStr = p?.last_restock_date;
+              const daysAgo = lastRestockStr
+                ? Math.floor(
+                    (new Date(todayPHT).getTime() -
+                      new Date(lastRestockStr).getTime()) /
+                      86400000
+                  )
+                : 999;
+              const restockText =
+                daysAgo < 999 ? ` • restock ${daysAgo}d ago` : '';
+
+              const icon = stock <= 0 ? '🚨' : '>';
+              const syrupTag = isSyrup ? ' [SYRUP]' : '';
+              const demandText =
+                weekly > 0 ? ` (~${weekly.toFixed(0)}/wk)` : '';
+
+              fullEmailHtml += `${icon} ${
+                p?.item_name
+              }${syrupTag}: ${stock} left${demandText}${restockText} → ${displayQty} [₱${Math.round(
+                cost
+              ).toLocaleString()}]<br>`;
+            });
+          } else {
+            fullEmailHtml += `✅ No branded items need restock<br>`;
+          }
+          fullEmailHtml += `<hr>`;
         }
 
         // Send consolidated email
@@ -423,6 +497,7 @@ export async function GET(request: Request) {
                 subject: `📦 TOP TO RESTOCK - ${group.name.toUpperCase()}`,
                 html: fullEmailHtml,
               });
+              console.log(`✅ Email sent for ${group.name}`);
             } catch (err) {
               console.error(`❌ Email failed:`, err);
             }
