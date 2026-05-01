@@ -275,7 +275,7 @@ export async function GET(request: Request) {
           ].slice(0, 20);
 
           // ─────────────────────────────────────────────────────────────
-          // BATCH SUGGESTION LOGIC + COLORFUL EMAIL
+          // BATCH SUGGESTION LOGIC (clean & no over-ordering)
           // ─────────────────────────────────────────────────────────────
           let totalEstimatedCost = 0;
           let telegramItems = '';
@@ -290,7 +290,7 @@ export async function GET(request: Request) {
                 Number(p?.sold_monthly || 0) / 4.3 ||
                 0;
 
-            // Batch suggestion logic (unchanged)
+            // === EXACT LOGIC YOU REQUESTED ===
             let suggested = 0;
             if (weekly > 0) {
               const target = weekly * 2;
@@ -299,9 +299,10 @@ export async function GET(request: Request) {
               if (weekly < 5) {
                 suggested = Math.ceil(delta);
               } else if (weekly < 100) {
+                // round UP to nearest tens → always pcs
                 suggested = Math.ceil(delta / 10) * 10;
-                if (suggested > 0 && suggested < 50) suggested = 100;
               } else {
+                // round UP to nearest hundreds → boxes
                 suggested = Math.ceil(delta / 100) * 100;
               }
             }
@@ -310,8 +311,9 @@ export async function GET(request: Request) {
             const cost = suggested * buyCost;
             totalEstimatedCost += cost;
 
-            const isBox = suggested >= 100;
-            const displayQty = isBox
+            // Display: boxes ONLY for high-volume items (weekly >= 100)
+            const displayAsBoxes = weekly >= 100;
+            const displayQty = displayAsBoxes
               ? `${Math.round(suggested / 100)} boxes`
               : `${Math.round(suggested)} pcs`;
 
@@ -331,14 +333,14 @@ export async function GET(request: Request) {
             const syrupTag = isSyrup ? ' [SYRUP]' : '';
             const icon = stock <= 0 ? '🚨' : '>';
 
-            // Telegram (unchanged)
+            // Telegram line
             telegramItems += `${icon} ${
               p?.item_name
             }${syrupTag}: ${stock} left${demandText}${restockText} → ${displayQty} [₱${Math.round(
               cost
             ).toLocaleString()}]\n`;
 
-            // EMAIL — one clean line + vibrant colors
+            // EMAIL — colorful single line
             emailItemsHtml += `<p style="margin: 4px 0; line-height: 1.45; font-family: monospace; color: #1f2937;">
               ${icon} <strong style="color: ${
               isGeneric ? '#3b82f6' : '#a855f7'
@@ -350,7 +352,7 @@ export async function GET(request: Request) {
             </p>`;
           };
 
-          // Generic section (with colored header in email)
+          // Generic section
           if (genericItems.length > 0) {
             telegramItems += `<b>🟦 GENERIC ITEMS</b>\n`;
             emailItemsHtml += `<p style="color:#3b82f6; font-weight:700; margin: 16px 0 6px 0; border-bottom: 2px solid #e0f2fe;">🟦 GENERIC ITEMS</p>`;
@@ -427,6 +429,7 @@ export async function GET(request: Request) {
           }
         }
       } else {
+        // ← ALL OTHER TYPES (REPORT_CHECKER, LOGIN, UPDATE, EOD) — unchanged
         // ← ALL OTHER TYPES (REPORT_CHECKER, LOGIN, UPDATE, EOD) — unchanged
         // ← ALL OTHER TYPES (unchanged)
         // ← ALL OTHER TYPES (REPORT_CHECKER, LOGIN, UPDATE, EOD) — unchanged
