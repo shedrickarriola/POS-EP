@@ -188,7 +188,6 @@ export async function GET(request: Request) {
               const stock = Number(p?.stock || 0);
               const soldWeekly = Number(p?.sold_weekly || 0);
               const snapshot = Number(p?.sold_weekly_snapshot || 0);
-
               const itemNameUpper = String(p?.item_name || '').toUpperCase();
               const isSyrup = /\b(SYRUP|SYR)\b/.test(itemNameUpper);
 
@@ -275,9 +274,14 @@ export async function GET(request: Request) {
               .slice(0, 5),
           ].slice(0, 20);
 
-          // FIRST PASS: Calculate total estimated cost
+          // ─────────────────────────────────────────────────────────────
+          // Calculate everything once (no side effects) + build both outputs
+          // ─────────────────────────────────────────────────────────────
           let totalEstimatedCost = 0;
-          const getSuggestion = (p: any) => {
+          let telegramItems = '';
+          let emailItemsHtml = '';
+
+          const processItem = (p: any, isGeneric: boolean) => {
             let weekly = Number(p?.sold_weekly || 0);
             if (weekly === 0)
               weekly =
@@ -286,14 +290,12 @@ export async function GET(request: Request) {
                 0;
 
             let suggested = weekly;
-
             if (weekly < 5) suggested = weekly;
             else if (weekly < 100) suggested = Math.ceil(suggested / 10) * 10;
             else suggested = Math.ceil(suggested / 100) * 100;
 
             const buyCost = Number(p?.buy_cost || 0);
             const cost = suggested * buyCost;
-
             totalEstimatedCost += cost;
 
             const isBox = suggested >= 100;
@@ -301,88 +303,66 @@ export async function GET(request: Request) {
               ? `${Math.round(suggested / 100)} boxes`
               : `${Math.round(suggested)} pcs`;
 
-            return { displayQty, cost };
+            const stock = Number(p?.stock || 0);
+            const itemNameUpper = String(p?.item_name || '').toUpperCase();
+            const isSyrup = /\b(SYRUP|SYR)\b/.test(itemNameUpper);
+            const lastRestockStr = p?.last_restock_date;
+            const daysAgo = lastRestockStr
+              ? Math.floor(
+                  (new Date(todayPHT).getTime() -
+                    new Date(lastRestockStr).getTime()) /
+                    86400000
+                )
+              : 999;
+            const restockText =
+              daysAgo < 999 ? ` • restock ${daysAgo}d ago` : '';
+            const demandText = weekly > 0 ? ` (~${weekly.toFixed(0)}/wk)` : '';
+            const syrupTag = isSyrup ? ' [SYRUP]' : '';
+            const icon = stock <= 0 ? '🚨' : '>';
+
+            // Telegram line
+            telegramItems += `${icon} ${
+              p?.item_name
+            }${syrupTag}: ${stock} left${demandText}${restockText} → ${displayQty} [₱${Math.round(
+              cost
+            ).toLocaleString()}]\n`;
+
+            // Email HTML line
+            emailItemsHtml += `
+              <div style="margin: 8px 0; padding: 10px; border-left: 5px solid ${
+                isGeneric ? '#3b82f6' : '#a855f7'
+              }; background: #f8fafc;">
+                <strong>${icon} ${p?.item_name}${syrupTag}</strong><br>
+                <small>Stock: <strong>${stock}</strong> | ${demandText} | ${restockText}</small><br>
+                <span style="color:#16a34a; font-weight:600;">Suggested: ${displayQty} — ₱${Math.round(
+              cost
+            ).toLocaleString()}</span>
+              </div>`;
           };
 
-          // Telegram (total is now correct)
+          // Generic section
+          if (genericItems.length > 0) {
+            telegramItems += `<b>🟦 GENERIC ITEMS</b>\n`;
+            genericItems.forEach((p) => processItem(p, true));
+          } else {
+            telegramItems += `✅ No generic items need restock\n`;
+          }
+
+          // Branded section
+          if (brandedItems.length > 0) {
+            telegramItems += `━━━━━━━━━━━━━━━━━━\n<b>🟪 BRANDED ITEMS</b>\n`;
+            brandedItems.forEach((p) => processItem(p, false));
+          } else {
+            telegramItems += `━━━━━━━━━━━━━━━━━━\n✅ No branded items need restock\n`;
+          }
+
+          // Build full Telegram message (total at top)
           let branchMessage = `<b>📦 TOP TO RESTOCK</b>\n`;
           branchMessage += `<b>🏢 ${group.name.toUpperCase()} • ${b.branch_name.toUpperCase()}</b>   💰 EST. TOTAL: ₱${Math.round(
             totalEstimatedCost
           ).toLocaleString()}\n`;
           branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
-
-          branchMessage += `<b>🟦 GENERIC ITEMS</b>\n`;
-          if (genericItems.length > 0) {
-            genericItems.forEach((p: any) => {
-              const { displayQty, cost } = getSuggestion(p);
-              const stock = Number(p?.stock || 0);
-              const weekly =
-                Number(p?.sold_weekly || 0) ||
-                Number(p?.sold_weekly_snapshot || 0);
-              const itemNameUpper = String(p?.item_name || '').toUpperCase();
-              const isSyrup = /\b(SYRUP|SYR)\b/.test(itemNameUpper);
-              const lastRestockStr = p?.last_restock_date;
-              const daysAgo = lastRestockStr
-                ? Math.floor(
-                    (new Date(todayPHT).getTime() -
-                      new Date(lastRestockStr).getTime()) /
-                      86400000
-                  )
-                : 999;
-              const restockText =
-                daysAgo < 999 ? ` • restock ${daysAgo}d ago` : '';
-
-              const icon = stock <= 0 ? '🚨' : '>';
-              const syrupTag = isSyrup ? ' [SYRUP]' : '';
-              const demandText =
-                weekly > 0 ? ` (~${weekly.toFixed(0)}/wk)` : '';
-
-              branchMessage += `${icon} ${
-                p?.item_name
-              }${syrupTag}: ${stock} left${demandText}${restockText} → ${displayQty} [₱${Math.round(
-                cost
-              ).toLocaleString()}]\n`;
-            });
-          } else {
-            branchMessage += `✅ No generic items need restock\n`;
-          }
-          branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
-
-          branchMessage += `<b>🟪 BRANDED ITEMS</b>\n`;
-          if (brandedItems.length > 0) {
-            brandedItems.forEach((p: any) => {
-              const { displayQty, cost } = getSuggestion(p);
-              const stock = Number(p?.stock || 0);
-              const weekly =
-                Number(p?.sold_weekly || 0) ||
-                Number(p?.sold_weekly_snapshot || 0);
-              const itemNameUpper = String(p?.item_name || '').toUpperCase();
-              const isSyrup = /\b(SYRUP|SYR)\b/.test(itemNameUpper);
-              const lastRestockStr = p?.last_restock_date;
-              const daysAgo = lastRestockStr
-                ? Math.floor(
-                    (new Date(todayPHT).getTime() -
-                      new Date(lastRestockStr).getTime()) /
-                      86400000
-                  )
-                : 999;
-              const restockText =
-                daysAgo < 999 ? ` • restock ${daysAgo}d ago` : '';
-
-              const icon = stock <= 0 ? '🚨' : '>';
-              const syrupTag = isSyrup ? ' [SYRUP]' : '';
-              const demandText =
-                weekly > 0 ? ` (~${weekly.toFixed(0)}/wk)` : '';
-
-              branchMessage += `${icon} ${
-                p?.item_name
-              }${syrupTag}: ${stock} left${demandText}${restockText} → ${displayQty} [₱${Math.round(
-                cost
-              ).toLocaleString()}]\n`;
-            });
-          } else {
-            branchMessage += `✅ No branded items need restock\n`;
-          }
+          branchMessage += telegramItems;
           branchMessage += `━━━━━━━━━━━━━━━━━━\n`;
 
           // Send Telegram
@@ -404,10 +384,14 @@ export async function GET(request: Request) {
             console.error(`❌ Telegram failed:`, err);
           }
 
-          // Email
-          fullEmailHtml += `<h3>🏢 ${b.branch_name.toUpperCase()} &nbsp;&nbsp;&nbsp; 💰 EST. TOTAL: ₱${Math.round(
+          // Build Email HTML for this branch (total at bottom)
+          fullEmailHtml += `<h3>🏢 ${b.branch_name.toUpperCase()}</h3>`;
+          fullEmailHtml +=
+            emailItemsHtml ||
+            '<p><em>No items need restocking at this time.</em></p>';
+          fullEmailHtml += `<p><strong>💰 ESTIMATED TOTAL TO RESTOCK: ₱${Math.round(
             totalEstimatedCost
-          ).toLocaleString()}</h3>`;
+          ).toLocaleString()}</strong></p><hr>`;
         }
 
         // Send consolidated email
@@ -424,12 +408,15 @@ export async function GET(request: Request) {
                 subject: `📦 TOP TO RESTOCK - ${group.name.toUpperCase()}`,
                 html: fullEmailHtml,
               });
+              console.log(`✅ Consolidated email sent to ${group.name}`);
             } catch (err) {
               console.error(`❌ Email failed:`, err);
             }
           }
         }
       } else {
+        // ← ALL OTHER TYPES (REPORT_CHECKER, LOGIN, UPDATE, EOD) — unchanged
+        // (your original code here)
         // ← ALL OTHER TYPES (REPORT_CHECKER, LOGIN, UPDATE, EOD) still use Telegram
         // (your original code here - no changes needed)else {
         let header = '';
