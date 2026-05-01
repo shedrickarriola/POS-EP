@@ -182,7 +182,7 @@ export async function GET(request: Request) {
             .eq('branch_id', b.id)
             .order('sold_weekly', { ascending: false });
 
-          // Filter - sold_weekly is main reference
+          // Filter — STRICT 2-week rule (no more low-stock safety net)
           const meaningfulItems = (branchInventory || [])
             .filter((p: any) => {
               const stock = Number(p?.stock || 0);
@@ -208,9 +208,9 @@ export async function GET(request: Request) {
 
               const hasSalesHistory = soldWeekly > 0 || snapshot > 0;
 
+              // STRICT: only items that cannot cover 2 weeks
               return (
-                hasSalesHistory &&
-                ((weeklyDemand > 0 && stock < weeklyDemand * 2) || stock <= 10)
+                hasSalesHistory && weeklyDemand > 0 && stock < weeklyDemand * 2
               );
             })
             .sort((a: any, b: any) => {
@@ -275,7 +275,7 @@ export async function GET(request: Request) {
           ].slice(0, 20);
 
           // ─────────────────────────────────────────────────────────────
-          // BATCH SUGGESTION LOGIC (clean & no over-ordering)
+          // BATCH SUGGESTION + SKIP ZERO-SUGGESTION ITEMS
           // ─────────────────────────────────────────────────────────────
           let totalEstimatedCost = 0;
           let telegramItems = '';
@@ -290,7 +290,7 @@ export async function GET(request: Request) {
                 Number(p?.sold_monthly || 0) / 4.3 ||
                 0;
 
-            // === EXACT LOGIC YOU REQUESTED ===
+            // Batch suggestion logic
             let suggested = 0;
             if (weekly > 0) {
               const target = weekly * 2;
@@ -299,19 +299,19 @@ export async function GET(request: Request) {
               if (weekly < 5) {
                 suggested = Math.ceil(delta);
               } else if (weekly < 100) {
-                // round UP to nearest tens → always pcs
                 suggested = Math.ceil(delta / 10) * 10;
               } else {
-                // round UP to nearest hundreds → boxes
                 suggested = Math.ceil(delta / 100) * 100;
               }
             }
+
+            // Skip if nothing needs to be ordered
+            if (suggested <= 0) return;
 
             const buyCost = Number(p?.buy_cost || 0);
             const cost = suggested * buyCost;
             totalEstimatedCost += cost;
 
-            // Display: boxes ONLY for high-volume items (weekly >= 100)
             const displayAsBoxes = weekly >= 100;
             const displayQty = displayAsBoxes
               ? `${Math.round(suggested / 100)} boxes`
