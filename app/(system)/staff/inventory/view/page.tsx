@@ -335,10 +335,16 @@ export default function InventoryProtocol() {
                   }}
                   className="flex items-center gap-2 px-3 py-1.5 rounded-md text-[9px] font-black bg-violet-600/10 text-violet-400 border border-violet-600/20 hover:bg-violet-600 hover:text-white transition-all"
                 >
-                  📊 SUMMARY
+                  📊 ADJUSTMENTS
                 </button>
 
-                {/* Existing MAKE ADJUSTMENT button stays here */}
+                {/* NEW ITERATIONS BUTTON - beside Summary */}
+                <button
+                  onClick={() => router.push('staff/inventory/iterations')}
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-md text-[9px] font-black bg-emerald-600/10 text-emerald-400 border border-emerald-600/20 hover:bg-emerald-600 hover:text-white transition-all"
+                >
+                  📈 ITERATIONS
+                </button>
               </>
             )}
             <div className="flex bg-slate-950 p-1 rounded-md border border-white/10">
