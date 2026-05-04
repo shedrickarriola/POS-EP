@@ -430,7 +430,7 @@ export async function GET(request: Request) {
       } else {
         // ← ALL OTHER TYPES (REPORT_CHECKER, LOGIN, UPDATE, EOD) — unchanged
         // ← ALL OTHER TYPES (REPORT_CHECKER, LOGIN, UPDATE, EOD) — unchanged
-        // ← ALL OTHER TYPES (unchanged)
+        // ← ALL OTHER TYPES (unchanged)//
         // ← ALL OTHER TYPES (REPORT_CHECKER, LOGIN, UPDATE, EOD) — unchanged
         // (your original code here)
         // ← ALL OTHER TYPES (REPORT_CHECKER, LOGIN, UPDATE, EOD) still use Telegram
