@@ -182,7 +182,7 @@ export async function GET(request: Request) {
             .eq('branch_id', b.id)
             .order('sold_weekly', { ascending: false });
 
-          // Filter — STRICT 2-week rule (no more low-stock safety net)
+          // Filter — STRICT 2-week rule for GENERIC, 1-week rule for BRANDED
           const meaningfulItems = (branchInventory || [])
             .filter((p: any) => {
               const stock = Number(p?.stock || 0);
@@ -208,9 +208,17 @@ export async function GET(request: Request) {
 
               const hasSalesHistory = soldWeekly > 0 || snapshot > 0;
 
-              // STRICT: only items that cannot cover 2 weeks
+              // ←←← THIS IS THE KEY CHANGE
+              const itemType = String(p?.item_type || '')
+                .toUpperCase()
+                .trim();
+              const weeksThreshold = itemType === 'GENERIC' ? 2 : 1;
+
+              // STRICT: only items that cannot cover their target weeks
               return (
-                hasSalesHistory && weeklyDemand > 0 && stock < weeklyDemand * 2
+                hasSalesHistory &&
+                weeklyDemand > 0 &&
+                stock < weeklyDemand * weeksThreshold
               );
             })
             .sort((a: any, b: any) => {
@@ -290,7 +298,7 @@ export async function GET(request: Request) {
                 Number(p?.sold_monthly || 0) / 4.3 ||
                 0;
 
-            // Batch suggestion logic — GENERIC = 2 weeks, BRANDED = 1 week
+            // Suggested quantity: GENERIC = 2 weeks, BRANDED = 1 week
             let suggested = 0;
             if (weekly > 0) {
               const weeksTarget = isGeneric ? 2 : 1;
@@ -313,7 +321,7 @@ export async function GET(request: Request) {
             const cost = suggested * buyCost;
             totalEstimatedCost += cost;
 
-            // ALWAYS show as pcs (boxes removed)
+            // ALWAYS show as pcs
             const displayQty = `${Math.round(suggested)} pcs`;
 
             const itemNameUpper = String(p?.item_name || '').toUpperCase();
