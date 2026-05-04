@@ -182,7 +182,7 @@ export async function GET(request: Request) {
             .eq('branch_id', b.id)
             .order('sold_weekly', { ascending: false });
 
-          // Filter — STRICT 2-week rule for GENERIC, 1-week rule for BRANDED
+          // Filter — now type-aware (GENERIC: 2 weeks, BRANDED: 1 week)
           const meaningfulItems = (branchInventory || [])
             .filter((p: any) => {
               const stock = Number(p?.stock || 0);
@@ -190,6 +190,11 @@ export async function GET(request: Request) {
               const snapshot = Number(p?.sold_weekly_snapshot || 0);
               const itemNameUpper = String(p?.item_name || '').toUpperCase();
               const isSyrup = /\b(SYRUP|SYR)\b/.test(itemNameUpper);
+
+              const itemType = String(p?.item_type || '')
+                .toUpperCase()
+                .trim();
+              const targetWeeks = itemType === 'BRANDED' ? 1 : 2;
 
               const lastRestockStr = p?.last_restock_date;
               const lastRestock = lastRestockStr
@@ -208,17 +213,11 @@ export async function GET(request: Request) {
 
               const hasSalesHistory = soldWeekly > 0 || snapshot > 0;
 
-              // ←←← THIS IS THE KEY CHANGE
-              const itemType = String(p?.item_type || '')
-                .toUpperCase()
-                .trim();
-              const weeksThreshold = itemType === 'GENERIC' ? 2 : 1;
-
-              // STRICT: only items that cannot cover their target weeks
+              // Type-specific threshold
               return (
                 hasSalesHistory &&
                 weeklyDemand > 0 &&
-                stock < weeklyDemand * weeksThreshold
+                stock < weeklyDemand * targetWeeks
               );
             })
             .sort((a: any, b: any) => {
@@ -298,11 +297,11 @@ export async function GET(request: Request) {
                 Number(p?.sold_monthly || 0) / 4.3 ||
                 0;
 
-            // Suggested quantity: GENERIC = 2 weeks, BRANDED = 1 week
+            // Batch suggestion logic — now type-aware
             let suggested = 0;
             if (weekly > 0) {
-              const weeksTarget = isGeneric ? 2 : 1;
-              const target = weekly * weeksTarget;
+              const targetWeeks = isGeneric ? 2 : 1;
+              const target = weekly * targetWeeks;
               let delta = Math.max(0, target - stock);
 
               if (weekly < 5) {
@@ -321,7 +320,7 @@ export async function GET(request: Request) {
             const cost = suggested * buyCost;
             totalEstimatedCost += cost;
 
-            // ALWAYS show as pcs
+            // ALWAYS show in pcs now (no more boxes)
             const displayQty = `${Math.round(suggested)} pcs`;
 
             const itemNameUpper = String(p?.item_name || '').toUpperCase();
