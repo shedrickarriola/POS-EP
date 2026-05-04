@@ -290,10 +290,11 @@ export async function GET(request: Request) {
                 Number(p?.sold_monthly || 0) / 4.3 ||
                 0;
 
-            // Batch suggestion logic
+            // Batch suggestion logic — GENERIC = 2 weeks, BRANDED = 1 week
             let suggested = 0;
             if (weekly > 0) {
-              const target = weekly * 2;
+              const weeksTarget = isGeneric ? 2 : 1;
+              const target = weekly * weeksTarget;
               let delta = Math.max(0, target - stock);
 
               if (weekly < 5) {
@@ -312,10 +313,8 @@ export async function GET(request: Request) {
             const cost = suggested * buyCost;
             totalEstimatedCost += cost;
 
-            const displayAsBoxes = weekly >= 100;
-            const displayQty = displayAsBoxes
-              ? `${Math.round(suggested / 100)} boxes`
-              : `${Math.round(suggested)} pcs`;
+            // ALWAYS show as pcs (boxes removed)
+            const displayQty = `${Math.round(suggested)} pcs`;
 
             const itemNameUpper = String(p?.item_name || '').toUpperCase();
             const isSyrup = /\b(SYRUP|SYR)\b/.test(itemNameUpper);
