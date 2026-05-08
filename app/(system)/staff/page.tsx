@@ -97,6 +97,22 @@ export default function StaffDashboard() {
     type: '',
   });
   // ==================== WEEKLY DELIVERIES STATES ====================
+  // ==================== MERGE PRODUCT STATES ====================
+  // ==================== MERGE PRODUCT STATES ====================
+  const [showMergeModal, setShowMergeModal] = useState(false);
+  const [sourceProduct, setSourceProduct] = useState<any>(null);
+  const [targetProduct, setTargetProduct] = useState<any>(null);
+  const [mergeSearchTermSource, setMergeSearchTermSource] = useState('');
+  const [mergeSearchTermTarget, setMergeSearchTermTarget] = useState('');
+  const [mergeSearchResultsSource, setMergeSearchResultsSource] = useState<
+    any[]
+  >([]);
+  const [mergeSearchResultsTarget, setMergeSearchResultsTarget] = useState<
+    any[]
+  >([]);
+  const [isMerging, setIsMerging] = useState(false);
+  // ============================================================
+  // ============================================================
   // ==================== WEEKLY DELIVERIES STATES ====================
   const [showWeeklyModal, setShowWeeklyModal] = useState(false);
   const [currentWeekStart, setCurrentWeekStart] = useState('');
@@ -557,6 +573,66 @@ export default function StaffDashboard() {
     }
   }, [searchTerm, showPriceModal, selectedBranch]);
 
+  // Merge Product Search - Source
+  // ==================== MERGE PRODUCT SEARCH - DEBUG VERSION ====================
+  // Target Product Search
+  // ==================== MERGE PRODUCT SEARCH (NOW FIXED) ====================
+  // Target Search
+  useEffect(() => {
+    if (showMergeModal && selectedBranch && mergeSearchTermTarget.length > 1) {
+      const delayDebounceFn = setTimeout(async () => {
+        const { data } = await supabase
+          .from('inventory')
+          .select(
+            `id, item_name, stock, price, buy_cost, item_type, sold_weekly, sold_monthly, sold_yearly`
+          )
+          .eq('branch_id', selectedBranch.id)
+          .ilike('item_name', `%${mergeSearchTermTarget}%`)
+          .limit(8);
+
+        setMergeSearchResultsTarget(data || []);
+      }, 250);
+      return () => clearTimeout(delayDebounceFn);
+    } else {
+      setMergeSearchResultsTarget([]);
+    }
+  }, [mergeSearchTermTarget, showMergeModal, selectedBranch]);
+
+  // Source Search
+  useEffect(() => {
+    if (showMergeModal && selectedBranch && mergeSearchTermSource.length > 1) {
+      const delayDebounceFn = setTimeout(async () => {
+        const { data } = await supabase
+          .from('inventory')
+          .select(
+            `id, item_name, stock, price, buy_cost, item_type, sold_weekly, sold_monthly, sold_yearly`
+          )
+          .eq('branch_id', selectedBranch.id)
+          .ilike('item_name', `%${mergeSearchTermSource}%`)
+          .limit(8);
+
+        setMergeSearchResultsSource(data || []);
+      }, 250);
+      return () => clearTimeout(delayDebounceFn);
+    } else {
+      setMergeSearchResultsSource([]);
+    }
+  }, [mergeSearchTermSource, showMergeModal, selectedBranch]);
+  // =====================================================================
+
+  // Clear when modal closes
+  useEffect(() => {
+    if (!showMergeModal) {
+      setMergeSearchResultsSource([]);
+      setMergeSearchResultsTarget([]);
+    }
+  }, [showMergeModal]);
+  // ============================================================================
+  // ============================================================================
+  // ============================================================================
+  // =================================================================================================
+  // =====================================================================
+
   async function fetchStats(branchId: string) {
     const [poRes, orderRes] = await Promise.all([
       supabase
@@ -601,6 +677,114 @@ export default function StaffDashboard() {
       triggerToast(err.message, 'error');
     }
   };
+
+  const resetMergeState = () => {
+    setSourceProduct(null);
+    setTargetProduct(null);
+    setMergeSearchTermSource('');
+    setMergeSearchTermTarget('');
+    setMergeSearchResultsSource([]);
+    setMergeSearchResultsTarget([]);
+    setIsMerging(false);
+  };
+
+  const handleMergeProducts = async () => {
+    if (
+      !sourceProduct ||
+      !targetProduct ||
+      sourceProduct.id === targetProduct.id ||
+      !selectedBranch
+    ) {
+      triggerToast('Please select two different products', 'error');
+      return;
+    }
+
+    const confirmMsg =
+      `⚠️ MERGE ${sourceProduct.item_name} (stock: ${sourceProduct.stock}) INTO ${targetProduct.item_name}?\n\n` +
+      `This will:\n` +
+      `• Reassign ALL historical sales, POs, and adjustments\n` +
+      `• Update item_name in purchase_order_items\n` +
+      `• Combine stock + sold metrics\n` +
+      `• Permanently delete the source product\n\nContinue?`;
+
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsMerging(true);
+    setLogStatus('MERGING_PRODUCTS...');
+
+    try {
+      // 1. Update dependent tables (including item_name in purchase_order_items)
+      await supabase
+        .from('order_items')
+        .update({ product_id: targetProduct.id })
+        .eq('product_id', sourceProduct.id);
+
+      // ← UPDATED: Now also updates item_name
+      await supabase
+        .from('purchase_order_items')
+        .update({
+          inventory_id: targetProduct.id,
+          item_name: targetProduct.item_name,
+        })
+        .eq('inventory_id', sourceProduct.id);
+
+      await supabase
+        .from('inventory_adjustments')
+        .update({ inventory_id: targetProduct.id })
+        .eq('inventory_id', sourceProduct.id);
+
+      // 2. Combine stock & sold metrics into target
+      const newStock =
+        Number(targetProduct.stock || 0) + Number(sourceProduct.stock || 0);
+      const newSoldWeekly =
+        Number(targetProduct.sold_weekly || 0) +
+        Number(sourceProduct.sold_weekly || 0);
+      const newSoldMonthly =
+        Number(targetProduct.sold_monthly || 0) +
+        Number(sourceProduct.sold_monthly || 0);
+      const newSoldYearly =
+        Number(targetProduct.sold_yearly || 0) +
+        Number(sourceProduct.sold_yearly || 0);
+
+      const { error: updateError } = await supabase
+        .from('inventory')
+        .update({
+          stock: newStock,
+          sold_weekly: newSoldWeekly,
+          sold_monthly: newSoldMonthly,
+          sold_yearly: newSoldYearly,
+          updated_at: new Date().toISOString(),
+          updated_by: profile?.id,
+        })
+        .eq('id', targetProduct.id);
+
+      if (updateError) throw updateError;
+
+      // 3. Delete source product
+      const { error: deleteError } = await supabase
+        .from('inventory')
+        .delete()
+        .eq('id', sourceProduct.id);
+
+      if (deleteError) throw deleteError;
+
+      triggerToast(
+        `✅ Successfully merged ${sourceProduct.item_name} into ${targetProduct.item_name}`,
+        'success'
+      );
+
+      setShowMergeModal(false);
+      resetMergeState();
+      refreshInventoryState(); // refresh inventory views if open
+    } catch (err: any) {
+      console.error('Merge failed:', err);
+      triggerToast(`Merge failed: ${err.message}`, 'error');
+    } finally {
+      setIsMerging(false);
+      setLogStatus('SYSTEM_READY');
+    }
+  };
+
   async function fetchDailyReports(branchId: string) {
     setLogStatus('CHECKING_FOR_MISSING_DATA...');
 
@@ -1717,6 +1901,29 @@ export default function StaffDashboard() {
                       className="text-slate-700 group-hover:text-blue-500"
                     />
                   </button>
+                  <button
+                    onClick={() => {
+                      setShowMergeModal(true);
+                      resetMergeState();
+                    }}
+                    className="flex items-center justify-between p-6 bg-slate-900 border border-purple-500/30 rounded-2xl hover:border-purple-500 transition-all group"
+                  >
+                    <div className="flex items-center gap-4 text-left">
+                      <Database size={20} className="text-purple-500" />
+                      <div>
+                        <span className="block text-sm font-black uppercase italic text-white leading-none">
+                          Merge Products
+                        </span>
+                        <span className="text-[9px] text-slate-500 uppercase mt-1 block tracking-widest font-bold">
+                          Combine Duplicates
+                        </span>
+                      </div>
+                    </div>
+                    <ArrowRight
+                      size={18}
+                      className="text-slate-700 group-hover:text-purple-500"
+                    />
+                  </button>
                 </div>
               </div>
 
@@ -2346,6 +2553,184 @@ export default function StaffDashboard() {
                   {isWiping ? 'Wiping Node...' : 'Confirm Node Reset'}
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* ==================== MERGE PRODUCT MODAL ==================== */}
+        {showMergeModal && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-6">
+            <div
+              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+              onClick={() => {
+                setShowMergeModal(false);
+                resetMergeState();
+              }}
+            />
+            <div className="relative bg-slate-900 border border-purple-500/30 w-full max-w-4xl rounded-3xl p-8 shadow-2xl max-h-[95vh] overflow-auto">
+              <div className="flex justify-between items-center mb-8">
+                <div>
+                  <h2 className="text-3xl font-black italic text-purple-400 uppercase tracking-tighter">
+                    Merge Products
+                  </h2>
+                  <p className="text-slate-400 text-sm">
+                    Combine duplicates • Transfer all history
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    setShowMergeModal(false);
+                    resetMergeState();
+                  }}
+                  className="text-slate-400 hover:text-white"
+                >
+                  <X size={28} />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-8">
+                {/* TARGET - KEEP THIS */}
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 text-emerald-400 font-black uppercase text-xs tracking-widest">
+                    <CheckCircle2 size={16} /> KEEP THIS PRODUCT (Target)
+                  </div>
+                  <div className="relative">
+                    <Search
+                      className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"
+                      size={18}
+                    />
+                    <input
+                      type="text"
+                      value={mergeSearchTermTarget}
+                      onChange={(e) => setMergeSearchTermTarget(e.target.value)}
+                      className="w-full bg-slate-950 border border-emerald-500/30 rounded-3xl pl-12 py-4 text-white outline-none focus:border-emerald-400"
+                      placeholder="Search target product..."
+                    />
+                  </div>
+
+                  {mergeSearchResultsTarget.length > 0 && !targetProduct && (
+                    <div className="max-h-64 overflow-auto bg-slate-950 border border-white/10 rounded-3xl">
+                      {mergeSearchResultsTarget.map((p) => (
+                        <button
+                          key={p.id}
+                          onClick={() => setTargetProduct(p)}
+                          className="w-full text-left px-6 py-4 hover:bg-emerald-500/10 border-b border-white/5 flex justify-between items-center"
+                        >
+                          <span className="font-medium">{p.item_name}</span>
+                          <span className="text-emerald-400 text-sm">
+                            Stock: {p.stock}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {targetProduct && (
+                    <div className="p-6 bg-emerald-950/60 border border-emerald-400/30 rounded-3xl">
+                      <p className="font-bold text-lg">
+                        {targetProduct.item_name}
+                      </p>
+                      <p className="text-emerald-400">
+                        Stock:{' '}
+                        <span className="font-mono">{targetProduct.stock}</span>
+                      </p>
+                      <button
+                        onClick={() => setTargetProduct(null)}
+                        className="text-xs text-red-400 mt-4 underline"
+                      >
+                        Change Target
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* SOURCE - MERGE AWAY */}
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 text-red-400 font-black uppercase text-xs tracking-widest">
+                    <X size={16} /> MERGE THIS AWAY (Source)
+                  </div>
+                  {/* Mirror the target column but with red theme and source states */}
+                  <div className="relative">
+                    <Search
+                      className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"
+                      size={18}
+                    />
+                    <input
+                      type="text"
+                      value={mergeSearchTermSource}
+                      onChange={(e) => setMergeSearchTermSource(e.target.value)}
+                      className="w-full bg-slate-950 border border-red-500/30 rounded-3xl pl-12 py-4 text-white outline-none focus:border-red-400"
+                      placeholder="Search source product..."
+                    />
+                  </div>
+
+                  {mergeSearchResultsSource.length > 0 && !sourceProduct && (
+                    <div className="max-h-64 overflow-auto bg-slate-950 border border-white/10 rounded-3xl">
+                      {mergeSearchResultsSource.map((p) => (
+                        <button
+                          key={p.id}
+                          onClick={() => setSourceProduct(p)}
+                          className="w-full text-left px-6 py-4 hover:bg-red-500/10 border-b border-white/5 flex justify-between items-center"
+                        >
+                          <span className="font-medium">{p.item_name}</span>
+                          <span className="text-red-400 text-sm">
+                            Stock: {p.stock}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {sourceProduct && (
+                    <div className="p-6 bg-red-950/60 border border-red-400/30 rounded-3xl">
+                      <p className="font-bold text-lg">
+                        {sourceProduct.item_name}
+                      </p>
+                      <p className="text-red-400">
+                        Stock:{' '}
+                        <span className="font-mono">{sourceProduct.stock}</span>
+                      </p>
+                      <button
+                        onClick={() => setSourceProduct(null)}
+                        className="text-xs text-red-400 mt-4 underline"
+                      >
+                        Change Source
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Merge Confirmation */}
+              {sourceProduct && targetProduct && (
+                <div className="mt-10 p-8 border border-amber-400/30 bg-amber-500/5 rounded-3xl text-center">
+                  <p className="text-amber-400 font-black text-lg mb-2">
+                    FINAL STEP
+                  </p>
+                  <p className="text-slate-300">
+                    Transfer{' '}
+                    <span className="font-mono text-amber-400">
+                      {sourceProduct.stock}
+                    </span>{' '}
+                    stock and reassign all history from
+                    <span className="font-semibold text-red-400">
+                      {' '}
+                      {sourceProduct.item_name}
+                    </span>{' '}
+                    →{' '}
+                    <span className="font-semibold text-emerald-400">
+                      {targetProduct.item_name}
+                    </span>
+                  </p>
+                  <button
+                    onClick={handleMergeProducts}
+                    disabled={isMerging}
+                    className="mt-8 w-full py-6 bg-gradient-to-r from-red-600 to-purple-600 hover:from-red-500 hover:to-purple-500 text-white font-black text-xl rounded-3xl transition-all disabled:opacity-50"
+                  >
+                    {isMerging ? 'MERGING...' : 'CONFIRM PERMANENT MERGE'}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}

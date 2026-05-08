@@ -610,7 +610,76 @@ export default function PurchaseOrderList() {
                           colSpan={8}
                           className="bg-black/40 border-y border-blue-500/10 p-5"
                         >
-                          {/* ... your existing expanded content ... */}
+                          <div className="text-xs font-mono mb-3 text-blue-400 flex items-center gap-2">
+                            <Layers size={14} />
+                            PURCHASE ORDER ITEMS — {order.po_number}
+                          </div>
+
+                          <table className="w-full border-separate border-spacing-y-1 text-[11px]">
+                            <thead>
+                              <tr className="text-[9px] font-black text-slate-500 uppercase tracking-widest border-b border-white/10">
+                                <th className="text-left pl-2">Item</th>
+                                <th className="text-center w-16">Qty</th>
+                                <th className="text-right w-24">Unit Cost</th>
+                                <th className="text-right w-28">Total Cost</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(order.purchase_order_items || []).map(
+                                (item: any) => {
+                                  const displayName =
+                                    item.inventory?.item_name ||
+                                    item.item_name ||
+                                    'Unknown Item';
+                                  const displayType =
+                                    item.inventory?.item_type ||
+                                    item.item_type ||
+                                    'GENERIC';
+                                  const total =
+                                    (item.quantity || 0) *
+                                    (item.buy_cost || item.unit_cost || 0);
+
+                                  return (
+                                    <tr
+                                      key={item.id}
+                                      className="hover:bg-white/5 transition-colors"
+                                    >
+                                      <td className="pl-2 py-2">
+                                        <div className="flex flex-col">
+                                          <span className="text-[9px] font-bold text-blue-400/70 uppercase">
+                                            {displayType}
+                                          </span>
+                                          <span className="text-slate-200">
+                                            {displayName}
+                                          </span>
+                                        </div>
+                                      </td>
+                                      <td className="text-center font-mono text-slate-300">
+                                        {item.quantity || 0}
+                                      </td>
+                                      <td className="text-right font-mono text-slate-400">
+                                        ₱
+                                        {(
+                                          item.buy_cost ||
+                                          item.unit_cost ||
+                                          0
+                                        ).toFixed(2)}
+                                      </td>
+                                      <td className="text-right font-mono font-black text-emerald-400">
+                                        ₱{total.toLocaleString()}
+                                      </td>
+                                    </tr>
+                                  );
+                                }
+                              )}
+                            </tbody>
+                          </table>
+
+                          {order.purchase_order_items?.length === 0 && (
+                            <p className="text-slate-500 text-center py-8 text-xs font-mono">
+                              No items found
+                            </p>
+                          )}
                         </td>
                       </tr>
                     )}
@@ -756,7 +825,9 @@ export default function PurchaseOrderList() {
                                               <span className="text-[9px] font-bold text-blue-500/50 uppercase tracking-tighter">
                                                 {item.item_type || 'GENERIC'}
                                               </span>
-                                              {item.item_name || 'Unknown Item'}
+                                              {item.inventory?.item_name ||
+                                                item.item_name ||
+                                                'Unknown Item'}
                                             </div>
                                           </td>
                                           <td className="text-center font-mono text-[11px] text-slate-500">
