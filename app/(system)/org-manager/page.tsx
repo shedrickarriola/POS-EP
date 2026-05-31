@@ -27,6 +27,7 @@ import {
   ShieldAlert,
   FileBarChart,
   Network,
+  Building,
 } from 'lucide-react';
 
 export default function ExecutiveTerminal() {
@@ -60,6 +61,13 @@ export default function ExecutiveTerminal() {
     is_auditor: false,
   });
 
+  const [agentForm, setAgentForm] = useState({
+    profile_id: '',
+    office_branch_id: '',
+  });
+
+  const [officeBranches, setOfficeBranches] = useState<any[]>([]);
+
   const [emailForm, setEmailForm] = useState({
     org_id: '',
     ordering_email: '',
@@ -83,6 +91,7 @@ export default function ExecutiveTerminal() {
     branch_id: '',
     org_id: '',
     password: '',
+    usage_type: 'DRUGSTORE', // ← ADD THIS
   });
 
   const [statusForm, setStatusForm] = useState({
@@ -153,6 +162,16 @@ export default function ExecutiveTerminal() {
         supabase.from('profiles').select('*'),
       ]);
 
+      // ==================== NEW: FETCH OFFICE BRANCHES FOR AGENT ASSIGNMENT ====================
+      const { data: officeData } = await supabase
+        .from('branches')
+        .select('*')
+        .eq('is_office_use', true)
+        .order('branch_name', { ascending: true });
+
+      setOfficeBranches(officeData || []);
+
+      // ==================== ORIGINAL ASSEMBLY LOGIC (unchanged) ====================
       const assembled =
         orgs.data?.map((org) => ({
           ...org,
@@ -301,6 +320,7 @@ export default function ExecutiveTerminal() {
           branch_id: staffForm.branch_id,
           org_id: staffForm.org_id,
           status: 'ACTIVE',
+          usage_type: staffForm.usage_type,
         },
       ]);
 
@@ -315,6 +335,7 @@ export default function ExecutiveTerminal() {
         branch_id: '',
         org_id: '',
         password: '',
+        usage_type: 'DRUGSTORE',
       });
       fetchInitialData();
     } catch (err: any) {
@@ -370,7 +391,7 @@ export default function ExecutiveTerminal() {
 
     if (error) alert(`Error: ${error.message}`);
     else {
-      showSuccess('Ordering email saved!');
+      showSuccess('Ordering email saved');
       setModals({ ...modals, orderingEmail: false });
       fetchInitialData();
     }
@@ -389,6 +410,63 @@ export default function ExecutiveTerminal() {
     else {
       showSuccess('Weekly Report email saved');
       setModals({ ...modals, reportEmail: false });
+      fetchInitialData();
+    }
+  };
+
+  // ====================== ASSIGN AGENT TO OFFICE BRANCH ======================
+  const handleAssignAgentBranch = async () => {
+    if (!agentForm.profile_id || !agentForm.office_branch_id) {
+      return alert('Please select both Agent and Office Branch');
+    }
+
+    console.log(
+      '🔄 Assigning agent:',
+      agentForm.profile_id,
+      '→ office_branch_id:',
+      agentForm.office_branch_id
+    );
+
+    const { error } = await supabase
+      .from('profiles')
+      .update({
+        office_branch_id: agentForm.office_branch_id,
+        is_agent: true, // ← This is the fix
+      })
+      .eq('id', agentForm.profile_id);
+
+    if (error) {
+      console.error('❌ Update failed:', error);
+      alert(`Error: ${error.message}`);
+    } else {
+      console.log('✅ Agent successfully assigned + is_agent = true');
+      showSuccess('Agent assigned to Office Branch successfully');
+      setModals({ ...modals, agentBranch: false });
+      setAgentForm({ profile_id: '', office_branch_id: '' });
+      fetchInitialData();
+    }
+  };
+
+  // ====================== DEACTIVATE AGENT ROLE ======================
+  const handleDeactivateAgent = async () => {
+    if (!agentForm.profile_id) {
+      return alert('Please select an Agent first');
+    }
+
+    const { error } = await supabase
+      .from('profiles')
+      .update({
+        is_agent: false,
+        office_branch_id: null,
+      })
+      .eq('id', agentForm.profile_id);
+
+    if (error) {
+      alert(`Error: ${error.message}`);
+    } else {
+      showSuccess('Agent role deactivated (is_agent = FALSE)');
+      setModals({ ...modals, agentBranch: false });
+      setAgentForm({ profile_id: '', office_branch_id: '' });
       fetchInitialData();
     }
   };
@@ -488,11 +566,10 @@ export default function ExecutiveTerminal() {
               Staff
             </button>
             <button
-              onClick={() => setModals({ ...modals, staff: true })}
-              className="bg-slate-900 px-5 py-3 rounded-2xl text-[9px] font-black uppercase text-slate-300 border border-white/5 hover:border-purple-500/50 transition-all"
+              onClick={() => setModals({ ...modals, agentBranch: true })}
+              className="bg-slate-900 px-5 py-3 rounded-2xl text-[9px] font-black uppercase text-slate-300 border border-white/5 hover:border-violet-500/50 transition-all flex items-center gap-2"
             >
-              <UserPlus size={14} className="inline mr-2 text-purple-500" /> Add
-              Staff
+              <Building size={14} className="text-violet-500" /> Agent Branch
             </button>
 
             {/* NEW BUTTONS */}
@@ -925,6 +1002,8 @@ export default function ExecutiveTerminal() {
                 <option value="staff">Staff</option>
                 <option value="branch_admin">Branch Admin</option>
               </select>
+
+              {/* UPDATED BRANCH SELECT */}
               <select
                 className="w-full bg-black/50 border border-slate-800 p-4 rounded-2xl text-white outline-none text-xs font-bold"
                 onChange={(e) => {
@@ -932,10 +1011,16 @@ export default function ExecutiveTerminal() {
                   const b = organizations
                     .flatMap((o) => o.branches)
                     .find((x: any) => String(x.id) === String(bId));
+
+                  // ← THIS IS THE FIX
+                  const usageType =
+                    b?.is_office_use === true ? 'OFFICE' : 'DRUGSTORE';
+
                   setStaffForm({
                     ...staffForm,
                     branch_id: bId,
                     org_id: b?.org_id || '',
+                    usage_type: usageType,
                   });
                 }}
               >
@@ -948,6 +1033,7 @@ export default function ExecutiveTerminal() {
                     </option>
                   ))}
               </select>
+
               <button
                 onClick={handleAddStaff}
                 className="w-full bg-purple-600 py-4 rounded-2xl font-black uppercase text-[10px] tracking-widest text-white flex items-center justify-center gap-2"
@@ -969,8 +1055,8 @@ export default function ExecutiveTerminal() {
           </div>
         </div>
       )}
-
       {/* CHANGE STATUS MODAL */}
+      {/* ====================== CHANGE STATUS MODAL ====================== */}
       {modals.status && (
         <div className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-orange-500/20 p-8 rounded-[2.5rem] w-full max-w-md">
@@ -979,20 +1065,46 @@ export default function ExecutiveTerminal() {
             </h3>
 
             <div className="space-y-6">
-              <select
-                className="w-full bg-black/50 border border-slate-800 p-4 rounded-2xl text-white outline-none text-xs font-bold"
-                value={statusForm.profile_id}
-                onChange={(e) =>
-                  setStatusForm({ ...statusForm, profile_id: e.target.value })
-                }
-              >
-                <option value="">Select user...</option>
-                {allStaff.map((s: any) => (
-                  <option key={s.id} value={s.id}>
-                    {s.full_name} — {s.email} ({s.role})
-                  </option>
-                ))}
-              </select>
+              <div>
+                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">
+                  Select Profile (Active first)
+                </label>
+                <select
+                  className="w-full bg-black/50 border border-slate-800 p-4 rounded-2xl text-white outline-none text-xs font-bold"
+                  value={statusForm.profile_id}
+                  onChange={(e) =>
+                    setStatusForm({ ...statusForm, profile_id: e.target.value })
+                  }
+                >
+                  <option value="">Select user...</option>
+                  {allStaff
+                    .sort((a: any, b: any) => {
+                      // Active accounts first
+                      if (a.status === 'ACTIVE' && b.status !== 'ACTIVE')
+                        return -1;
+                      if (a.status !== 'ACTIVE' && b.status === 'ACTIVE')
+                        return 1;
+                      // Then sort alphabetically by full_name
+                      return (a.full_name || '').localeCompare(
+                        b.full_name || ''
+                      );
+                    })
+                    .map((s: any) => (
+                      <option key={s.id} value={s.id}>
+                        {s.full_name} — {s.email} ({s.role})
+                        <span
+                          className={`ml-2 ${
+                            s.status === 'ACTIVE'
+                              ? 'text-emerald-400'
+                              : 'text-red-400'
+                          }`}
+                        >
+                          • {s.status}
+                        </span>
+                      </option>
+                    ))}
+                </select>
+              </div>
 
               <div className="flex gap-3">
                 <button
@@ -1292,6 +1404,102 @@ export default function ExecutiveTerminal() {
               >
                 Cancel
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====================== AGENT BRANCH ASSIGNMENT MODAL ====================== */}
+      {modals.agentBranch && (
+        <div className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-violet-500/20 p-8 rounded-[2.5rem] w-full max-w-md">
+            <h3 className="text-xl font-black text-white uppercase italic mb-6 tracking-tighter">
+              Assign Agent to Office
+            </h3>
+
+            <div className="space-y-6">
+              <div>
+                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">
+                  Select Agent (Office / Both • ACTIVE)
+                </label>
+                <select
+                  className="w-full bg-black/50 border border-slate-800 p-4 rounded-2xl text-white outline-none text-xs font-bold"
+                  value={agentForm.profile_id}
+                  onChange={(e) =>
+                    setAgentForm({ ...agentForm, profile_id: e.target.value })
+                  }
+                >
+                  <option value="">Select Agent...</option>
+                  {allStaff
+                    .filter((s: any) => {
+                      const usage = (s.usage_type || '').toUpperCase().trim();
+                      return (
+                        s.status === 'ACTIVE' &&
+                        (usage === 'BOTH' || usage === 'OFFICE')
+                      );
+                    })
+                    .map((s: any) => (
+                      <option key={s.id} value={s.id}>
+                        {s.full_name} — {s.email} ({s.role})
+                        <span className="text-emerald-400 ml-1">• ACTIVE</span>
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">
+                  Office Branch
+                </label>
+                <select
+                  className="w-full bg-black/50 border border-slate-800 p-4 rounded-2xl text-white outline-none text-xs font-bold"
+                  value={agentForm.office_branch_id}
+                  onChange={(e) =>
+                    setAgentForm({
+                      ...agentForm,
+                      office_branch_id: e.target.value,
+                    })
+                  }
+                >
+                  <option value="">Select Office Branch...</option>
+                  {officeBranches.map((b: any) => (
+                    <option key={b.id} value={b.id}>
+                      {b.branch_name} {b.location ? `(${b.location})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex flex-col gap-3 pt-2">
+                {/* Assign Agent */}
+                <button
+                  onClick={handleAssignAgentBranch}
+                  className="w-full bg-violet-600 hover:bg-violet-500 py-5 rounded-2xl text-white font-black uppercase text-xs tracking-widest transition-all"
+                >
+                  Assign Agent to Office
+                </button>
+
+                {/* Deactivate button - ONLY show if currently an agent */}
+                {allStaff.find((s: any) => s.id === agentForm.profile_id)
+                  ?.is_agent === true && (
+                  <button
+                    onClick={handleDeactivateAgent}
+                    className="w-full bg-red-600 hover:bg-red-500 py-5 rounded-2xl text-white font-black uppercase text-xs tracking-widest transition-all"
+                  >
+                    Deactivate Agent Role (is_agent = FALSE)
+                  </button>
+                )}
+
+                <button
+                  onClick={() => {
+                    setModals({ ...modals, agentBranch: false });
+                    setAgentForm({ profile_id: '', office_branch_id: '' });
+                  }}
+                  className="w-full text-[10px] font-black uppercase text-slate-500 mt-2 text-center"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           </div>
         </div>

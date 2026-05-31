@@ -435,13 +435,18 @@ export async function GET(request: Request) {
           }
         }
       } else {
-        // ← ALL OTHER TYPES (REPORT_CHECKER, LOGIN, UPDATE, EOD) — unchanged
-        // ← ALL OTHER TYPES (REPORT_CHECKER, LOGIN, UPDATE, EOD) — unchanged
-        // ← ALL OTHER TYPES (unchanged)
-        // ← ALL OTHER TYPES (REPORT_CHECKER, LOGIN, UPDATE, EOD) — unchanged
-        // (your original code here)
-        // ← ALL OTHER TYPES (REPORT_CHECKER, LOGIN, UPDATE, EOD) still use Telegram
-        // (your original code here - no changes needed)else {
+        // ← REGULAR REPORTS (LOGIN 12NN, UPDATE 5PM, EOD 11PM)
+        // Only show DRUGSTORE branches (is_office_use = false / null)
+
+        const drugstoreBranches = group.branches.filter(
+          (b: any) => !b.is_office_use
+        );
+
+        if (drugstoreBranches.length === 0) {
+          console.log(`⏭️ ${group.name} has no drugstore branches for ${type}`);
+          continue; // skip this org if no drugstore branches
+        }
+
         let header = '';
         switch (type) {
           case 'REPORT_CHECKER':
@@ -457,9 +462,9 @@ export async function GET(request: Request) {
             header = '🏁 FINAL EOD REPORT (11PM)';
         }
 
-        message = `<b>${header}</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
+        let message = `<b>${header}</b>\n🏢 <b>${group.name.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━━\n`;
 
-        group.branches.forEach((b: any) => {
+        drugstoreBranches.forEach((b: any) => {
           const stats = branchStats[b.id];
           const bNameFull = b.branch_name?.toString().trim().toUpperCase();
           const staffList = activeStaffMap[bNameFull] || [];
@@ -505,6 +510,17 @@ export async function GET(request: Request) {
           }
           message += `━━━━━━━━━━━━━━━━━━\n`;
         });
+
+        // Send Telegram (only drugstore report)
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: group.chatId,
+            text: message,
+            parse_mode: 'HTML',
+          }),
+        });
       }
 
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -518,6 +534,109 @@ export async function GET(request: Request) {
       });
     }
 
+    // ==================== DAILY EMAIL REPORT (8PM) - ONLY OFFICE BRANCHES ====================
+    if (type === 'DAILY_EMAIL') {
+      console.log(
+        '📧 Starting Daily Email Report (8PM) - Office Branches Only'
+      );
+
+      const { data: orgs } = await supabaseAdmin
+        .from('organizations')
+        .select('id, name, owner_email')
+        .not('owner_email', 'is', null);
+
+      for (const org of orgs || []) {
+        if (!org.owner_email) continue;
+
+        // ONLY office branches
+        const { data: branches } = await supabaseAdmin
+          .from('branches')
+          .select('*')
+          .eq('org_id', org.id)
+          .eq('is_office_use', true);
+
+        if (!branches || branches.length === 0) {
+          console.log(`⏭️ ${org.name} has no office branches`);
+          continue;
+        }
+
+        let emailHtml = `
+              <div style="font-family: Arial, sans-serif; max-width: 900px; margin: 0 auto; padding: 30px; background: #0f172a; color: #e2e8f0;">
+                <h1 style="color: #10b981; text-align: center;">📊 Daily Report - ${yesterdayStr}</h1>
+                <h2 style="color: #64748b; text-align: center;">${org.name} (Office Use Only)</h2>
+                <hr style="border: 1px solid #334155;">
+            `;
+
+        for (const b of branches) {
+          const { data: report } = await supabaseAdmin
+            .from('daily_reports')
+            .select('*')
+            .eq('branch_id', b.id)
+            .eq('report_date', yesterdayStr)
+            .single();
+
+          const { data: payments } = await supabaseAdmin
+            .from('daily_payments')
+            .select('amount, payment_method')
+            .eq('branch_id', b.id)
+            .eq('report_date', yesterdayStr);
+
+          const totalCash = (payments || [])
+            .filter((p) => p.payment_method === 'CASH')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+          const totalCheque = (payments || [])
+            .filter((p) => p.payment_method === 'CHEQUE')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+          const totalPayments = totalCash + totalCheque;
+
+          emailHtml += `
+                <div style="background:#1e2937; padding:20px; border-radius:12px; margin:20px 0;">
+                  <h3 style="margin:0 0 15px 0; color:#67e8f9;">${
+                    b.branch_name
+                  }</h3>
+                  <table style="width:100%; border-collapse:collapse; color:#e2e8f0;">
+                    <tr><td style="padding:8px 0;"><strong>Generic Sales</strong></td><td style="text-align:right;">₱${Number(
+                      report?.generic_sales || 0
+                    ).toLocaleString()}</td></tr>
+                    <tr><td style="padding:8px 0;"><strong>Branded Sales</strong></td><td style="text-align:right;">₱${Number(
+                      report?.branded_sales || 0
+                    ).toLocaleString()}</td></tr>
+                    <tr><td style="padding:8px 0; border-top:2px solid #64748b;"><strong>Total Sales</strong></td><td style="text-align:right; border-top:2px solid #64748b; font-weight:bold;">₱${Number(
+                      report?.total_sales || 0
+                    ).toLocaleString()}</td></tr>
+                    <tr><td style="padding:8px 0;"><strong>Remittances</strong></td><td style="text-align:right;">₱${totalPayments.toLocaleString()}</td></tr>
+                    <tr><td style="padding:8px 0;"><strong>Expenses</strong></td><td style="text-align:right; color:#f87171;">₱${Number(
+                      report?.expenses || 0
+                    ).toLocaleString()}</td></tr>
+                    <tr style="background:#0f172a;"><td style="padding:12px 0; font-size:18px; font-weight:bold;">Actual Cash</td>
+                        <td style="text-align:right; font-size:18px; font-weight:bold; color:#10b981;">₱${Number(
+                          report?.actual_cash || 0
+                        ).toLocaleString()}</td></tr>
+                  </table>
+                </div>
+              `;
+        }
+
+        emailHtml += `</div>`;
+
+        // Send email
+        await resend.emails.send({
+          from: 'Econo Drugstore <reports@econo-pos.com>',
+          to: org.owner_email,
+          subject: `📊 Daily Report - ${yesterdayStr} | ${org.name} (Office)`,
+          html: emailHtml,
+        });
+
+        console.log(`✅ Daily email sent to ${org.owner_email}`);
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: 'Daily email reports sent (Office branches only)',
+      });
+    }
     return NextResponse.json({ success: true });
   } catch (err: any) {
     console.error('Telegram Report Error:', err);

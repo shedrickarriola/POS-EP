@@ -33,10 +33,45 @@ import {
 export default function StaffDashboard() {
   const router = useRouter();
   const [profile, setProfile] = useState<any>(null);
+  const isAdmin =
+    profile?.role === 'branch_admin' || profile?.role === 'org_manager';
   const [branches, setBranches] = useState<any[]>([]);
   const [selectedBranch, setSelectedBranch] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [sameDayPayments, setSameDayPayments] = useState<any[]>([]);
   const [logStatus, setLogStatus] = useState<string>('');
+  const [selectedDay, setSelectedDay] = useState<any>(null);
+  const [dayOrders, setDayOrders] = useState<any[]>([]); // Daily Sales Table
+  const [dayPayments, setDayPayments] = useState<any[]>([]); // Remittances Table
+  const [dayExpenses, setDayExpenses] = useState<any[]>([]); // Expenses Table
+  const [last7DaysOrders, setLast7DaysOrders] = useState<any[]>([]); // ← NEW for calendar
+  // Office Workflow Filters
+  const [prepFilter, setPrepFilter] = useState({
+    date: '',
+    client: '',
+    agent: '',
+  });
+  const [deliveryFilter, setDeliveryFilter] = useState({
+    date: '',
+    client: '',
+    agent: '',
+  });
+  const [collectionFilter, setCollectionFilter] = useState({
+    date: '',
+    client: '',
+    agent: '',
+  });
+  // New: Overdue filter for Collections
+  const [showOverdueCollection, setShowOverdueCollection] = useState(false);
+  // Dropdown data for filters
+  const [branchClients, setBranchClients] = useState<any[]>([]);
+  const [branchAgents, setBranchAgents] = useState<any[]>([]);
+  const [showDRModal, setShowDRModal] = useState(false);
+  const [pendingDROrder, setPendingDROrder] = useState<any>(null);
+  const [drNumberInput, setDrNumberInput] = useState('');
+  const [dayTab, setDayTab] = useState<'overview' | 'sales-collection'>(
+    'overview'
+  );
   const [stats, setStats] = useState({
     poCount: 0,
     salesCount: 0,
@@ -65,7 +100,26 @@ export default function StaffDashboard() {
     total_sales: 0,
     discount_total: 0, // ← NEW
   });
+  // === OFFICE USE - 3 TABLES ===
+  const [pendingOrders, setPendingOrders] = useState<any[]>([]);
+  const [deliveryOrders, setDeliveryOrders] = useState<any[]>([]);
+  const [collectionOrders, setCollectionOrders] = useState<any[]>([]);
 
+  // === NEW: Collection Payment Modal ===
+  const [showCollectionModal, setShowCollectionModal] = useState(false);
+  const [selectedCollectionOrder, setSelectedCollectionOrder] =
+    useState<any>(null);
+  const [paymentAmount, setPaymentAmount] = useState<number>(0);
+  const [paymentMethodModal, setPaymentMethodModal] = useState<
+    'CASH' | 'CHEQUE'
+  >('CASH');
+  const [chequeDateModal, setChequeDateModal] = useState<string>('');
+  const [collectionNotes, setCollectionNotes] = useState<string>('');
+  const [prNumberInput, setPrNumberInput] = useState('');
+  // === NEW: Add Expense Modal ===
+  const [showAddExpenseModal, setShowAddExpenseModal] = useState(false);
+  const [newExpenseName, setNewExpenseName] = useState('');
+  const [newExpenseAmount, setNewExpenseAmount] = useState(0);
   const [toast, setToast] = useState<{
     show: boolean;
     msg: string;
@@ -508,43 +562,73 @@ export default function StaffDashboard() {
         setProfile(profileData);
 
         if (profileData?.org_id) {
-          const { data: branchData } = await supabase
+          // ==================== BRANCH FILTERING BY USAGE_TYPE ====================
+          let branchQuery = supabase
             .from('branches')
             .select('*')
             .eq('org_id', profileData.org_id);
 
-          setBranches(branchData || []);
+          const usageType = (profileData.usage_type || 'DRUGSTORE')
+            .toUpperCase()
+            .trim();
 
+          if (usageType === 'DRUGSTORE') {
+            branchQuery = branchQuery.eq('is_office_use', false);
+          } else if (usageType === 'OFFICE') {
+            branchQuery = branchQuery.eq('is_office_use', true);
+          }
+          // 'BOTH' shows all
+
+          const { data: branchData } = await branchQuery;
+
+          // ==================== SORT ALPHABETICALLY ====================
+          const sortedBranches = (branchData || []).sort((a: any, b: any) =>
+            a.branch_name.localeCompare(b.branch_name)
+          );
+
+          setBranches(sortedBranches);
+
+          // ==================== RESTORE SAVED BRANCH ====================
           const savedBranch = localStorage.getItem('active_branch');
           if (savedBranch) {
             const parsedBranch = JSON.parse(savedBranch);
-            setSelectedBranch(parsedBranch);
 
-            // ←←← Immediately disable + start checking
-            setCanCreateNewSale(false);
-            setBlockingReason('Checking permissions...');
+            const isBranchAllowed =
+              usageType === 'BOTH' ||
+              (usageType === 'DRUGSTORE' && !parsedBranch.is_office_use) ||
+              (usageType === 'OFFICE' && parsedBranch.is_office_use);
 
-            await checkNewSalePermission(parsedBranch.id);
+            if (isBranchAllowed) {
+              setSelectedBranch(parsedBranch);
 
-            // Continue with the rest
-            if (profile?.id) {
-              await supabase
-                .from('profiles')
-                .update({ active_branch_id: parsedBranch.id })
-                .eq('id', profile.id);
+              setCanCreateNewSale(false);
+              setBlockingReason('Checking permissions...');
+
+              await checkNewSalePermission(parsedBranch.id);
+
+              if (profileData?.id) {
+                await supabase
+                  .from('profiles')
+                  .update({ active_branch_id: parsedBranch.id })
+                  .eq('id', profileData.id);
+              }
+
+              logSystemActivity(
+                'LOGIN',
+                parsedBranch.branch_name,
+                session.user.email,
+                profileData?.full_name
+              );
+
+              fetchStats(parsedBranch.id);
+              updateQuotas(parsedBranch);
+              fetchDailyReports(parsedBranch.id);
+              if (parsedBranch.is_office_use)
+                await fetchOfficeOrders(parsedBranch.id);
+              syncDailyReportRealtime(parsedBranch.id);
+            } else {
+              localStorage.removeItem('active_branch');
             }
-
-            logSystemActivity(
-              'LOGIN',
-              parsedBranch.branch_name,
-              session.user.email,
-              profileData?.full_name
-            );
-
-            fetchStats(parsedBranch.id);
-            updateQuotas(parsedBranch);
-            fetchDailyReports(parsedBranch.id);
-            syncDailyReportRealtime(parsedBranch.id);
           }
         }
       } catch (err) {
@@ -573,6 +657,17 @@ export default function StaffDashboard() {
     }
   }, [searchTerm, showPriceModal, selectedBranch]);
 
+  useEffect(() => {
+    if (selectedDay?.dateStr) {
+      fetchDayDetails(selectedDay.dateStr);
+    }
+  }, [selectedDay]);
+
+  useEffect(() => {
+    if (selectedBranch?.is_office_use && selectedBranch?.id) {
+      loadBranchClientsAndAgents(selectedBranch.id);
+    }
+  }, [selectedBranch]);
   // Merge Product Search - Source
   // ==================== MERGE PRODUCT SEARCH - DEBUG VERSION ====================
   // Target Product Search
@@ -627,6 +722,64 @@ export default function StaffDashboard() {
       setMergeSearchResultsTarget([]);
     }
   }, [showMergeModal]);
+
+  // Preload last 7 days orders + office account status for Calendar (safe version)
+  useEffect(() => {
+    if (!selectedBranch?.is_office_use || !selectedBranch?.id) return;
+
+    const preloadCalendarData = async () => {
+      const dates = Array.from({ length: 7 }, (_, i) => {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        return d.toISOString().split('T')[0];
+      });
+
+      // Get orders for last 7 days
+      const { data: ordersData } = await supabase
+        .from('orders')
+        .select(
+          `
+            id,
+            total_amount,
+            client_name,
+            created_date_pht
+          `
+        )
+        .eq('branch_id', selectedBranch.id)
+        .in('created_date_pht', dates);
+
+      if (!ordersData || ordersData.length === 0) {
+        setLast7DaysOrders([]);
+        return;
+      }
+
+      // Get unique client_names
+      const clientNames = [
+        ...new Set(ordersData.map((o: any) => o.client_name).filter(Boolean)),
+      ];
+
+      // Lookup which clients are office accounts
+      const { data: clientsData } = await supabase
+        .from('clients')
+        .select('client_name, is_office_account')
+        .in('client_name', clientNames);
+
+      const officeMap: Record<string, boolean> = {};
+      (clientsData || []).forEach((c: any) => {
+        officeMap[c.client_name] = c.is_office_account === true;
+      });
+
+      // Enrich orders with is_office_account
+      const enriched = ordersData.map((order: any) => ({
+        ...order,
+        clients: { is_office_account: officeMap[order.client_name] || false },
+      }));
+
+      setLast7DaysOrders(enriched);
+    };
+
+    preloadCalendarData();
+  }, [selectedBranch?.id]);
   // ============================================================================
   // ============================================================================
   // ============================================================================
@@ -863,10 +1016,937 @@ export default function StaffDashboard() {
     setDailyReports(finalData || []);
     setLogStatus('SYSTEM_READY');
   }
+  // Fetch data for the clicked day - SAFE + OFFICE ACCOUNT SUPPORT (using client_name)
+  const fetchDayDetails = async (dateStr: string) => {
+    if (!selectedBranch?.id) return;
+
+    try {
+      // 1. DAILY SALES TABLE - Orders created on this day (original query)
+      const { data: ordersData } = await supabase
+        .from('orders')
+        .select(
+          `
+            id,
+            order_number,
+            client_name,
+            dr_number,
+            pr_number,
+            total_amount,
+            delivery_date,
+            agent,
+            created_date_pht
+          `
+        )
+        .eq('branch_id', selectedBranch.id)
+        .eq('created_date_pht', dateStr)
+        .order('order_number', { ascending: true });
+
+      // 2. ALL PAYMENTS made on this day (original query)
+      const { data: paymentsData } = await supabase
+        .from('daily_payments')
+        .select(
+          `
+    id,
+    customer_name,
+    amount,
+    payment_method,
+    cheque_date,
+    notes,
+    order_id,
+    pr_number,
+    orders (
+      order_number,
+      dr_number,
+      pr_number,
+      client_name,      
+      delivery_date,    
+      created_date_pht,
+      agent
+    )
+  `
+        )
+        .eq('branch_id', selectedBranch.id)
+        .eq('report_date', dateStr)
+        .order('created_at', { ascending: true });
+
+      // Split payments (same as before)
+      const sameDayPaymentsRaw =
+        paymentsData?.filter((p: any) => {
+          const orderDate = p.orders?.created_date_pht;
+          return orderDate === dateStr;
+        }) || [];
+
+      const previousPaymentsRaw =
+        paymentsData?.filter((p: any) => {
+          const orderDate = p.orders?.created_date_pht;
+          return orderDate && orderDate !== dateStr;
+        }) || [];
+
+      // 3. Collect all unique client_names for lookup
+      const clientNames = new Set<string>();
+      [
+        ...(ordersData || []),
+        ...sameDayPaymentsRaw,
+        ...previousPaymentsRaw,
+      ].forEach((item) => {
+        const name = item.client_name || item.orders?.client_name;
+        if (name) clientNames.add(name);
+      });
+
+      // 4. Lookup which clients are office accounts
+      let officeClients: Record<string, boolean> = {};
+      if (clientNames.size > 0) {
+        const { data: clientsData } = await supabase
+          .from('clients')
+          .select('client_name, is_office_account')
+          .in('client_name', Array.from(clientNames));
+
+        officeClients = (clientsData || []).reduce((acc: any, c: any) => {
+          acc[c.client_name] = c.is_office_account === true;
+          return acc;
+        }, {});
+      }
+
+      // 5. Enrich orders
+      const enrichedOrders = (ordersData || []).map((order: any) => ({
+        ...order,
+        clients: {
+          is_office_account: officeClients[order.client_name] || false,
+        },
+      }));
+
+      // 6. Enrich payments
+      const enrichedSameDay = sameDayPaymentsRaw.map((p: any) => ({
+        ...p,
+        orders: p.orders
+          ? {
+              ...p.orders,
+              clients: {
+                is_office_account: officeClients[p.orders.client_name] || false,
+              },
+            }
+          : null,
+      }));
+
+      const enrichedPrevious = previousPaymentsRaw.map((p: any) => ({
+        ...p,
+        orders: p.orders
+          ? {
+              ...p.orders,
+              clients: {
+                is_office_account: officeClients[p.orders.client_name] || false,
+              },
+            }
+          : null,
+      }));
+
+      // Final state updates
+      setDayOrders(enrichedOrders);
+      setSameDayPayments(enrichedSameDay);
+      setDayPayments(enrichedPrevious);
+
+      // 7. EXPENSES (unchanged)
+      const { data: expensesData } = await supabase
+        .from('daily_expenses')
+        .select('*')
+        .eq('branch_id', selectedBranch.id)
+        .eq('report_date', dateStr)
+        .order('created_at', { ascending: true });
+
+      setDayExpenses(expensesData || []);
+    } catch (err) {
+      console.error('Failed to fetch day details:', err);
+    }
+  };
+
+  // === OFFICE USE - FETCH 3 TABLES ===
+  const fetchOfficeOrders = async (branchId: string) => {
+    if (!branchId) return;
+
+    // 1. PREPARATION
+    const { data: pending } = await supabase
+      .from('orders')
+      .select(
+        'id, order_number, created_date_pht, status, total_amount, agent, client_name, due_date'
+      )
+      .eq('branch_id', branchId)
+      .eq('status', 'PENDING')
+      .order('created_date_pht', { ascending: true });
+
+    // 2. FOR DELIVERY
+    const { data: delivery } = await supabase
+      .from('orders')
+      .select(
+        'id, order_number, created_date_pht, status, total_amount, agent, client_name, due_date, delivery_date'
+      )
+      .eq('branch_id', branchId)
+      .eq('status', 'FOR DELIVERY')
+      .order('created_date_pht', { ascending: true });
+
+    // 3. FOR COLLECTION
+    const { data: collection } = await supabase
+      .from('orders')
+      .select(
+        'id, order_number, created_date_pht, status, total_amount, agent, client_name, due_date, delivery_date, remaining_balance,notes'
+      )
+      .eq('branch_id', branchId)
+      .eq('status', 'FOR COLLECTION')
+      .order('created_date_pht', { ascending: true });
+
+    setPendingOrders(pending || []);
+    setDeliveryOrders(delivery || []);
+    setCollectionOrders(collection || []);
+  };
+  // Load Clients and Agents for dropdown filters (Office Use only)
+  const loadBranchClientsAndAgents = async (branchId: string) => {
+    if (!branchId) return;
+
+    console.log('🔄 Loading clients & agents for branch:', branchId);
+
+    // 1. Clients for this branch
+    const { data: clientsData, error: clientError } = await supabase
+      .from('clients')
+      .select('id, client_name')
+      .eq('branch_id', branchId)
+      .order('client_name', { ascending: true });
+
+    if (clientError) console.error('Clients load error:', clientError);
+    setBranchClients(clientsData || []);
+    console.log(`📋 Loaded ${clientsData?.length || 0} clients`);
+
+    // 2. Agents from profiles table
+    const { data: agentsData, error: agentError } = await supabase
+      .from('profiles')
+      .select('id, full_name, email')
+      .eq('is_agent', true)
+      .order('full_name', { ascending: true });
+
+    if (agentError) console.error('Agents load error:', agentError);
+    setBranchAgents(agentsData || []);
+    console.log(`👤 Loaded ${agentsData?.length || 0} agents`);
+  };
+  // === MARK AS FOR COLLECTION (DELIVERED button) ===
+  // === DELIVERED BUTTON - Set to FOR COLLECTION + update delivery_date ===
+  // === DELIVERED BUTTON - Move to FOR COLLECTION + set remaining_balance correctly ===
+  // === DELIVERED BUTTON → Opens DR# Modal ===
+  // === DELIVERED BUTTON → Opens DR# Modal ===
+  const markAsForCollection = async (orderId: string, orderNumber: string) => {
+    // Just open the modal (no need to fetch here)
+    setPendingDROrder({ id: orderId, order_number: orderNumber });
+    setDrNumberInput('');
+    setShowDRModal(true);
+  };
+  // === CONFIRM DR# AND MOVE TO FOR COLLECTION ===
+  // === CONFIRM DR# AND MOVE TO FOR COLLECTION ===
+  const handleConfirmDR = async () => {
+    if (!pendingDROrder) return;
+
+    try {
+      const today = new Date().toISOString().split('T')[0];
+
+      // Fetch total_amount so we can set correct remaining_balance
+      const { data: order } = await supabase
+        .from('orders')
+        .select('total_amount')
+        .eq('id', pendingDROrder.id)
+        .single();
+
+      const { error } = await supabase
+        .from('orders')
+        .update({
+          status: 'FOR COLLECTION',
+          delivery_date: today,
+          dr_number: drNumberInput.trim() || null,
+          remaining_balance: Number(order?.total_amount || 0), // ← Now correct
+        })
+        .eq('id', pendingDROrder.id);
+
+      if (error) throw error;
+
+      triggerToast(
+        `Order ${pendingDROrder.order_number} moved to FOR COLLECTION (DR# ${
+          drNumberInput || '—'
+        })`,
+        'success'
+      );
+
+      setShowDRModal(false);
+      setPendingDROrder(null);
+      setDrNumberInput('');
+
+      await fetchOfficeOrders(selectedBranch.id);
+    } catch (err: any) {
+      triggerToast('Failed to update: ' + err.message, 'error');
+    }
+  };
+  // === COLLECT PAYMENT MODAL HANDLER ===
+  // === COLLECT PAYMENT MODAL HANDLER (saves to orders + daily_payments) ===
+  // === COLLECT PAYMENT MODAL HANDLER - Saves PR# to both orders and daily_payments ===
+  // === COLLECT PAYMENT MODAL HANDLER - ROBUST PR# APPENDING ===
+  // === COLLECT PAYMENT MODAL HANDLER - NOW USING TOAST ===
+  const handleCollectPayment = async () => {
+    if (!selectedCollectionOrder || paymentAmount <= 0) return;
+
+    try {
+      const currentRemaining = Number(
+        selectedCollectionOrder.remaining_balance || 0
+      );
+      const newRemaining = Math.max(0, currentRemaining - paymentAmount);
+      const isFullyPaid = newRemaining <= 0;
+
+      const today = new Date().toISOString().split('T')[0];
+
+      const statusUpdate = isFullyPaid ? 'completed' : 'FOR COLLECTION';
+
+      const paymentNote = `${paymentMethodModal} payment of P${paymentAmount} on ${new Date().toLocaleDateString(
+        'en-US'
+      )}${
+        paymentMethodModal === 'CHEQUE'
+          ? ` (Cheque Date: ${chequeDateModal})`
+          : ''
+      }. ${collectionNotes || ''}`;
+
+      const existingNotes = selectedCollectionOrder.notes
+        ? selectedCollectionOrder.notes.trim() + '\n\n'
+        : '';
+      const updatedNotes = existingNotes + paymentNote;
+
+      // === ROBUST PR# APPENDING ===
+      let finalPrNumber = prNumberInput.trim();
+
+      if (finalPrNumber) {
+        const { data: latestOrder } = await supabase
+          .from('orders')
+          .select('pr_number')
+          .eq('id', selectedCollectionOrder.id)
+          .single();
+
+        const existingPr = latestOrder?.pr_number?.trim();
+
+        if (existingPr) {
+          if (!existingPr.includes(finalPrNumber)) {
+            finalPrNumber = `${existingPr}, ${finalPrNumber}`;
+          } else {
+            finalPrNumber = existingPr;
+          }
+        }
+      }
+
+      // 1. Update orders table
+      const { error: orderError } = await supabase
+        .from('orders')
+        .update({
+          remaining_balance: newRemaining,
+          status: statusUpdate,
+          paid_date: isFullyPaid ? today : null,
+          pr_number: finalPrNumber || null,
+          notes: updatedNotes,
+        })
+        .eq('id', selectedCollectionOrder.id);
+
+      if (orderError) throw orderError;
+
+      // 2. Insert into daily_payments
+      const { error: paymentError } = await supabase
+        .from('daily_payments')
+        .insert([
+          {
+            branch_id: selectedBranch.id,
+            report_date: today,
+            customer_name: selectedCollectionOrder.client_name || 'WALK-IN',
+            amount: paymentAmount,
+            payment_method: paymentMethodModal,
+            cheque_date:
+              paymentMethodModal === 'CHEQUE' ? chequeDateModal || null : null,
+            notes: collectionNotes || '',
+            order_id: selectedCollectionOrder.id,
+            pr_number: prNumberInput.trim() || null,
+          },
+        ]);
+
+      if (paymentError) console.warn('daily_payments warning:', paymentError);
+
+      // ✅ SUCCESS TOAST (replaces old alert)
+      triggerToast(
+        isFullyPaid
+          ? `✅ Full payment recorded. Order marked as COMPLETED.`
+          : `✅ Payment recorded. New balance: ₱${newRemaining.toLocaleString()}`,
+        'success'
+      );
+
+      setShowCollectionModal(false);
+
+      // Reset form
+      setPaymentAmount(0);
+      setChequeDateModal('');
+      setCollectionNotes('');
+      setPrNumberInput('');
+
+      await fetchOfficeOrders(selectedBranch.id);
+    } catch (err: any) {
+      // ❌ ERROR TOAST (replaces old alert)
+      triggerToast(`❌ Failed to record payment: ${err.message}`, 'error');
+    }
+  };
+
+  // === ADD EXPENSE HANDLER ===
+  const handleAddExpense = async () => {
+    if (!newExpenseName || newExpenseAmount <= 0 || !selectedDay?.dateStr)
+      return;
+
+    try {
+      const { error } = await supabase.from('daily_expenses').insert([
+        {
+          branch_id: selectedBranch.id,
+          report_date: selectedDay.dateStr,
+          expense_name: newExpenseName,
+          amount: newExpenseAmount,
+        },
+      ]);
+
+      if (error) throw error;
+
+      triggerToast('Expense added successfully', 'success');
+
+      // Reset and close
+      setNewExpenseName('');
+      setNewExpenseAmount(0);
+      setShowAddExpenseModal(false);
+
+      // Refresh the expenses list
+      await fetchDayDetails(selectedDay.dateStr);
+    } catch (err: any) {
+      alert('Failed to add expense: ' + err.message);
+    }
+  };
+
+  // === DELETE EXPENSE ===
+  const handleDeleteExpense = async (
+    expenseId: string,
+    expenseName: string
+  ) => {
+    if (!confirm(`Delete expense "${expenseName}"?`)) return;
+
+    try {
+      const { error } = await supabase
+        .from('daily_expenses')
+        .delete()
+        .eq('id', expenseId);
+
+      if (error) throw error;
+
+      triggerToast('Expense deleted', 'success');
+
+      // Refresh the current day
+      if (selectedDay?.dateStr) {
+        await fetchDayDetails(selectedDay.dateStr);
+      }
+    } catch (err: any) {
+      alert('Failed to delete expense: ' + err.message);
+    }
+  };
+  const handlePrintOrder = async (orderId: string, orderNumber: string) => {
+    try {
+      // Update status
+      await supabase
+        .from('orders')
+        .update({ status: 'FOR DELIVERY' })
+        .eq('id', orderId);
+
+      // Fetch order
+      const { data: order } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('id', orderId)
+        .single();
+
+      // Get Processed By
+      let processedBy = order?.created_by || 'Staff';
+      if (order?.created_by) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('full_name')
+          .eq('email', order.created_by)
+          .single();
+        if (profile?.full_name) processedBy = profile.full_name;
+      }
+
+      // Fetch items
+      const { data: itemsData } = await supabase
+        .from('order_items')
+        .select(
+          `
+          quantity,
+          unit_price,
+          subtotal,
+          lot_number,
+          expiry_date,
+          inventory (item_name)
+        `
+        )
+        .eq('order_id', orderId);
+
+      const items = itemsData || [];
+
+      const { jsPDF } = await import('jspdf');
+      const doc = new jsPDF('p', 'mm', 'a4');
+
+      let y = 18;
+
+      // ==================== HEADER ====================
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(16);
+      doc.text('ECONO PHARMA TRADING', 105, y, { align: 'center' });
+      y += 6;
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.text(
+        'Unit A-3 Regalena Bldg., 9049 National Highway, Brgy. Turbina, Calamba Laguna',
+        105,
+        y,
+        { align: 'center' }
+      );
+      y += 5;
+      doc.text('Frederick SJ Arriola - (Proprietor)', 105, y, {
+        align: 'center',
+      });
+      y += 5;
+      doc.text('NON VAT TIN# 110-194-523-000', 105, y, { align: 'center' });
+      y += 12;
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(14);
+      doc.text('DELIVERY RECEIPT', 105, y, { align: 'center' });
+      y += 10;
+
+      // Order Info
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.text(`SALES ORDER #: ${orderNumber}`, 20, y);
+      doc.text(`DATE: ${new Date().toLocaleDateString('en-US')}`, 145, y);
+      y += 7;
+
+      doc.text(`CUSTOMER: ${order?.client_name || 'WALK-IN'}`, 20, y);
+      y += 7;
+      doc.text(`ADDRESS: ${order?.address || ''}`, 20, y);
+      y += 10;
+
+      // ==================== TABLE HEADER ====================
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.text('Qty', 18, y);
+      doc.text('Unit', 25, y);
+      doc.text('Lot No.', 32, y);
+      doc.text('Expiry', 42, y);
+      doc.text('Particulars', 82, y);
+      doc.text('Amount', 160, y, { align: 'right' });
+      doc.text('Discount', 177, y, { align: 'right' });
+      doc.text('Total', 195, y, { align: 'right' });
+
+      y += 4;
+      doc.setLineWidth(0.3);
+      doc.line(18, y, 195, y); // ← SHORTER LINE (now ends at Total column)
+      y += 6;
+
+      // ==================== TABLE ROWS ====================
+      let itemCount = 0;
+      let grandTotal = 0;
+
+      items.forEach((item: any) => {
+        const qty = Number(item.quantity || 1);
+        const amount = Number(item.subtotal || 0);
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+
+        doc.text(String(qty), 18, y);
+        doc.text('1s', 25, y);
+        doc.text(item.lot_number || '', 32, y);
+        doc.text(item.expiry_date || '', 42, y);
+        doc.text((item.inventory?.item_name || '').substring(0, 48), 82, y);
+
+        doc.text(amount.toFixed(2), 160, y, { align: 'right' });
+        doc.text('0.00', 177, y, { align: 'right' });
+        doc.text(amount.toFixed(2), 195, y, { align: 'right' });
+
+        grandTotal += amount;
+        itemCount += qty;
+        y += 6.5;
+      });
+
+      // ==================== SUMMARY ====================
+      y += 8;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.text('ITEMS', 20, y);
+      doc.text(String(itemCount), 48, y);
+
+      doc.text('TOTAL', 160, y, { align: 'right' });
+      doc.text(grandTotal.toFixed(2), 195, y, { align: 'right' });
+
+      y += 12;
+      doc.setFontSize(10);
+      doc.text(`PROCESSED BY: ${processedBy}`, 20, y);
+
+      // Save
+      const client = (order?.client_name || 'WALKIN').replace(
+        /[^a-zA-Z0-9]/g,
+        '_'
+      );
+      const fileName = `${new Date()
+        .toISOString()
+        .slice(0, 10)}_${orderNumber}_${client}_DR.pdf`;
+      doc.save(fileName);
+
+      triggerToast(`Delivery Receipt #${orderNumber} generated`, 'success');
+      await fetchOfficeOrders(selectedBranch.id);
+    } catch (err: any) {
+      console.error(err);
+      triggerToast('Failed to generate PDF: ' + err.message, 'error');
+    }
+  };
+
+  const handleDownloadDayPDF = async () => {
+    if (!selectedDay || !selectedBranch) return;
+
+    const { jsPDF } = await import('jspdf');
+    const doc = new jsPDF('p', 'mm', 'a4');
+    let y = 20;
+
+    // ====================== HEADER ======================
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(17);
+    doc.text(`DAILY REPORT - ${selectedDay.dateStr}`, 105, y, {
+      align: 'center',
+    });
+    y += 7;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10.5);
+    doc.text(selectedBranch.branch_name.toUpperCase(), 105, y, {
+      align: 'center',
+    });
+    y += 10;
+
+    doc.setDrawColor(70, 70, 70);
+    doc.setLineWidth(0.4);
+    doc.line(22, y, 188, y);
+    y += 14;
+
+    // ====================== DAILY SALES SUMMARY ======================
+    doc.setFontSize(12);
+    doc.setFont('helvetica', 'bold');
+    doc.text('DAILY SALES', 20, y);
+    y += 6;
+
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+
+    const gen = Number(selectedDay.report?.generic_sales || 0);
+    const brd = Number(selectedDay.report?.branded_sales || 0);
+    const disc = Number(selectedDay.report?.discount_total || 0);
+    const others = dayOrders
+      .filter((o: any) => o.clients?.is_office_account === true)
+      .reduce((sum: number, o: any) => sum + Number(o.total_amount || 0), 0);
+
+    const netTotal = gen + brd - disc - others;
+
+    doc.text(`Generic  : PHP ${gen.toLocaleString()}`, 20, y);
+    doc.text(`Branded  : PHP ${brd.toLocaleString()}`, 115, y);
+    y += 6;
+    doc.text(`Others   : PHP ${others.toLocaleString()}`, 20, y);
+    doc.text(`Discount : PHP ${disc.toLocaleString()}`, 115, y);
+    y += 6;
+    doc.text(`TOTAL SALES (NET) : PHP ${netTotal.toLocaleString()}`, 20, y);
+    y += 14;
+
+    // ====================== SUMMARY ======================
+    doc.setFontSize(12);
+    doc.setFont('helvetica', 'bold');
+    doc.text('SUMMARY', 20, y);
+    y += 7;
+
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+
+    const dailyCash = sameDayPayments
+      .filter((p: any) => p.payment_method === 'CASH')
+      .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
+    const dailyCheque = sameDayPayments
+      .filter((p: any) => p.payment_method === 'CHEQUE')
+      .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
+
+    const remCash = dayPayments
+      .filter(
+        (p: any) =>
+          !p.orders?.clients?.is_office_account && p.payment_method === 'CASH'
+      )
+      .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
+    const remCheque = dayPayments
+      .filter(
+        (p: any) =>
+          !p.orders?.clients?.is_office_account && p.payment_method === 'CHEQUE'
+      )
+      .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
+    const remTotal = remCash + remCheque;
+
+    const totalCash = dailyCash + remCash;
+    const totalCheque = dailyCheque + remCheque;
+    const totalPayments = totalCash + totalCheque;
+
+    const totalExpenses = (dayExpenses || []).reduce(
+      (sum: number, exp: any) => sum + Number(exp.amount || 0),
+      0
+    );
+    const actualCash = totalCash - totalExpenses;
+
+    doc.text(`Daily Sales Cash : PHP ${dailyCash.toLocaleString()}`, 20, y);
+    doc.text(
+      `Daily Sales Cheque : PHP ${dailyCheque.toLocaleString()}`,
+      115,
+      y
+    );
+    y += 7;
+
+    doc.text(`Remittances : PHP ${remTotal.toLocaleString()}`, 20, y);
+    doc.text(`Cash : PHP ${remCash.toLocaleString()}`, 20, y + 5.5);
+    doc.text(`Cheque : PHP ${remCheque.toLocaleString()}`, 115, y + 5.5);
+    y += 13;
+
+    doc.text(`Total Payments : PHP ${totalPayments.toLocaleString()}`, 20, y);
+    doc.text(`Cash : PHP ${totalCash.toLocaleString()}`, 20, y + 5.5);
+    doc.text(`Cheque : PHP ${totalCheque.toLocaleString()}`, 115, y + 5.5);
+    y += 13;
+
+    doc.text(`Expenses : PHP ${totalExpenses.toLocaleString()}`, 20, y);
+    y += 6;
+
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Actual Cash : PHP ${actualCash.toLocaleString()}`, 20, y);
+    y += 18;
+
+    // ====================== DAILY SALES TABLE ======================
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'bold');
+    doc.text('DAILY SALES TABLE', 20, y);
+    y += 7;
+
+    doc.setFontSize(5.8);
+    doc.setFont('helvetica', 'normal');
+
+    doc.text('CLIENT', 18, y);
+    doc.text('SO#', 45, y);
+    doc.text('DR#', 68, y);
+    doc.text('PR#', 95, y);
+    doc.text('CASH', 125, y, { align: 'right' });
+    doc.text('CHECK', 148, y, { align: 'right' });
+    doc.text('CHECK DATE', 167, y);
+    doc.text('DELIVERY DATE', 183, y);
+    doc.text('TOTAL', 207, y, { align: 'right' });
+    y += 5;
+
+    const groupedSales = dayOrders.reduce((acc: any, order: any) => {
+      const clientKey = order.client_name || 'WALK-IN';
+      if (!acc[clientKey])
+        acc[clientKey] = {
+          client_name: clientKey,
+          order_numbers: [],
+          dr_numbers: [],
+          pr_numbers: [],
+          cash: 0,
+          cheque: 0,
+          cheque_dates: [],
+          delivery_dates: [],
+          total_amount: 0,
+        };
+      const g = acc[clientKey];
+
+      g.order_numbers.push(order.order_number || '');
+      if (order.dr_number) g.dr_numbers.push(order.dr_number);
+      if (order.pr_number) g.pr_numbers.push(order.pr_number);
+      g.delivery_dates.push(order.delivery_date || '');
+
+      const paymentsForOrder = sameDayPayments.filter(
+        (p: any) => p.order_id === order.id
+      );
+      const orderCash = paymentsForOrder
+        .filter((p: any) => p.payment_method === 'CASH')
+        .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+      const orderCheque = paymentsForOrder
+        .filter((p: any) => p.payment_method === 'CHEQUE')
+        .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+      g.cash += orderCash;
+      g.cheque += orderCheque;
+      paymentsForOrder
+        .filter((p: any) => p.payment_method === 'CHEQUE' && p.cheque_date)
+        .forEach((p: any) => g.cheque_dates.push(p.cheque_date));
+      g.total_amount += Number(order.total_amount || 0);
+
+      return acc;
+    }, {});
+
+    Object.values(groupedSales).forEach((group: any) => {
+      const soList = group.order_numbers.join(', ').substring(0, 45) || '—';
+      const drList =
+        [...new Set(group.dr_numbers)].join(', ').substring(0, 18) || '—';
+      const prList =
+        [...new Set(group.pr_numbers)].join(', ').substring(0, 18) || '—';
+      const delList =
+        [...new Set(group.delivery_dates.filter(Boolean))]
+          .join(', ')
+          .substring(0, 18) || '—';
+      const chequeDateList =
+        [...new Set(group.cheque_dates)].join(', ').substring(0, 18) || '—';
+
+      doc.text(group.client_name.substring(0, 22), 18, y);
+      doc.text(soList, 45, y, { maxWidth: 28 }); // SO# wraps early
+      doc.text(drList, 68, y, { maxWidth: 20 });
+      doc.text(prList, 95, y, { maxWidth: 20 });
+      doc.text(`PHP ${group.cash.toLocaleString()}`, 125, y, {
+        align: 'right',
+      });
+      doc.text(`PHP ${group.cheque.toLocaleString()}`, 148, y, {
+        align: 'right',
+      });
+      doc.text(chequeDateList, 167, y, { maxWidth: 14 });
+      doc.text(delList, 183, y, { maxWidth: 19 });
+      doc.text(`PHP ${group.total_amount.toLocaleString()}`, 207, y, {
+        align: 'right',
+      });
+
+      y += 6.5; // ← increased spacing so wrapped lines don't overlap next row
+
+      if (y > 275) {
+        doc.addPage();
+        y = 20;
+      }
+    });
+
+    y += 15;
+
+    // ====================== REMITTANCES / PAYMENTS TABLE ======================
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'bold');
+    doc.text('REMITTANCES / PAYMENTS', 20, y);
+    y += 7;
+
+    doc.setFontSize(5.8);
+    doc.setFont('helvetica', 'normal');
+
+    doc.text('CLIENT', 18, y);
+    doc.text('SO#', 45, y);
+    doc.text('DR#', 68, y);
+    doc.text('PR#', 95, y);
+    doc.text('CASH', 125, y, { align: 'right' });
+    doc.text('CHECK', 148, y, { align: 'right' });
+    doc.text('CHECK DATE', 167, y);
+    doc.text('DELIVERY DATE', 183, y);
+    doc.text('TOTAL', 207, y, { align: 'right' });
+    y += 5;
+
+    const groupedRem = dayPayments.reduce((acc: any, p: any) => {
+      const clientKey = p.customer_name || 'WALK-IN';
+      if (!acc[clientKey])
+        acc[clientKey] = {
+          client_name: clientKey,
+          order_numbers: [],
+          dr_numbers: [],
+          pr_numbers: [],
+          cash: 0,
+          cheque: 0,
+          cheque_dates: [],
+          delivery_dates: [],
+          total: 0,
+        };
+      const g = acc[clientKey];
+
+      if (p.orders?.order_number) g.order_numbers.push(p.orders.order_number);
+      if (p.orders?.dr_number) g.dr_numbers.push(p.orders.dr_number);
+      if (p.pr_number) g.pr_numbers.push(p.pr_number);
+      if (p.orders?.delivery_date)
+        g.delivery_dates.push(p.orders.delivery_date);
+      if (p.cheque_date) g.cheque_dates.push(p.cheque_date);
+
+      const amt = Number(p.amount || 0);
+      if (p.payment_method === 'CASH') g.cash += amt;
+      else if (p.payment_method === 'CHEQUE') g.cheque += amt;
+      g.total += amt;
+
+      return acc;
+    }, {});
+
+    Object.values(groupedRem).forEach((group: any) => {
+      const soList =
+        [...new Set(group.order_numbers)].join(', ').substring(0, 45) || '—';
+      const drList =
+        [...new Set(group.dr_numbers)].join(', ').substring(0, 18) || '—';
+      const prList =
+        [...new Set(group.pr_numbers)].join(', ').substring(0, 18) || '—';
+      const delList =
+        [...new Set(group.delivery_dates.filter(Boolean))]
+          .join(', ')
+          .substring(0, 18) || '—';
+      const chequeDateList =
+        [...new Set(group.cheque_dates)].join(', ').substring(0, 18) || '—';
+
+      doc.text(group.client_name.substring(0, 22), 18, y);
+      doc.text(soList, 45, y, { maxWidth: 28 });
+      doc.text(drList, 68, y, { maxWidth: 20 });
+      doc.text(prList, 95, y, { maxWidth: 20 });
+      doc.text(`PHP ${group.cash.toLocaleString()}`, 125, y, {
+        align: 'right',
+      });
+      doc.text(`PHP ${group.cheque.toLocaleString()}`, 148, y, {
+        align: 'right',
+      });
+      doc.text(chequeDateList, 167, y, { maxWidth: 14 });
+      doc.text(delList, 183, y, { maxWidth: 19 });
+      doc.text(`PHP ${group.total.toLocaleString()}`, 207, y, {
+        align: 'right',
+      });
+
+      y += 6.5;
+
+      if (y > 275) {
+        doc.addPage();
+        y = 20;
+      }
+    });
+
+    y += 15;
+
+    // ====================== EXPENSES ======================
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'bold');
+    doc.text('EXPENSES', 20, y);
+    y += 7;
+
+    doc.setFontSize(8);
+    dayExpenses.forEach((exp: any) => {
+      doc.text(exp.expense_name || '—', 20, y);
+      doc.text(`PHP ${Number(exp.amount || 0).toLocaleString()}`, 195, y, {
+        align: 'right',
+      });
+      y += 6;
+    });
+
+    // Save
+    const fileName = `Daily_Report_${selectedDay.dateStr}_${
+      selectedBranch.branch_name || 'Office'
+    }.pdf`;
+    doc.save(fileName);
+
+    triggerToast('Modern daily report PDF downloaded', 'success');
+  };
   const handleBranchSelect = async (branch: any) => {
     setSelectedBranch(branch);
     localStorage.setItem('active_branch', JSON.stringify(branch));
-
+    if (branch.is_office_use) {
+      await loadBranchClientsAndAgents(branch.id);
+    }
     if (profile?.id) {
       await supabase
         .from('profiles')
@@ -895,6 +1975,7 @@ export default function StaffDashboard() {
     await checkNewSalePermission(branch.id);
 
     fetchDailyReports(branch.id);
+    if (branch.is_office_use) await fetchOfficeOrders(branch.id);
     syncDailyReportRealtime(branch.id);
   };
   const handleLogout = async () => {
@@ -1292,6 +2373,89 @@ export default function StaffDashboard() {
       syncDailyReportRealtime(selectedBranch.id);
     }
   };
+  // ==================== PIE CHART COMPONENT (for Sales/Collection tab) ====================
+  const PieChart = ({
+    data,
+    title,
+    color,
+  }: {
+    data: { name: string; value: number }[];
+    title: string;
+    color: 'emerald' | 'purple';
+  }) => {
+    const total = data.reduce((sum, item) => sum + item.value, 0);
+    if (total === 0) {
+      return (
+        <div className="text-slate-400 text-center py-12">
+          No data for this day
+        </div>
+      );
+    }
+
+    // Rich color palette - different color for each agent
+    const palette =
+      color === 'emerald'
+        ? ['#10b981', '#34d399', '#06b67f', '#14b8a6', '#0ea5e9'] // emerald/teal/cyan
+        : ['#a855f7', '#c026d3', '#db2777', '#7e22ce', '#8b5cf6']; // purple/violet/pink
+
+    // Build one single conic-gradient with multiple stops
+    let start = 0;
+    const stops = data.map((item, index) => {
+      const percent = (item.value / total) * 360;
+      const sliceColor = palette[index % palette.length];
+      const stop = `${sliceColor} ${start}deg ${start + percent}deg`;
+      start += percent;
+      return stop;
+    });
+
+    const conicGradient = `conic-gradient(${stops.join(', ')})`;
+
+    return (
+      <div className="flex flex-col items-center">
+        <div className="relative w-72 h-72 mx-auto">
+          {/* Background ring */}
+          <div className="absolute inset-0 bg-slate-950 rounded-full" />
+
+          {/* Multi-color conic gradient */}
+          <div
+            className="absolute inset-0 rounded-full"
+            style={{ background: conicGradient }}
+          />
+
+          {/* Inner white circle */}
+          <div className="absolute inset-8 bg-slate-900 rounded-full flex items-center justify-center border-8 border-slate-950">
+            <div className="text-center">
+              <div className="text-5xl font-black text-white">
+                {total.toLocaleString()}
+              </div>
+              <div className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">
+                {title}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Legend with individual colors */}
+        <div className="mt-8 flex flex-wrap gap-x-8 gap-y-3 justify-center">
+          {data.map((item, i) => {
+            const sliceColor = palette[i % palette.length];
+            return (
+              <div key={i} className="flex items-center gap-2 text-sm">
+                <div
+                  className="w-4 h-4 rounded-full"
+                  style={{ backgroundColor: sliceColor }}
+                />
+                <span className="font-medium">{item.name}</span>
+                <span className="font-mono text-slate-400">
+                  ₱{item.value.toLocaleString()}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
 
   if (loading)
     return (
@@ -1303,36 +2467,47 @@ export default function StaffDashboard() {
   if (!selectedBranch) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
-        <div className="w-full max-w-md">
+        <div className="w-full max-w-4xl">
           <div className="mb-10 text-center">
-            <h1 className="text-3xl font-black italic text-white tracking-tighter uppercase">
-              Assign Station
+            <h1 className="text-4xl font-black italic text-white tracking-tighter uppercase">
+              ASSIGN STATION
             </h1>
+            <p className="text-slate-400 mt-2 text-sm">
+              {profile?.usage_type
+                ? `Logged in as ${profile.usage_type} User`
+                : 'Select your station'}
+            </p>
           </div>
-          <div className="grid grid-cols-1 gap-3">
-            {branches.map((b) => (
+
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            {branches.length === 0 && (
+              <div className="col-span-full text-center py-12 text-slate-500">
+                No accessible branches found for your usage type.
+              </div>
+            )}
+
+            {branches.map((b: any) => (
               <button
                 key={b.id}
                 onClick={() => handleBranchSelect(b)}
-                className="group p-6 bg-slate-900 border border-white/5 rounded-2xl flex items-center justify-between hover:border-emerald-500/50 transition-all"
+                className="group p-6 bg-slate-900 border border-white/10 hover:border-emerald-500/60 rounded-3xl transition-all hover:scale-[1.02] active:scale-95 flex flex-col items-center text-center"
               >
-                <div className="flex items-center gap-4 text-left">
-                  <div className="bg-slate-800 p-3 rounded-xl group-hover:bg-emerald-500 group-hover:text-black transition-all">
-                    <MapPin size={20} />
-                  </div>
-                  <div>
-                    <span className="block text-sm font-black text-white uppercase tracking-tight">
-                      {b.branch_name}
-                    </span>
-                    <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest block mt-1">
-                      {b.location || 'Primary Node'}
-                    </span>
-                  </div>
+                <div className="w-16 h-16 rounded-2xl bg-slate-800 group-hover:bg-emerald-500/10 flex items-center justify-center mb-4 transition-colors">
+                  <MapPin size={32} className="text-emerald-500" />
                 </div>
-                <ArrowRight
-                  size={18}
-                  className="text-slate-700 group-hover:text-emerald-500 transition-all"
-                />
+
+                <div className="font-black text-white text-lg tracking-tight mb-1">
+                  {b.branch_name}
+                </div>
+                <div className="text-[10px] text-slate-500 font-medium uppercase tracking-widest">
+                  {b.location || '—'}
+                </div>
+
+                {b.is_office_use && (
+                  <div className="mt-3 text-[9px] px-3 py-1 bg-amber-500/10 text-amber-400 rounded-full font-bold">
+                    OFFICE
+                  </div>
+                )}
               </button>
             ))}
           </div>
@@ -1459,273 +2634,1735 @@ export default function StaffDashboard() {
       </nav>
 
       <main className="max-w-6xl mx-auto p-6 lg:p-10 pb-24">
-        {/* Previous 7 Day Report Audit */}
-        {/* 7-Day Report Audit */}
-        <div className="mb-10">
-          <h3 className="text-[10px] font-black text-slate-600 uppercase tracking-[0.3em] px-1 italic mb-4 flex items-center gap-2">
-            <History size={12} /> 7_Day_Report_Audit
-          </h3>
+        {/* ==================== OFFICE WORKFLOW - 3 TABLES (COMPACT) ==================== */}
+        {/* ==================== OFFICE WORKFLOW - COMPACT FILTERS + SMALL BUTTONS ==================== */}
+        {selectedBranch?.is_office_use && (
+          <div className="mt-1 mb-10">
+            <h3 className="text-[10px] font-black text-amber-400 uppercase tracking-[0.3em] px-1 italic mb-4">
+              OFFICE WORKFLOW
+            </h3>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* ====================== 1. FOR PREPARATION ====================== */}
+              <div className="bg-slate-900/40 border border-amber-500/30 rounded-3xl p-4 flex flex-col h-full">
+                <h4 className="font-black text-amber-400 text-sm mb-3">
+                  📋 FOR PREPARATION
+                </h4>
 
-          {(() => {
-            const now = new Date();
-            const todayStr = now.toISOString().split('T')[0];
-
-            // Sunday to Saturday - exact same logic as your PROD file
-            const sun = new Date(now);
-            sun.setDate(now.getDate() - now.getDay());
-            sun.setHours(0, 0, 0, 0);
-
-            const sat = new Date(sun);
-            sat.setDate(sun.getDate() + 6);
-
-            const firstDayMonth = new Date(
-              now.getFullYear(),
-              now.getMonth(),
-              1
-            );
-            const daysInMonth = new Date(
-              now.getFullYear(),
-              now.getMonth() + 1,
-              0
-            ).getDate();
-
-            const dailyGen = Number(selectedBranch?.daily_generic_quota || 0);
-            const weeklyQuo = dailyGen * 7;
-            const monthlyQuo = dailyGen * daysInMonth;
-
-            // ✅ GROSS GENERIC - DISCOUNTS (Net) for quotas
-            let weeklyGenericNet = 0;
-            let monthlyGenericNet = 0;
-
-            dailyReports.forEach((r) => {
-              const reportDateStr = r.report_date;
-              const genGross = Number(r.generic_sales || 0);
-              const disc = Number(r.discount_total || 0);
-              const genNet = genGross - disc;
-
-              const reportDate = new Date(reportDateStr + 'T00:00:00');
-
-              if (reportDate >= sun && reportDate <= sat) {
-                weeklyGenericNet += genNet;
-              }
-              if (reportDate >= firstDayMonth && reportDate <= now) {
-                monthlyGenericNet += genNet;
-              }
-            });
-
-            const getProg = (actual: number, quota: number) =>
-              quota > 0 ? Math.min((actual / quota) * 100, 100) : 0;
-
-            return (
-              <div className="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Weekly */}
-                <div className="bg-slate-900/40 border border-white/5 p-4 rounded-2xl">
-                  <div className="flex justify-between items-start mb-2">
-                    <div>
-                      <p className="text-[9px] font-black text-emerald-500 uppercase tracking-widest">
-                        Weekly Generic (Net)
-                      </p>
-                      <p className="text-xl font-black text-white">
-                        ₱{weeklyGenericNet.toLocaleString()}
-                      </p>
-                    </div>
-                    <p className="text-xs font-black text-emerald-500 bg-emerald-500/10 px-2 py-1 rounded-lg">
-                      {getProg(weeklyGenericNet, weeklyQuo).toFixed(0)}%
-                    </p>
+                <div className="flex gap-2 mb-3">
+                  <div className="grid grid-cols-3 gap-2 flex-1">
+                    <input
+                      type="date"
+                      value={prepFilter.date}
+                      onChange={(e) =>
+                        setPrepFilter({ ...prepFilter, date: e.target.value })
+                      }
+                      className="bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-xs outline-none"
+                    />
+                    <select
+                      value={prepFilter.client}
+                      onChange={(e) =>
+                        setPrepFilter({ ...prepFilter, client: e.target.value })
+                      }
+                      className="bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-xs outline-none"
+                    >
+                      <option value="">All Clients</option>
+                      {branchClients
+                        .sort((a, b) =>
+                          (a.client_name || '').localeCompare(
+                            b.client_name || ''
+                          )
+                        )
+                        .map((c: any) => (
+                          <option key={c.id} value={c.client_name}>
+                            {c.client_name}
+                          </option>
+                        ))}
+                    </select>
+                    <select
+                      value={prepFilter.agent}
+                      onChange={(e) =>
+                        setPrepFilter({ ...prepFilter, agent: e.target.value })
+                      }
+                      className="bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-xs outline-none"
+                    >
+                      <option value="">All Agents</option>
+                      <option value="MAIN OFFICE">MAIN OFFICE</option>
+                      {branchAgents
+                        .sort((a, b) =>
+                          (a.full_name || a.email || '').localeCompare(
+                            b.full_name || b.email || ''
+                          )
+                        )
+                        .map((a: any) => (
+                          <option key={a.id} value={a.full_name || a.email}>
+                            {a.full_name || a.email}
+                          </option>
+                        ))}
+                    </select>
                   </div>
-                  <div className="flex items-center gap-3">
-                    <div className="flex-1 h-1.5 bg-black rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-emerald-500"
-                        style={{
-                          width: `${getProg(weeklyGenericNet, weeklyQuo)}%`,
-                        }}
-                      />
-                    </div>
-                    <span className="text-[9px] font-bold text-slate-500">
-                      Target: ₱{weeklyQuo.toLocaleString()}
-                    </span>
-                  </div>
+                  <button
+                    onClick={() =>
+                      setPrepFilter({ date: '', client: '', agent: '' })
+                    }
+                    className="px-3 py-1.5 text-xs font-black flex items-center gap-1 bg-slate-800 hover:bg-red-500/10 hover:text-red-400 text-slate-400 rounded-xl transition-colors"
+                  >
+                    <X size={14} />
+                  </button>
                 </div>
 
-                {/* Monthly */}
-                <div className="bg-slate-900/40 border border-white/5 p-4 rounded-2xl">
-                  <div className="flex justify-between items-start mb-2">
-                    <div>
-                      <p className="text-[9px] font-black text-blue-500 uppercase tracking-widest">
-                        Monthly Generic (Net)
-                      </p>
-                      <p className="text-xl font-black text-white">
-                        ₱{monthlyGenericNet.toLocaleString()}
-                      </p>
-                    </div>
-                    <p className="text-xs font-black text-blue-500 bg-blue-500/10 px-2 py-1 rounded-lg">
-                      {getProg(monthlyGenericNet, monthlyQuo).toFixed(0)}%
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <div className="flex-1 h-1.5 bg-black rounded-full overflow-hidden">
+                <div className="flex-1 overflow-auto space-y-0.5 pr-1 max-h-[380px]">
+                  {/* ... your pendingOrders filter + map (unchanged) ... */}
+                  {pendingOrders
+                    .filter((order: any) => {
+                      const matchesDate =
+                        !prepFilter.date ||
+                        order.created_date_pht === prepFilter.date;
+                      const matchesClient =
+                        !prepFilter.client ||
+                        (order.client_name || '').toLowerCase() ===
+                          prepFilter.client.toLowerCase();
+                      const matchesAgent =
+                        !prepFilter.agent ||
+                        (order.agent || 'MAIN OFFICE').toLowerCase() ===
+                          prepFilter.agent.toLowerCase();
+                      return matchesDate && matchesClient && matchesAgent;
+                    })
+                    .map((order: any) => (
                       <div
-                        className="h-full bg-blue-500"
-                        style={{
-                          width: `${getProg(monthlyGenericNet, monthlyQuo)}%`,
-                        }}
-                      />
-                    </div>
-                    <span className="text-[9px] font-bold text-slate-500">
-                      Target: ₱{monthlyQuo.toLocaleString()}
-                    </span>
-                  </div>
+                        key={order.id}
+                        className="bg-slate-950 rounded-xl p-2 flex items-center text-xs hover:bg-slate-900 transition-colors"
+                      >
+                        {/* existing card content */}
+                        <div className="flex-1 min-w-0">
+                          <div className="font-mono text-[10px] text-slate-400 leading-none">
+                            {order.created_date_pht}
+                          </div>
+                          <div className="font-bold text-white truncate leading-none">
+                            {order.order_number}
+                          </div>
+                        </div>
+                        <div className="flex-1 min-w-0 px-3 text-[10px] leading-none">
+                          <div className="font-bold text-slate-200 truncate">
+                            {order.client_name}
+                          </div>
+                          <div className="font-bold text-slate-400">
+                            {order.agent || 'MAIN OFFICE'}
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0 flex flex-col items-end">
+                          <div className="text-emerald-400 text-sm font-bold">
+                            ₱{Number(order.total_amount).toLocaleString()}
+                          </div>
+                          <button
+                            onClick={() =>
+                              handlePrintOrder(order.id, order.order_number)
+                            }
+                            className="px-5 py-1 bg-amber-500 hover:bg-amber-400 text-white text-[10px] font-black rounded-lg whitespace-nowrap"
+                          >
+                            PRINT
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                 </div>
               </div>
-            );
-          })()}
 
-          {/* 7-Day Grid with correct TODAY */}
-          {/* 7-Day Grid - EXACTLY like your PROD file (Sunday to Saturday, no shift) */}
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+              {/* ====================== 2. FOR DELIVERY ====================== */}
+              <div className="bg-slate-900/40 border border-blue-500/30 rounded-3xl p-4 flex flex-col h-full">
+                <h4 className="font-black text-blue-400 text-sm mb-3">
+                  🚚 FOR DELIVERY
+                </h4>
+
+                <div className="flex gap-2 mb-3">
+                  <div className="grid grid-cols-3 gap-2 flex-1">
+                    <input
+                      type="date"
+                      value={deliveryFilter.date}
+                      onChange={(e) =>
+                        setDeliveryFilter({
+                          ...deliveryFilter,
+                          date: e.target.value,
+                        })
+                      }
+                      className="bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-xs outline-none"
+                    />
+                    <select
+                      value={deliveryFilter.client}
+                      onChange={(e) =>
+                        setDeliveryFilter({
+                          ...deliveryFilter,
+                          client: e.target.value,
+                        })
+                      }
+                      className="bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-xs outline-none"
+                    >
+                      <option value="">All Clients</option>
+                      {branchClients
+                        .sort((a, b) =>
+                          (a.client_name || '').localeCompare(
+                            b.client_name || ''
+                          )
+                        )
+                        .map((c: any) => (
+                          <option key={c.id} value={c.client_name}>
+                            {c.client_name}
+                          </option>
+                        ))}
+                    </select>
+                    <select
+                      value={deliveryFilter.agent}
+                      onChange={(e) =>
+                        setDeliveryFilter({
+                          ...deliveryFilter,
+                          agent: e.target.value,
+                        })
+                      }
+                      className="bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-xs outline-none"
+                    >
+                      <option value="">All Agents</option>
+                      <option value="MAIN OFFICE">MAIN OFFICE</option>
+                      {branchAgents
+                        .sort((a, b) =>
+                          (a.full_name || a.email || '').localeCompare(
+                            b.full_name || b.email || ''
+                          )
+                        )
+                        .map((a: any) => (
+                          <option key={a.id} value={a.full_name || a.email}>
+                            {a.full_name || a.email}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                  <button
+                    onClick={() =>
+                      setDeliveryFilter({ date: '', client: '', agent: '' })
+                    }
+                    className="px-3 py-1.5 text-xs font-black flex items-center gap-1 bg-slate-800 hover:bg-red-500/10 hover:text-red-400 text-slate-400 rounded-xl transition-colors"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-auto space-y-0.5 pr-1 max-h-[380px]">
+                  {deliveryOrders
+                    .filter((order: any) => {
+                      const matchesDate =
+                        !deliveryFilter.date ||
+                        order.created_date_pht === deliveryFilter.date;
+                      const matchesClient =
+                        !deliveryFilter.client ||
+                        (order.client_name || '').toLowerCase() ===
+                          deliveryFilter.client.toLowerCase();
+                      const matchesAgent =
+                        !deliveryFilter.agent ||
+                        (order.agent || 'MAIN OFFICE').toLowerCase() ===
+                          deliveryFilter.agent.toLowerCase();
+                      return matchesDate && matchesClient && matchesAgent;
+                    })
+                    .map((order: any) => (
+                      <div
+                        key={order.id}
+                        className="bg-slate-950 rounded-xl p-2 flex items-center text-xs hover:bg-slate-900 transition-colors"
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="font-mono text-[10px] text-slate-400 leading-none">
+                            {order.created_date_pht}
+                          </div>
+                          <div className="font-bold text-white truncate leading-none">
+                            {order.order_number}
+                          </div>
+                        </div>
+                        <div className="flex-1 min-w-0 px-3 text-[10px] leading-none">
+                          <div className="font-bold text-slate-200 truncate">
+                            {order.client_name}
+                          </div>
+                          <div className="font-bold text-slate-400">
+                            {order.agent || 'MAIN OFFICE'}
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0 flex flex-col items-end gap-2">
+                          <div className="text-emerald-400 text-sm font-bold">
+                            ₱{Number(order.total_amount).toLocaleString()}
+                          </div>
+
+                          {/* Two smaller buttons side-by-side */}
+                          <div className="flex gap-1.5">
+                            {/* REPRINT - same function as PRINT in Preparation table */}
+                            <button
+                              onClick={() =>
+                                handlePrintOrder(order.id, order.order_number)
+                              }
+                              className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-white text-[9px] font-black rounded-lg whitespace-nowrap transition-colors"
+                            >
+                              REPRINT
+                            </button>
+
+                            {/* DELIVERED - now half the size */}
+                            <button
+                              onClick={() =>
+                                markAsForCollection(
+                                  order.id,
+                                  order.order_number
+                                )
+                              }
+                              className="px-3 py-1 bg-blue-500 hover:bg-blue-400 text-white text-[9px] font-black rounded-lg whitespace-nowrap transition-colors"
+                            >
+                              DELIVERED
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+
+              {/* ====================== 3. FOR COLLECTION (Past Due + Compact Clear) ====================== */}
+              <div className="bg-slate-900/40 border border-purple-500/30 rounded-3xl p-4 flex flex-col h-full">
+                <h4 className="font-black text-purple-400 text-sm mb-3">
+                  💰 FOR COLLECTION
+                </h4>
+
+                <div className="flex gap-2 mb-3">
+                  <div className="grid grid-cols-3 gap-2 flex-1">
+                    <input
+                      type="date"
+                      value={collectionFilter.date}
+                      onChange={(e) =>
+                        setCollectionFilter({
+                          ...collectionFilter,
+                          date: e.target.value,
+                        })
+                      }
+                      className="bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-xs outline-none"
+                    />
+                    <select
+                      value={collectionFilter.client}
+                      onChange={(e) =>
+                        setCollectionFilter({
+                          ...collectionFilter,
+                          client: e.target.value,
+                        })
+                      }
+                      className="bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-xs outline-none"
+                    >
+                      <option value="">All Clients</option>
+                      {branchClients
+                        .sort((a, b) =>
+                          (a.client_name || '').localeCompare(
+                            b.client_name || ''
+                          )
+                        )
+                        .map((c: any) => (
+                          <option key={c.id} value={c.client_name}>
+                            {c.client_name}
+                          </option>
+                        ))}
+                    </select>
+                    <select
+                      value={collectionFilter.agent}
+                      onChange={(e) =>
+                        setCollectionFilter({
+                          ...collectionFilter,
+                          agent: e.target.value,
+                        })
+                      }
+                      className="bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-xs outline-none"
+                    >
+                      <option value="">All Agents</option>
+                      <option value="MAIN OFFICE">MAIN OFFICE</option>
+                      {branchAgents
+                        .sort((a, b) =>
+                          (a.full_name || a.email || '').localeCompare(
+                            b.full_name || b.email || ''
+                          )
+                        )
+                        .map((a: any) => (
+                          <option key={a.id} value={a.full_name || a.email}>
+                            {a.full_name || a.email}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+
+                  {/* Past Due Button - Now smaller */}
+                  <button
+                    onClick={() =>
+                      setShowOverdueCollection(!showOverdueCollection)
+                    }
+                    className={`px-4 py-1.5 text-xs font-black rounded-xl transition-all whitespace-nowrap ${
+                      showOverdueCollection
+                        ? 'bg-red-600 text-white'
+                        : 'bg-slate-800 hover:bg-red-500/10 hover:text-red-400 text-slate-400'
+                    }`}
+                  >
+                    {showOverdueCollection ? 'PAST DUE' : 'PAST DUE'}
+                  </button>
+
+                  {/* Clear Button - Smaller with X icon */}
+                  <button
+                    onClick={() => {
+                      setCollectionFilter({ date: '', client: '', agent: '' });
+                      setShowOverdueCollection(false);
+                    }}
+                    className="px-3 py-1.5 text-xs font-black flex items-center gap-1 bg-slate-800 hover:bg-red-500/10 hover:text-red-400 text-slate-400 rounded-xl transition-colors"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-auto space-y-0.5 pr-1 max-h-[380px]">
+                  {collectionOrders
+                    .filter((order: any) => {
+                      const today = new Date().toISOString().split('T')[0];
+                      const isOverdue =
+                        showOverdueCollection &&
+                        order.due_date &&
+                        order.due_date < today &&
+                        Number(order.remaining_balance || 0) > 0;
+                      if (showOverdueCollection && !isOverdue) return false;
+
+                      const matchesDate =
+                        !collectionFilter.date ||
+                        order.created_date_pht === collectionFilter.date;
+                      const matchesClient =
+                        !collectionFilter.client ||
+                        (order.client_name || '').toLowerCase() ===
+                          collectionFilter.client.toLowerCase();
+                      const matchesAgent =
+                        !collectionFilter.agent ||
+                        (order.agent || 'MAIN OFFICE').toLowerCase() ===
+                          collectionFilter.agent.toLowerCase();
+                      return matchesDate && matchesClient && matchesAgent;
+                    })
+                    .map((order: any) => (
+                      <div
+                        key={order.id}
+                        className="bg-slate-950 rounded-xl p-2 flex items-center text-xs hover:bg-slate-900 transition-colors"
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="font-mono text-[10px] text-slate-400 leading-none">
+                            {order.created_date_pht}
+                          </div>
+                          <div className="font-bold text-white truncate leading-none">
+                            {order.order_number}
+                          </div>
+                        </div>
+                        <div className="flex-1 min-w-0 px-3 text-[10px] leading-none">
+                          <div className="font-bold text-slate-200 truncate">
+                            {order.client_name}
+                          </div>
+                          <div className="font-bold text-slate-400">
+                            {order.agent || 'MAIN OFFICE'}
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0 flex flex-col items-end">
+                          <div className="text-emerald-400 text-sm font-bold">
+                            ₱{Number(order.total_amount).toLocaleString()}
+                          </div>
+                          <div className="text-[10px] text-red-400">
+                            Bal: ₱
+                            {Number(
+                              order.remaining_balance || 0
+                            ).toLocaleString()}
+                          </div>
+                          {order.due_date && (
+                            <div
+                              className={`text-[9px] ${
+                                order.due_date <
+                                new Date().toISOString().split('T')[0]
+                                  ? 'text-red-500'
+                                  : 'text-slate-400'
+                              }`}
+                            >
+                              Due: {order.due_date}
+                            </div>
+                          )}
+                          <button
+                            onClick={() => {
+                              setSelectedCollectionOrder(order);
+                              setPaymentAmount(0);
+                              setPaymentMethodModal('CASH');
+                              setChequeDateModal('');
+                              setCollectionNotes('');
+                              setPrNumberInput('');
+                              setShowCollectionModal(true);
+                            }}
+                            className="px-5 py-1 bg-purple-500 hover:bg-purple-400 text-white text-[10px] font-black rounded-lg whitespace-nowrap mt-1"
+                          >
+                            COLLECT
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* Previous 7 Day Report Audit */}
+        {/* 7-Day Report Audit */}
+        {/* 7-DAY REPORT AUDIT - ONLY FOR DRUGSTORE BRANCHES */}
+        {!selectedBranch?.is_office_use && (
+          <div className="mb-10">
+            <h3 className="text-[10px] font-black text-slate-600 uppercase tracking-[0.3em] px-1 italic mb-4 flex items-center gap-2">
+              <History size={12} /> 7_Day_Report_Audit
+            </h3>
+
             {(() => {
               const now = new Date();
               const todayStr = now.toISOString().split('T')[0];
 
+              // Sunday to Saturday - exact same logic as your PROD file
               const sun = new Date(now);
               sun.setDate(now.getDate() - now.getDay());
               sun.setHours(0, 0, 0, 0);
 
-              return Array.from({ length: 7 }).map((_, i) => {
-                const date = new Date(sun);
-                date.setDate(sun.getDate() + i);
+              const sat = new Date(sun);
+              sat.setDate(sun.getDate() + 6);
 
-                // EXACT same string construction as your PROD file
-                const year = date.getFullYear();
-                const month = String(date.getMonth() + 1).padStart(2, '0');
-                const day = String(date.getDate()).padStart(2, '0');
-                const dateStr = `${year}-${month}-${day}`;
+              const firstDayMonth = new Date(
+                now.getFullYear(),
+                now.getMonth(),
+                1
+              );
+              const daysInMonth = new Date(
+                now.getFullYear(),
+                now.getMonth() + 1,
+                0
+              ).getDate();
 
-                const report = dailyReports.find(
-                  (r) => r.report_date === dateStr
-                );
+              const dailyGen = Number(selectedBranch?.daily_generic_quota || 0);
+              const weeklyQuo = dailyGen * 7;
+              const monthlyQuo = dailyGen * daysInMonth;
 
-                const isFuture = date > now;
-                const isToday = dateStr === todayStr;
+              let weeklyGenericNet = 0;
+              let monthlyGenericNet = 0;
 
-                const netSales =
-                  Number(report?.total_sales || 0) -
-                  Number(report?.discount_total || 0);
+              dailyReports.forEach((r) => {
+                const reportDateStr = r.report_date;
+                const genGross = Number(r.generic_sales || 0);
+                const disc = Number(r.discount_total || 0);
+                const genNet = genGross - disc;
 
-                const genActual =
-                  Number(report?.generic_sales || 0) -
-                  Number(report?.discount_total || 0);
+                const reportDate = new Date(reportDateStr + 'T00:00:00');
 
-                return (
-                  <div
-                    key={dateStr}
-                    className={`p-4 rounded-2xl border transition-all ${
-                      isFuture
-                        ? 'opacity-40 bg-slate-900/20 border-white/5'
-                        : !report
-                        ? 'bg-red-500/5 border-red-500/20'
-                        : isToday
-                        ? 'bg-emerald-500/20 border-emerald-400 ring-2 ring-emerald-400 shadow-2xl shadow-emerald-500/30 scale-[1.03]'
-                        : 'bg-slate-900/40 border-white/5'
-                    }`}
-                  >
-                    <span
-                      className={`text-[8px] font-black uppercase block mb-1 ${
-                        isToday ? 'text-emerald-400' : 'text-slate-500'
+                if (reportDate >= sun && reportDate <= sat) {
+                  weeklyGenericNet += genNet;
+                }
+                if (reportDate >= firstDayMonth && reportDate <= now) {
+                  monthlyGenericNet += genNet;
+                }
+              });
+
+              const getProg = (actual: number, quota: number) =>
+                quota > 0 ? Math.min((actual / quota) * 100, 100) : 0;
+
+              return (
+                <div className="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Weekly */}
+                  <div className="bg-slate-900/40 border border-white/5 p-4 rounded-2xl">
+                    <div className="flex justify-between items-start mb-2">
+                      <div>
+                        <p className="text-[9px] font-black text-emerald-500 uppercase tracking-widest">
+                          Weekly Generic (Net)
+                        </p>
+                        <p className="text-xl font-black text-white">
+                          ₱{weeklyGenericNet.toLocaleString()}
+                        </p>
+                      </div>
+                      <p className="text-xs font-black text-emerald-500 bg-emerald-500/10 px-2 py-1 rounded-lg">
+                        {getProg(weeklyGenericNet, weeklyQuo).toFixed(0)}%
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className="flex-1 h-1.5 bg-black rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-emerald-500"
+                          style={{
+                            width: `${getProg(weeklyGenericNet, weeklyQuo)}%`,
+                          }}
+                        />
+                      </div>
+                      <span className="text-[9px] font-bold text-slate-500">
+                        Target: ₱{weeklyQuo.toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Monthly */}
+                  <div className="bg-slate-900/40 border border-white/5 p-4 rounded-2xl">
+                    <div className="flex justify-between items-start mb-2">
+                      <div>
+                        <p className="text-[9px] font-black text-blue-500 uppercase tracking-widest">
+                          Monthly Generic (Net)
+                        </p>
+                        <p className="text-xl font-black text-white">
+                          ₱{monthlyGenericNet.toLocaleString()}
+                        </p>
+                      </div>
+                      <p className="text-xs font-black text-blue-500 bg-blue-500/10 px-2 py-1 rounded-lg">
+                        {getProg(monthlyGenericNet, monthlyQuo).toFixed(0)}%
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className="flex-1 h-1.5 bg-black rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-blue-500"
+                          style={{
+                            width: `${getProg(monthlyGenericNet, monthlyQuo)}%`,
+                          }}
+                        />
+                      </div>
+                      <span className="text-[9px] font-bold text-slate-500">
+                        Target: ₱{monthlyQuo.toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* 7-Day Grid */}
+            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+              {(() => {
+                const now = new Date();
+                const todayStr = now.toISOString().split('T')[0];
+
+                const sun = new Date(now);
+                sun.setDate(now.getDate() - now.getDay());
+                sun.setHours(0, 0, 0, 0);
+
+                return Array.from({ length: 7 }).map((_, i) => {
+                  const date = new Date(sun);
+                  date.setDate(sun.getDate() + i);
+
+                  const year = date.getFullYear();
+                  const month = String(date.getMonth() + 1).padStart(2, '0');
+                  const day = String(date.getDate()).padStart(2, '0');
+                  const dateStr = `${year}-${month}-${day}`;
+
+                  const report = dailyReports.find(
+                    (r) => r.report_date === dateStr
+                  );
+
+                  const isFuture = date > now;
+                  const isToday = dateStr === todayStr;
+
+                  const netSales =
+                    Number(report?.total_sales || 0) -
+                    Number(report?.discount_total || 0);
+
+                  const genActual =
+                    Number(report?.generic_sales || 0) -
+                    Number(report?.discount_total || 0);
+
+                  return (
+                    <div
+                      key={dateStr}
+                      className={`p-4 rounded-2xl border transition-all ${
+                        isFuture
+                          ? 'opacity-40 bg-slate-900/20 border-white/5'
+                          : !report
+                          ? 'bg-red-500/5 border-red-500/20'
+                          : isToday
+                          ? 'bg-emerald-500/20 border-emerald-400 ring-2 ring-emerald-400 shadow-2xl shadow-emerald-500/30 scale-[1.03]'
+                          : 'bg-slate-900/40 border-white/5'
                       }`}
                     >
-                      {isToday
-                        ? 'TODAY'
-                        : date
-                            .toLocaleDateString('en-US', {
-                              weekday: 'short',
-                              day: 'numeric',
-                            })
-                            .toUpperCase()}
-                    </span>
+                      <span
+                        className={`text-[8px] font-black uppercase block mb-1 ${
+                          isToday ? 'text-emerald-400' : 'text-slate-500'
+                        }`}
+                      >
+                        {isToday
+                          ? 'TODAY'
+                          : date
+                              .toLocaleDateString('en-US', {
+                                weekday: 'short',
+                                day: 'numeric',
+                              })
+                              .toUpperCase()}
+                      </span>
 
-                    <div className="space-y-1 mb-3 border-b border-white/5 pb-2 text-[9px] font-bold">
-                      <div className="flex justify-between">
-                        <span className="text-slate-200">GEN</span>
-                        <span className="text-slate-500">
-                          ₱{Number(report?.generic_sales || 0).toLocaleString()}
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-orange-600">DISC</span>
-                        <span className="text-orange-600">
-                          ₱
-                          {Number(report?.discount_total || 0).toLocaleString()}
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-200"> ---------------</span>
-                        <span className="text-slate-200 ">
-                          ₱{genActual.toLocaleString()}
-                        </span>
+                      <div className="space-y-1 mb-3 border-b border-white/5 pb-2 text-[9px] font-bold">
+                        <div className="flex justify-between">
+                          <span className="text-slate-200">GEN</span>
+                          <span className="text-slate-500">
+                            ₱
+                            {Number(
+                              report?.generic_sales || 0
+                            ).toLocaleString()}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-orange-600">DISC</span>
+                          <span className="text-orange-600">
+                            ₱
+                            {Number(
+                              report?.discount_total || 0
+                            ).toLocaleString()}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-200">
+                            {' '}
+                            ---------------
+                          </span>
+                          <span className="text-slate-200 ">
+                            ₱{genActual.toLocaleString()}
+                          </span>
+                        </div>
+
+                        <div className="flex justify-between">
+                          <span className="text-slate-200">BRD</span>
+                          <span className="text-white">
+                            ₱
+                            {Number(
+                              report?.branded_sales || 0
+                            ).toLocaleString()}
+                          </span>
+                        </div>
+
+                        <div className="flex justify-between pt-1 border-t border-white/10 font-black">
+                          <span className="text-emerald-500">TOTAL</span>
+                          <span className="text-emerald-500">
+                            ₱
+                            {netSales.toLocaleString(undefined, {
+                              minimumFractionDigits: 2,
+                            })}
+                          </span>
+                        </div>
                       </div>
 
-                      <div className="flex justify-between">
-                        <span className="text-slate-200">BRD</span>
-                        <span className="text-white">
-                          ₱{Number(report?.branded_sales || 0).toLocaleString()}
-                        </span>
+                      {report ? (
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="text-[8px] text-slate-500 uppercase font-bold">
+                              Cash
+                            </p>
+                            <p className="text-[10px] font-black text-white">
+                              ₱
+                              {Number(report.actual_cash || 0).toLocaleString(
+                                undefined,
+                                { minimumFractionDigits: 2 }
+                              )}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() =>
+                              !report.is_checked &&
+                              handleVerifyReport(report.id)
+                            }
+                            className={
+                              report.is_checked
+                                ? 'text-emerald-500'
+                                : 'text-orange-500 hover:scale-110'
+                            }
+                          >
+                            {report.is_checked ? (
+                              <CheckCircle2 size={14} />
+                            ) : (
+                              <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
+                            )}
+                          </button>
+                        </div>
+                      ) : (
+                        <p className="text-[10px] font-black text-red-500 italic">
+                          {isFuture ? 'FUTURE' : 'MISSING'}
+                        </p>
+                      )}
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+          </div>
+        )}
+
+        {/* ==================== OFFICE CALENDAR (Sun - Sat) - TODAY HIGHLIGHTED + OTHERS PRELOADED ==================== */}
+        {selectedBranch?.is_office_use && (
+          <div className="mt-8">
+            <h3 className="text-[10px] font-black text-amber-400 uppercase tracking-[0.3em] px-1 italic mb-5 flex items-center gap-2">
+              📅 OFFICE CALENDAR (Sun - Sat)
+            </h3>
+
+            <div className="grid grid-cols-7 gap-3">
+              {(() => {
+                const now = new Date();
+                const sunday = new Date(now);
+                sunday.setDate(now.getDate() - now.getDay());
+
+                return Array.from({ length: 7 }).map((_, i) => {
+                  const date = new Date(sunday);
+                  date.setDate(sunday.getDate() + i);
+
+                  const year = date.getFullYear();
+                  const month = String(date.getMonth() + 1).padStart(2, '0');
+                  const day = String(date.getDate()).padStart(2, '0');
+                  const dateStr = `${year}-${month}-${day}`;
+
+                  const dayName = date.toLocaleDateString('en-US', {
+                    weekday: 'short',
+                  });
+                  const isToday =
+                    dateStr === new Date().toISOString().split('T')[0];
+
+                  const report = dailyReports.find(
+                    (r: any) => r.report_date === dateStr
+                  );
+
+                  // Calculate OTHERS from preloaded data
+                  const othersAmount = last7DaysOrders
+                    .filter(
+                      (o: any) =>
+                        o.created_date_pht === dateStr &&
+                        o.clients?.is_office_account === true
+                    )
+                    .reduce(
+                      (sum: number, o: any) =>
+                        sum + Number(o.total_amount || 0),
+                      0
+                    );
+
+                  // Calculate net total (deducts Others)
+                  const gen = Number(report?.generic_sales || 0);
+                  const brd = Number(report?.branded_sales || 0);
+                  const disc = Number(report?.discount_total || 0);
+                  const netTotal = gen + brd - disc - othersAmount;
+
+                  return (
+                    <button
+                      key={dateStr}
+                      onClick={() => setSelectedDay({ dateStr, report })}
+                      className={`p-4 rounded-2xl border transition-all text-left relative ${
+                        isToday
+                          ? 'bg-emerald-500/20 border-emerald-400 ring-4 ring-emerald-400 shadow-lg shadow-emerald-500/30'
+                          : 'bg-slate-900/40 border-white/10 hover:border-amber-400'
+                      }`}
+                    >
+                      {isToday && (
+                        <div className="absolute -top-1 -right-1 bg-emerald-500 text-white text-[9px] font-black px-2 py-0.5 rounded-full">
+                          TODAY
+                        </div>
+                      )}
+
+                      <div className="text-[10px] font-black text-slate-400">
+                        {dayName}
+                      </div>
+                      <div className="text-base font-bold text-white mt-1">
+                        {date.getDate()}
                       </div>
 
-                      <div className="flex justify-between pt-1 border-t border-white/10 font-black">
-                        <span className="text-emerald-500">TOTAL</span>
-                        <span className="text-emerald-500">
-                          ₱
-                          {netSales.toLocaleString(undefined, {
-                            minimumFractionDigits: 2,
-                          })}
-                        </span>
+                      {report ? (
+                        <div className="mt-4 text-xs space-y-2">
+                          <div className="flex justify-between">
+                            <span className="text-emerald-400">GEN</span>
+                            <span className="font-medium">
+                              ₱{gen.toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-purple-400">BRD</span>
+                            <span className="font-medium">
+                              ₱{brd.toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-amber-400">OTHERS</span>
+                            <span className="font-medium text-amber-400">
+                              ₱{othersAmount.toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-orange-600">DISC</span>
+                            <span className="text-orange-600">
+                              ₱{disc.toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="flex justify-between border-t border-white/10 pt-2 font-bold text-emerald-400">
+                            <span>TOTAL (NET)</span>
+                            <span>₱{netTotal.toLocaleString()}</span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="mt-8 text-[10px] text-slate-500 italic text-center">
+                          No data
+                        </div>
+                      )}
+                    </button>
+                  );
+                });
+              })()}
+            </div>
+          </div>
+        )}
+        {/* DR# INPUT MODAL when clicking DELIVERED */}
+        {showDRModal && pendingDROrder && (
+          <div className="fixed inset-0 z-[3000] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+            <div className="bg-slate-900 border border-white/10 rounded-3xl w-full max-w-md p-6">
+              <h2 className="text-lg font-black text-blue-400 uppercase mb-1">
+                DELIVERED
+              </h2>
+              <p className="text-slate-400 mb-6">
+                Order{' '}
+                <span className="font-bold text-white">
+                  {pendingDROrder.order_number}
+                </span>
+              </p>
+
+              <div className="mb-6">
+                <label className="block text-xs font-black text-slate-400 mb-2">
+                  DR# (Delivery Receipt Number)
+                </label>
+                <input
+                  type="text"
+                  value={drNumberInput}
+                  onChange={(e) => setDrNumberInput(e.target.value)}
+                  className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-xl font-mono outline-none focus:border-blue-400"
+                  placeholder="Enter DR#"
+                  autoFocus
+                />
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => {
+                    setShowDRModal(false);
+                    setPendingDROrder(null);
+                  }}
+                  className="flex-1 py-4 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-2xl"
+                >
+                  CANCEL
+                </button>
+                <button
+                  onClick={handleConfirmDR}
+                  className="flex-1 py-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-2xl"
+                >
+                  SAVE DR# &amp; MARK DELIVERED
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* OFFICE DAY DETAIL MODAL - FULL LAYOUT WITH TABS + PIE CHARTS */}
+        {selectedDay && (
+          <div className="fixed inset-0 z-[3000] flex items-center justify-center bg-slate-950/90 backdrop-blur-sm p-4">
+            <div className="bg-slate-900 border border-white/10 rounded-3xl w-full max-w-6xl max-h-[94vh] overflow-hidden flex flex-col">
+              {/* HEADER */}
+              <div className="px-8 py-6 border-b border-white/10 flex items-center justify-between bg-slate-950">
+                <h2 className="text-3xl font-black text-amber-400">
+                  {new Date(selectedDay.dateStr).toLocaleDateString('en-US', {
+                    weekday: 'long',
+                    month: 'long',
+                    day: 'numeric',
+                    year: 'numeric',
+                  })}
+                </h2>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={handleDownloadDayPDF}
+                    className="flex items-center gap-2 px-6 py-3 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-black uppercase rounded-2xl transition-all shadow-lg"
+                  >
+                    <FileDown size={18} />
+                    Download PDF
+                  </button>
+
+                  <button
+                    onClick={() => setSelectedDay(null)}
+                    className="text-4xl leading-none text-slate-400 hover:text-white"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+
+              {/* ==================== TABS ==================== */}
+              <div className="px-8 pt-6 border-b border-white/10 bg-slate-950">
+                <div className="flex gap-2 border-b border-white/10">
+                  <button
+                    onClick={() => setDayTab('overview')}
+                    className={`px-8 py-3 font-black uppercase tracking-widest text-sm transition-all rounded-t-2xl ${
+                      dayTab === 'overview'
+                        ? 'bg-emerald-500 text-white shadow-inner'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    OVERVIEW
+                  </button>
+                  <button
+                    onClick={() => setDayTab('sales-collection')}
+                    className={`px-8 py-3 font-black uppercase tracking-widest text-sm transition-all rounded-t-2xl ${
+                      dayTab === 'sales-collection'
+                        ? 'bg-emerald-500 text-white shadow-inner'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    SALES / COLLECTION
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-auto p-8 space-y-10">
+                {/* ==================== OVERVIEW TAB ==================== */}
+                {dayTab === 'overview' && (
+                  <>
+                    {/* 1. LARGE DAILY SALES CARDS - adjusted for 6-7 digits */}
+                    <div>
+                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-6">
+                        DAILY SALES (totals exclude office accounts. It can be
+                        seen under OTHERS)
+                      </h3>
+                      <div className="grid grid-cols-2 md:grid-cols-5 gap-6">
+                        {/* GENERIC */}
+                        <div className="bg-slate-950 rounded-3xl p-8 text-center border border-emerald-400/30">
+                          <div className="text-emerald-400 text-sm font-black tracking-widest">
+                            GENERIC
+                          </div>
+                          <div className="text-4xl md:text-[2.25rem] font-black font-mono tracking-tighter leading-none text-white mt-4">
+                            ₱
+                            {Number(
+                              selectedDay.report?.generic_sales || 0
+                            ).toLocaleString()}
+                          </div>
+                        </div>
+
+                        {/* BRANDED */}
+                        <div className="bg-slate-950 rounded-3xl p-8 text-center border border-purple-400/30">
+                          <div className="text-purple-400 text-sm font-black tracking-widest">
+                            BRANDED
+                          </div>
+                          <div className="text-4xl md:text-[2.25rem] font-black font-mono tracking-tighter leading-none text-white mt-4">
+                            ₱
+                            {Number(
+                              selectedDay.report?.branded_sales || 0
+                            ).toLocaleString()}
+                          </div>
+                        </div>
+
+                        {/* OTHERS */}
+                        <div className="bg-slate-950 rounded-3xl p-8 text-center border border-amber-400/30">
+                          <div className="text-amber-400 text-sm font-black tracking-widest">
+                            OTHERS
+                          </div>
+                          <div className="text-4xl md:text-[2.25rem] font-black font-mono tracking-tighter leading-none text-amber-400 mt-4">
+                            ₱
+                            {dayOrders
+                              .filter(
+                                (o: any) =>
+                                  o.clients?.is_office_account === true
+                              )
+                              .reduce(
+                                (sum, o) => sum + Number(o.total_amount || 0),
+                                0
+                              )
+                              .toLocaleString()}
+                          </div>
+                        </div>
+
+                        {/* DISCOUNT */}
+                        <div className="bg-slate-950 rounded-3xl p-8 text-center border border-orange-400/30">
+                          <div className="text-orange-400 text-sm font-black tracking-widest">
+                            DISCOUNT
+                          </div>
+                          <div className="text-4xl md:text-[2.25rem] font-black font-mono tracking-tighter leading-none text-orange-400 mt-4">
+                            ₱
+                            {Number(
+                              selectedDay.report?.discount_total || 0
+                            ).toLocaleString()}
+                          </div>
+                        </div>
+
+                        {/* TOTAL SALES (NET) */}
+                        <div className="bg-emerald-500/10 border-2 border-emerald-400 rounded-3xl p-8 text-center">
+                          <div className="text-emerald-400 text-sm font-black tracking-widest">
+                            TOTAL SALES (NET)
+                          </div>
+                          <div className="text-4xl md:text-[2.25rem] font-black font-mono tracking-tighter leading-none text-emerald-400 mt-4">
+                            ₱
+                            {(
+                              Number(selectedDay.report?.generic_sales || 0) +
+                              Number(selectedDay.report?.branded_sales || 0) -
+                              Number(selectedDay.report?.discount_total || 0) -
+                              dayOrders
+                                .filter(
+                                  (o: any) =>
+                                    o.clients?.is_office_account === true
+                                )
+                                .reduce(
+                                  (sum, o) => sum + Number(o.total_amount || 0),
+                                  0
+                                )
+                            ).toLocaleString()}
+                          </div>
+                        </div>
                       </div>
                     </div>
 
-                    {report ? (
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <p className="text-[8px] text-slate-500 uppercase font-bold">
-                            Cash
-                          </p>
-                          <p className="text-[10px] font-black text-white">
-                            ₱
-                            {Number(report.actual_cash || 0).toLocaleString(
-                              undefined,
-                              { minimumFractionDigits: 2 }
-                            )}
-                          </p>
+                    {/* 2. SUMMARY ROW - FIXED: DAILY SALES Cash/Cheque now exclude OFFICE ACCOUNTS */}
+                    <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+                      {/* DAILY SALES - NOW CONSISTENT */}
+                      <div className="bg-slate-950 rounded-3xl p-6 text-center border border-emerald-500/30">
+                        <div className="text-emerald-400 text-xs font-black uppercase tracking-widest mb-2">
+                          DAILY SALES
                         </div>
-                        <button
-                          onClick={() =>
-                            !report.is_checked && handleVerifyReport(report.id)
-                          }
-                          className={
-                            report.is_checked
-                              ? 'text-emerald-500'
-                              : 'text-orange-500 hover:scale-110'
-                          }
-                        >
-                          {report.is_checked ? (
-                            <CheckCircle2 size={14} />
-                          ) : (
-                            <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
-                          )}
-                        </button>
+                        <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-white mb-4">
+                          ₱
+                          {(dayOrders || [])
+                            .filter((o: any) => !o.clients?.is_office_account)
+                            .reduce(
+                              (sum, o) => sum + Number(o.total_amount || 0),
+                              0
+                            )
+                            .toLocaleString()}
+                        </div>
+                        <div className="text-xs space-y-1">
+                          <div className="flex justify-between">
+                            <span className="text-emerald-400">Cash</span>
+                            <span>
+                              ₱
+                              {sameDayPayments
+                                .filter(
+                                  (p: any) =>
+                                    !p.orders?.clients?.is_office_account &&
+                                    p.payment_method === 'CASH'
+                                )
+                                .reduce(
+                                  (sum, p) => sum + Number(p.amount || 0),
+                                  0
+                                )
+                                .toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-purple-400">Cheque</span>
+                            <span>
+                              ₱
+                              {sameDayPayments
+                                .filter(
+                                  (p: any) =>
+                                    !p.orders?.clients?.is_office_account &&
+                                    p.payment_method === 'CHEQUE'
+                                )
+                                .reduce(
+                                  (sum, p) => sum + Number(p.amount || 0),
+                                  0
+                                )
+                                .toLocaleString()}
+                            </span>
+                          </div>
+                        </div>
                       </div>
-                    ) : (
-                      <p className="text-[10px] font-black text-red-500 italic">
-                        {isFuture ? 'FUTURE' : 'MISSING'}
-                      </p>
-                    )}
-                  </div>
-                );
-              });
-            })()}
+
+                      {/* REMITTANCES (unchanged - already correct) */}
+                      <div className="bg-slate-950 rounded-3xl p-6 text-center border border-cyan-500/30">
+                        <div className="text-cyan-400 text-xs font-black uppercase tracking-widest mb-2">
+                          REMITTANCES
+                        </div>
+                        <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-white mb-4">
+                          ₱
+                          {(dayPayments || [])
+                            .filter(
+                              (p: any) => !p.orders?.clients?.is_office_account
+                            )
+                            .reduce((sum, p) => sum + Number(p.amount || 0), 0)
+                            .toLocaleString()}
+                        </div>
+                        <div className="text-xs space-y-1">
+                          <div className="flex justify-between">
+                            <span className="text-emerald-400">Cash</span>
+                            <span>
+                              ₱
+                              {dayPayments
+                                .filter(
+                                  (p: any) =>
+                                    !p.orders?.clients?.is_office_account &&
+                                    p.payment_method === 'CASH'
+                                )
+                                .reduce(
+                                  (sum, p) => sum + Number(p.amount || 0),
+                                  0
+                                )
+                                .toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-purple-400">Cheque</span>
+                            <span>
+                              ₱
+                              {dayPayments
+                                .filter(
+                                  (p: any) =>
+                                    !p.orders?.clients?.is_office_account &&
+                                    p.payment_method === 'CHEQUE'
+                                )
+                                .reduce(
+                                  (sum, p) => sum + Number(p.amount || 0),
+                                  0
+                                )
+                                .toLocaleString()}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* TOTAL PAYMENTS (unchanged - already correct) */}
+                      <div className="bg-slate-950 rounded-3xl p-6 text-center border border-amber-500/50">
+                        <div className="text-amber-400 text-xs font-black uppercase tracking-widest mb-2">
+                          TOTAL PAYMENTS
+                        </div>
+                        <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-white mb-4">
+                          ₱
+                          {[...(sameDayPayments || []), ...(dayPayments || [])]
+                            .filter(
+                              (p: any) => !p.orders?.clients?.is_office_account
+                            )
+                            .reduce((sum, p) => sum + Number(p.amount || 0), 0)
+                            .toLocaleString()}
+                        </div>
+                        <div className="text-xs space-y-1">
+                          <div className="flex justify-between">
+                            <span className="text-emerald-400">Cash</span>
+                            <span>
+                              ₱
+                              {[
+                                ...(sameDayPayments || []),
+                                ...(dayPayments || []),
+                              ]
+                                .filter(
+                                  (p: any) =>
+                                    !p.orders?.clients?.is_office_account &&
+                                    p.payment_method === 'CASH'
+                                )
+                                .reduce(
+                                  (sum, p) => sum + Number(p.amount || 0),
+                                  0
+                                )
+                                .toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-purple-400">Cheque</span>
+                            <span>
+                              ₱
+                              {[
+                                ...(sameDayPayments || []),
+                                ...(dayPayments || []),
+                              ]
+                                .filter(
+                                  (p: any) =>
+                                    !p.orders?.clients?.is_office_account &&
+                                    p.payment_method === 'CHEQUE'
+                                )
+                                .reduce(
+                                  (sum, p) => sum + Number(p.amount || 0),
+                                  0
+                                )
+                                .toLocaleString()}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* EXPENSES (unchanged) */}
+                      <div className="bg-slate-950 rounded-3xl p-6 text-center border border-red-500/30">
+                        <div className="text-red-400 text-xs font-black uppercase tracking-widest mb-2">
+                          EXPENSES
+                        </div>
+                        <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-red-400">
+                          ₱
+                          {(dayExpenses || [])
+                            .reduce(
+                              (sum, exp) => sum + Number(exp.amount || 0),
+                              0
+                            )
+                            .toLocaleString()}
+                        </div>
+                      </div>
+
+                      {/* ACTUAL CASH (unchanged) */}
+                      <div className="bg-slate-950 rounded-3xl p-6 text-center border border-emerald-500">
+                        <div className="text-emerald-400 text-xs font-black uppercase tracking-widest mb-2">
+                          ACTUAL CASH
+                        </div>
+                        <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-emerald-400">
+                          ₱
+                          {(
+                            [...(sameDayPayments || []), ...(dayPayments || [])]
+                              .filter(
+                                (p: any) =>
+                                  !p.orders?.clients?.is_office_account &&
+                                  p.payment_method === 'CASH'
+                              )
+                              .reduce(
+                                (sum, p) => sum + Number(p.amount || 0),
+                                0
+                              ) -
+                            (dayExpenses || []).reduce(
+                              (sum, exp) => sum + Number(exp.amount || 0),
+                              0
+                            )
+                          ).toLocaleString()}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 3. DAILY SALES TABLE (unchanged - already correct) */}
+                    <div>
+                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">
+                        DAILY SALES TABLE
+                      </h3>
+                      <div className="bg-slate-950 rounded-3xl overflow-hidden">
+                        <table className="w-full text-sm">
+                          <thead className="bg-slate-900 border-b border-white/10">
+                            <tr>
+                              <th className="text-left p-4 font-black text-slate-400">
+                                CLIENT NAME
+                              </th>
+                              <th className="text-center p-4 font-black text-slate-400">
+                                SO#
+                              </th>
+                              <th className="text-center p-4 font-black text-slate-400">
+                                DR#
+                              </th>
+                              <th className="text-center p-4 font-black text-slate-400">
+                                PR#
+                              </th>
+                              <th className="text-right p-4 font-black text-slate-400">
+                                CASH
+                              </th>
+                              <th className="text-right p-4 font-black text-slate-400">
+                                CHECK
+                              </th>
+                              <th className="text-center p-4 font-black text-slate-400">
+                                CHECK DATE
+                              </th>
+                              <th className="text-center p-4 font-black text-slate-400">
+                                DELIVERY DATE
+                              </th>
+                              <th className="text-right p-4 font-black text-slate-400">
+                                OTHERS
+                              </th>
+                              <th className="text-right p-4 font-black text-slate-400">
+                                TOTAL
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-white/10 text-slate-300">
+                            {dayOrders.length > 0 ? (
+                              dayOrders.map((order: any) => {
+                                const paymentsForOrder = sameDayPayments.filter(
+                                  (p: any) => p.order_id === order.id
+                                );
+                                const cashAmount = paymentsForOrder
+                                  .filter(
+                                    (p: any) => p.payment_method === 'CASH'
+                                  )
+                                  .reduce(
+                                    (sum, p) => sum + Number(p.amount || 0),
+                                    0
+                                  );
+                                const chequeAmount = paymentsForOrder
+                                  .filter(
+                                    (p: any) => p.payment_method === 'CHEQUE'
+                                  )
+                                  .reduce(
+                                    (sum, p) => sum + Number(p.amount || 0),
+                                    0
+                                  );
+                                const displayPrNumber =
+                                  paymentsForOrder
+                                    .map((p: any) => p.pr_number?.trim())
+                                    .filter(Boolean)
+                                    .join(', ') ||
+                                  order.pr_number ||
+                                  '—';
+                                const displayChequeDate =
+                                  paymentsForOrder
+                                    .filter(
+                                      (p: any) =>
+                                        p.payment_method === 'CHEQUE' &&
+                                        p.cheque_date
+                                    )
+                                    .map((p: any) => p.cheque_date)
+                                    .join(', ') || '—';
+
+                                const isOfficeAccount =
+                                  order.clients?.is_office_account === true;
+                                const orderTotal = Number(
+                                  order.total_amount || 0
+                                );
+
+                                return (
+                                  <tr key={order.id}>
+                                    <td className="p-4">
+                                      {order.client_name || 'WALK-IN'}
+                                    </td>
+                                    <td className="p-4 text-center font-mono">
+                                      {order.order_number}
+                                    </td>
+                                    <td className="p-4 text-center">
+                                      {order.dr_number || '—'}
+                                    </td>
+                                    <td className="p-4 text-center font-mono text-amber-300">
+                                      {displayPrNumber}
+                                    </td>
+                                    <td className="p-4 text-right">
+                                      ₱{cashAmount.toLocaleString()}
+                                    </td>
+                                    <td className="p-4 text-right">
+                                      ₱{chequeAmount.toLocaleString()}
+                                    </td>
+                                    <td className="p-4 text-center font-mono text-purple-300">
+                                      {displayChequeDate}
+                                    </td>
+                                    <td className="p-4 text-center">
+                                      {order.delivery_date || '—'}
+                                    </td>
+                                    <td className="p-4 text-right font-medium text-amber-400">
+                                      ₱
+                                      {isOfficeAccount
+                                        ? orderTotal.toLocaleString()
+                                        : '0'}
+                                    </td>
+                                    <td className="p-4 text-right font-bold">
+                                      ₱
+                                      {isOfficeAccount
+                                        ? '0'
+                                        : orderTotal.toLocaleString()}
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            ) : (
+                              <tr className="text-slate-400">
+                                <td className="p-4" colSpan={10}>
+                                  No orders recorded for this day yet
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* 4. REMITTANCES / PAYMENTS TABLE (unchanged) */}
+                    <div>
+                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">
+                        REMITTANCES / PAYMENTS
+                      </h3>
+                      <div className="bg-slate-950 rounded-3xl overflow-hidden">
+                        <table className="w-full text-sm">
+                          <thead className="bg-slate-900 border-b border-white/10">
+                            <tr>
+                              <th className="text-left p-4 font-black text-slate-400">
+                                CLIENT NAME
+                              </th>
+                              <th className="text-center p-4 font-black text-slate-400">
+                                SO#
+                              </th>
+                              <th className="text-center p-4 font-black text-slate-400">
+                                DR#
+                              </th>
+                              <th className="text-center p-4 font-black text-slate-400">
+                                PR#
+                              </th>
+                              <th className="text-right p-4 font-black text-slate-400">
+                                CASH
+                              </th>
+                              <th className="text-right p-4 font-black text-slate-400">
+                                CHECK
+                              </th>
+                              <th className="text-center p-4 font-black text-slate-400">
+                                CHECK DATE
+                              </th>
+                              <th className="text-center p-4 font-black text-slate-400">
+                                DELIVERY DATE
+                              </th>
+                              <th className="text-right p-4 font-black text-slate-400">
+                                OTHERS
+                              </th>
+                              <th className="text-right p-4 font-black text-slate-400">
+                                TOTAL
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-white/10 text-slate-300">
+                            {(() => {
+                              const grouped = dayPayments.reduce(
+                                (acc: any, p: any) => {
+                                  const key =
+                                    p.order_id ||
+                                    (p.orders && p.orders.id) ||
+                                    Math.random();
+                                  if (!acc[key])
+                                    acc[key] = {
+                                      order: p.orders || {},
+                                      payments: [],
+                                    };
+                                  acc[key].payments.push(p);
+                                  return acc;
+                                },
+                                {}
+                              );
+
+                              const rows = Object.values(grouped).map(
+                                (group: any) => {
+                                  const order = group.order;
+                                  const payments = group.payments;
+                                  const cashAmount = payments
+                                    .filter(
+                                      (p: any) => p.payment_method === 'CASH'
+                                    )
+                                    .reduce(
+                                      (sum: number, p: any) =>
+                                        sum + Number(p.amount || 0),
+                                      0
+                                    );
+                                  const chequeAmount = payments
+                                    .filter(
+                                      (p: any) => p.payment_method === 'CHEQUE'
+                                    )
+                                    .reduce(
+                                      (sum: number, p: any) =>
+                                        sum + Number(p.amount || 0),
+                                      0
+                                    );
+                                  const displayPrNumber =
+                                    payments
+                                      .map((p: any) => p.pr_number?.trim())
+                                      .filter(Boolean)
+                                      .join(', ') ||
+                                    order.pr_number ||
+                                    '—';
+                                  const displayChequeDate =
+                                    payments
+                                      .filter(
+                                        (p: any) =>
+                                          p.payment_method === 'CHEQUE' &&
+                                          p.cheque_date
+                                      )
+                                      .map((p: any) => p.cheque_date)
+                                      .join(', ') || '—';
+
+                                  return {
+                                    ...order,
+                                    cashAmount,
+                                    chequeAmount,
+                                    displayPrNumber,
+                                    displayChequeDate,
+                                  };
+                                }
+                              );
+
+                              return rows.length > 0 ? (
+                                rows.map((row: any, i: number) => {
+                                  const isOfficeAccount =
+                                    row.clients?.is_office_account === true;
+                                  const rowTotal =
+                                    row.cashAmount + row.chequeAmount;
+
+                                  return (
+                                    <tr key={row.id || i}>
+                                      <td className="p-4">
+                                        {row.client_name || '—'}
+                                      </td>
+                                      <td className="p-4 text-center font-mono">
+                                        {row.order_number || '—'}
+                                      </td>
+                                      <td className="p-4 text-center">
+                                        {row.dr_number || '—'}
+                                      </td>
+                                      <td className="p-4 text-center font-mono text-amber-300">
+                                        {row.displayPrNumber}
+                                      </td>
+                                      <td className="p-4 text-right">
+                                        ₱{row.cashAmount.toLocaleString()}
+                                      </td>
+                                      <td className="p-4 text-right">
+                                        ₱{row.chequeAmount.toLocaleString()}
+                                      </td>
+                                      <td className="p-4 text-center font-mono text-purple-300">
+                                        {row.displayChequeDate}
+                                      </td>
+                                      <td className="p-4 text-center">
+                                        {row.delivery_date || '—'}
+                                      </td>
+                                      <td className="p-4 text-right font-medium text-amber-400">
+                                        ₱
+                                        {isOfficeAccount
+                                          ? rowTotal.toLocaleString()
+                                          : '0'}
+                                      </td>
+                                      <td className="p-4 text-right font-bold">
+                                        ₱
+                                        {isOfficeAccount
+                                          ? '0'
+                                          : rowTotal.toLocaleString()}
+                                      </td>
+                                    </tr>
+                                  );
+                                })
+                              ) : (
+                                <tr className="text-slate-400">
+                                  <td className="p-4" colSpan={10}>
+                                    No remittances recorded for this day yet
+                                  </td>
+                                </tr>
+                              );
+                            })()}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* 5. EXPENSES TABLE (unchanged) */}
+                    <div>
+                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">
+                        EXPENSES
+                      </h3>
+                      {isAdmin && (
+                        <button
+                          onClick={() => setShowAddExpenseModal(true)}
+                          className="mb-4 flex items-center gap-2 text-xs font-black uppercase bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-xl transition-colors"
+                        >
+                          <Plus size={14} /> Add Expense
+                        </button>
+                      )}
+                      <div className="bg-slate-950 rounded-3xl overflow-hidden">
+                        <table className="w-full text-sm">
+                          <thead className="bg-slate-900 border-b border-white/10">
+                            <tr>
+                              <th className="text-left p-4 font-black text-slate-400">
+                                EXPENSE NAME
+                              </th>
+                              <th className="text-right p-4 font-black text-slate-400">
+                                AMOUNT
+                              </th>
+                              {isAdmin && <th className="w-10"></th>}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-white/10 text-slate-300">
+                            {dayExpenses.length > 0 ? (
+                              dayExpenses.map((exp: any) => (
+                                <tr key={exp.id}>
+                                  <td className="p-4">{exp.expense_name}</td>
+                                  <td className="p-4 text-right font-bold">
+                                    ₱{Number(exp.amount || 0).toLocaleString()}
+                                  </td>
+                                  {isAdmin && (
+                                    <td className="p-4 text-right w-10">
+                                      <button
+                                        onClick={() =>
+                                          handleDeleteExpense(
+                                            exp.id,
+                                            exp.expense_name
+                                          )
+                                        }
+                                        className="text-red-400 hover:text-red-500 transition-colors"
+                                      >
+                                        🗑
+                                      </button>
+                                    </td>
+                                  )}
+                                </tr>
+                              ))
+                            ) : (
+                              <tr className="text-slate-400">
+                                <td className="p-4" colSpan={isAdmin ? 3 : 2}>
+                                  No expenses recorded yet
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* ==================== SALES / COLLECTION TAB (unchanged) ==================== */}
+                {dayTab === 'sales-collection' && (
+                  <>
+                    {/* === COMPUTE PIE CHART DATA - EXCLUDE OFFICE ACCOUNTS ("OTHERS") === */}
+                    {(() => {
+                      // SALES BY AGENT - exclude office accounts
+                      const salesMap = new Map();
+                      dayOrders
+                        .filter(
+                          (order: any) => !order.clients?.is_office_account
+                        )
+                        .forEach((order: any) => {
+                          const agent = order.agent || 'Unknown Agent';
+                          const amount = Number(order.total_amount || 0);
+                          salesMap.set(
+                            agent,
+                            (salesMap.get(agent) || 0) + amount
+                          );
+                        });
+                      const salesByAgentData = Array.from(
+                        salesMap.entries()
+                      ).map(([name, value]) => ({
+                        name,
+                        value,
+                      }));
+
+                      // COLLECTIONS BY AGENT - exclude office accounts
+                      const collMap = new Map();
+                      dayPayments
+                        .filter(
+                          (p: any) => !p.orders?.clients?.is_office_account
+                        )
+                        .forEach((p: any) => {
+                          const agent = p.orders?.agent || 'Unknown Agent';
+                          const amount = Number(p.amount || 0);
+                          collMap.set(
+                            agent,
+                            (collMap.get(agent) || 0) + amount
+                          );
+                        });
+                      const collectionsByAgentData = Array.from(
+                        collMap.entries()
+                      ).map(([name, value]) => ({
+                        name,
+                        value,
+                      }));
+
+                      return (
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
+                          {/* SALES BY AGENT PIE */}
+                          <div>
+                            <h3 className="text-xs font-black uppercase tracking-widest text-emerald-400 mb-6 flex items-center gap-2">
+                              📦 SALES BY AGENT
+                            </h3>
+                            <PieChart
+                              data={salesByAgentData}
+                              title="Sales"
+                              color="emerald"
+                            />
+                          </div>
+
+                          {/* COLLECTIONS BY AGENT PIE */}
+                          <div>
+                            <h3 className="text-xs font-black uppercase tracking-widest text-purple-400 mb-6 flex items-center gap-2">
+                              💰 COLLECTIONS BY AGENT
+                            </h3>
+                            <PieChart
+                              data={collectionsByAgentData}
+                              title="Collections"
+                              color="purple"
+                            />
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </>
+                )}
+              </div>
+            </div>
           </div>
-        </div>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
           <div className="space-y-4">
@@ -1988,7 +4625,56 @@ export default function StaffDashboard() {
             </>
           )}
         </div>
+        {/* ADD EXPENSE MODAL */}
+        {showAddExpenseModal && (
+          <div className="fixed inset-0 z-[3100] flex items-center justify-center bg-slate-950/90 backdrop-blur-sm p-4">
+            <div className="bg-slate-900 border border-white/10 rounded-3xl w-full max-w-md p-6">
+              <h2 className="text-lg font-black text-emerald-400 mb-6">
+                ADD EXPENSE
+              </h2>
 
+              <div className="space-y-4">
+                <input
+                  type="text"
+                  placeholder="Expense name (e.g. Gas, Salary, etc)"
+                  value={newExpenseName}
+                  onChange={(e) => setNewExpenseName(e.target.value)}
+                  className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white outline-none"
+                />
+
+                <input
+                  type="number"
+                  placeholder="Amount"
+                  value={newExpenseAmount}
+                  onChange={(e) =>
+                    setNewExpenseAmount(parseFloat(e.target.value) || 0)
+                  }
+                  className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white outline-none text-2xl"
+                />
+
+                <div className="flex gap-3 pt-4">
+                  <button
+                    onClick={() => {
+                      setShowAddExpenseModal(false);
+                      setNewExpenseName('');
+                      setNewExpenseAmount(0);
+                    }}
+                    className="flex-1 py-4 bg-slate-800 text-white font-bold rounded-2xl"
+                  >
+                    CANCEL
+                  </button>
+                  <button
+                    onClick={handleAddExpense}
+                    disabled={!newExpenseName || newExpenseAmount <= 0}
+                    className="flex-1 py-4 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 text-white font-bold rounded-2xl"
+                  >
+                    SAVE EXPENSE
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
         {/* DAILY REPORT MODAL */}
         {showReportModal && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
@@ -2734,7 +5420,136 @@ export default function StaffDashboard() {
             </div>
           </div>
         )}
+        {/* COLLECTION PAYMENT MODAL */}
+        {showCollectionModal && selectedCollectionOrder && (
+          <div className="fixed inset-0 z-[3000] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+            <div className="bg-slate-900 border border-white/10 rounded-2xl w-full max-w-md p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-lg font-black text-white uppercase tracking-tight">
+                  COLLECT PAYMENT
+                </h2>
+                <button
+                  onClick={() => setShowCollectionModal(false)}
+                  className="text-slate-500 hover:text-white"
+                >
+                  <X size={20} />
+                </button>
+              </div>
 
+              <div className="mb-6">
+                <p className="text-sm font-bold">
+                  {selectedCollectionOrder.order_number}
+                </p>
+                <p className="text-slate-400">
+                  {selectedCollectionOrder.client_name}
+                </p>
+                <p className="text-emerald-400 font-bold mt-2">
+                  Current Balance: ₱
+                  {Number(
+                    selectedCollectionOrder.remaining_balance || 0
+                  ).toLocaleString()}
+                </p>
+              </div>
+
+              <div className="space-y-4">
+                {/* PR# INPUT */}
+                <div className="mb-6">
+                  <label className="block text-xs font-black text-slate-400 mb-2">
+                    PR# (Payment Receipt Number)
+                  </label>
+                  <input
+                    type="text"
+                    value={prNumberInput}
+                    onChange={(e) => setPrNumberInput(e.target.value)}
+                    className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-xl font-mono outline-none focus:border-purple-400"
+                    placeholder="Enter PR#"
+                    autoFocus
+                  />
+                </div>
+                {/* Payment Method */}
+                <div>
+                  <label className="text-xs font-black text-slate-500 block mb-2">
+                    PAYMENT METHOD
+                  </label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setPaymentMethodModal('CASH')}
+                      className={`flex-1 py-3 rounded-xl font-bold text-sm ${
+                        paymentMethodModal === 'CASH'
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-slate-800 text-slate-400'
+                      }`}
+                    >
+                      CASH
+                    </button>
+                    <button
+                      onClick={() => setPaymentMethodModal('CHEQUE')}
+                      className={`flex-1 py-3 rounded-xl font-bold text-sm ${
+                        paymentMethodModal === 'CHEQUE'
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-slate-800 text-slate-400'
+                      }`}
+                    >
+                      CHEQUE
+                    </button>
+                  </div>
+                </div>
+
+                {/* Amount */}
+                <div>
+                  <label className="text-xs font-black text-slate-500 block mb-2">
+                    PAYMENT AMOUNT
+                  </label>
+                  <input
+                    type="number"
+                    value={paymentAmount}
+                    onChange={(e) =>
+                      setPaymentAmount(parseFloat(e.target.value) || 0)
+                    }
+                    className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3 text-xl font-mono outline-none"
+                    placeholder="0.00"
+                  />
+                </div>
+
+                {/* Cheque Date */}
+                {paymentMethodModal === 'CHEQUE' && (
+                  <div>
+                    <label className="text-xs font-black text-slate-500 block mb-2">
+                      CHEQUE DATE
+                    </label>
+                    <input
+                      type="date"
+                      value={chequeDateModal}
+                      onChange={(e) => setChequeDateModal(e.target.value)}
+                      className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3"
+                    />
+                  </div>
+                )}
+
+                {/* Notes */}
+                <div>
+                  <label className="text-xs font-black text-slate-500 block mb-2">
+                    NOTES
+                  </label>
+                  <textarea
+                    value={collectionNotes}
+                    onChange={(e) => setCollectionNotes(e.target.value)}
+                    className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3 h-20 resize-none"
+                    placeholder="Additional notes..."
+                  />
+                </div>
+
+                <button
+                  onClick={handleCollectPayment}
+                  disabled={paymentAmount <= 0}
+                  className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 text-white font-black text-sm uppercase tracking-widest rounded-xl"
+                >
+                  RECORD PAYMENT
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {/* Footer Terminal Log */}
         <div className="fixed bottom-6 left-6 right-6 max-w-6xl mx-auto">
           <div className="bg-black/80 backdrop-blur-xl border border-emerald-500/20 p-4 rounded-2xl flex items-center gap-4 shadow-2xl">
