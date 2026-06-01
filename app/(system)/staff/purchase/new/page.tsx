@@ -55,7 +55,7 @@ const calculateMarkup = (
   if (isOfficeUse) {
     if (upperType === 'GENERIC') return 20;
     if (upperType === 'BRANDED') return 5;
-    return 10; // fallback for any other type
+    return 20; // fallback for any other type
   }
 
   // ====================== NORMAL PHARMACY BRANCH ======================
@@ -83,7 +83,7 @@ const calculateMarkup = (
   }
 
   // Fallback for anything else
-  return 25;
+  return 50;
 };
 
 const getLevenshteinDistance = (a: string, b: string): number => {
