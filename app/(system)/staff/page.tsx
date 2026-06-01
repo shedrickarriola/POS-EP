@@ -1496,7 +1496,7 @@ export default function StaffDashboard() {
       let y = 18;
 
       if (withHeader) {
-        // ==================== WITH HEADERS (unchanged) ====================
+        // WITH HEADERS - unchanged
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(16);
         doc.text('ECONO PHARMA TRADING', 105, y, { align: 'center' });
@@ -1532,8 +1532,8 @@ export default function StaffDashboard() {
         doc.text(`ADDRESS: ${order?.address || ''}`, 20, y);
         y += 10;
       } else {
-        // ==================== WITHOUT HEADERS - ONLY VALUES + INDENTED ====================
-        y = 42; // ← Top blank space (change if needed)
+        // WITHOUT HEADERS - ONLY VALUES + INDENTED
+        y = 45; // ← Top blank space (change if needed)
 
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(10);
@@ -1568,7 +1568,7 @@ export default function StaffDashboard() {
         y += 6;
       }
 
-      // ==================== ITEM ROWS WITH WRAPPING ====================
+      // Items with wrapping
       let itemCount = 0;
       let grandTotal = 0;
       let currentY = y;
@@ -1620,7 +1620,7 @@ export default function StaffDashboard() {
 
       y = currentY;
 
-      // Summary + Footer
+      // Summary
       y += 8;
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(11);
@@ -1633,7 +1633,8 @@ export default function StaffDashboard() {
       doc.setFontSize(10);
       doc.text(`PROCESSED BY: ${processedBy}`, 20, y);
 
-      y += 25;
+      // ==================== FOOTER - NOW DIRECTLY BELOW PROCESSED BY ====================
+      y += 10; // ← Small gap (you can change to 8 or 12 if needed)
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(9);
       doc.text(
@@ -1647,6 +1648,7 @@ export default function StaffDashboard() {
         align: 'center',
       });
 
+      // Save PDF
       const client = (order?.client_name || 'WALKIN').replace(
         /[^a-zA-Z0-9]/g,
         '_'
