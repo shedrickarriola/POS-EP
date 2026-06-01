@@ -1533,19 +1533,19 @@ export default function StaffDashboard() {
         y += 10;
       } else {
         // WITHOUT HEADERS - ONLY VALUES + INDENTED
-        y = 45; // ← Top blank space (change if needed)
+        y = 45;
 
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(10);
 
-        doc.text(`${orderNumber}`, 20, y); // ← INDENTED SO#
+        doc.text(`${orderNumber}`, 20, y);
         doc.text(`${new Date().toLocaleDateString('en-US')}`, 165, y);
         y += 7;
 
-        doc.text(`${order?.client_name || 'WALK-IN'}`, 45, y); // ← INDENTED Customer
+        doc.text(`${order?.client_name || 'WALK-IN'}`, 45, y);
         y += 7;
 
-        doc.text(`${order?.address || ''}`, 45, y); // ← INDENTED Address
+        doc.text(`${order?.address || ''}`, 45, y);
         y += 14;
       }
 
@@ -1555,9 +1555,9 @@ export default function StaffDashboard() {
         doc.setFontSize(9);
         doc.text('Qty', 18, y);
         doc.text('Unit', 25, y);
-        doc.text('Lot No.', 32, y);
-        doc.text('Expiry', 55, y);
-        doc.text('Particulars', 80, y);
+        doc.text('Lot No.', 33, y);
+        doc.text('Expiry', 52, y);
+        doc.text('Particulars', 78, y);
         doc.text('Amount', 160, y, { align: 'right' });
         doc.text('Discount', 177, y, { align: 'right' });
         doc.text('Total', 195, y, { align: 'right' });
@@ -1568,7 +1568,7 @@ export default function StaffDashboard() {
         y += 6;
       }
 
-      // Items with wrapping
+      // ==================== ITEM ROWS WITH EXPIRY MAX WIDTH ====================
       let itemCount = 0;
       let grandTotal = 0;
       let currentY = y;
@@ -1580,8 +1580,10 @@ export default function StaffDashboard() {
         const lotNumber = (item.lot_number || '').trim();
         const expiryDate = item.expiry_date || '';
 
-        const lotMaxWidth = 36;
-        const particularsMaxWidth = 68;
+        // ==================== CHANGE THESE VALUES ====================
+        const lotMaxWidth = 32; // Lot# max width before wrapping
+        const expiryMaxWidth = 38; // ←←← EXPIRY DATE MAX WIDTH (this is what you asked for)
+        const particularsMaxWidth = 68; // Item name max width
 
         const itemNameLines = itemName
           ? doc.splitTextToSize(itemName, particularsMaxWidth)
@@ -1589,8 +1591,16 @@ export default function StaffDashboard() {
         const lotLines = lotNumber
           ? doc.splitTextToSize(lotNumber, lotMaxWidth)
           : [''];
+        const expiryLines = expiryDate
+          ? doc.splitTextToSize(expiryDate, expiryMaxWidth)
+          : [''];
 
-        const numLines = Math.max(itemNameLines.length, lotLines.length, 1);
+        const numLines = Math.max(
+          itemNameLines.length,
+          lotLines.length,
+          expiryLines.length,
+          1
+        );
         const lineHeight = 6.5;
         let rowY = currentY;
 
@@ -1601,10 +1611,11 @@ export default function StaffDashboard() {
           if (i === 0) {
             doc.text(String(qty), 18, rowY);
             doc.text('1s', 25, rowY);
-            if (expiryDate) doc.text(expiryDate, 55, rowY);
           }
-          if (lotLines[i]) doc.text(lotLines[i], 32, rowY);
-          if (itemNameLines[i]) doc.text(itemNameLines[i], 80, rowY);
+
+          if (lotLines[i]) doc.text(lotLines[i], 33, rowY);
+          if (expiryLines[i]) doc.text(expiryLines[i], 52, rowY); // Expiry now wraps
+          if (itemNameLines[i]) doc.text(itemNameLines[i], 78, rowY);
 
           rowY += lineHeight;
         }
@@ -1620,7 +1631,7 @@ export default function StaffDashboard() {
 
       y = currentY;
 
-      // Summary
+      // Summary + Footer
       y += 8;
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(11);
@@ -1633,8 +1644,7 @@ export default function StaffDashboard() {
       doc.setFontSize(10);
       doc.text(`PROCESSED BY: ${processedBy}`, 20, y);
 
-      // ==================== FOOTER - NOW DIRECTLY BELOW PROCESSED BY ====================
-      y += 10; // ← Small gap (you can change to 8 or 12 if needed)
+      y += 10;
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(9);
       doc.text(
@@ -1648,7 +1658,6 @@ export default function StaffDashboard() {
         align: 'center',
       });
 
-      // Save PDF
       const client = (order?.client_name || 'WALKIN').replace(
         /[^a-zA-Z0-9]/g,
         '_'
