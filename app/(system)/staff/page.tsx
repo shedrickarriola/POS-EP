@@ -1482,7 +1482,6 @@ export default function StaffDashboard() {
           quantity,
           unit_price,
           subtotal,
-          discount,           -- ← NOW PULLING REAL DISCOUNT
           lot_number,
           expiry_date,
           inventory (item_name)
@@ -1576,10 +1575,8 @@ export default function StaffDashboard() {
 
       items.forEach((item: any) => {
         const qty = Number(item.quantity || 1);
-        const unitPrice = Number(item.unit_price || 0);
-        const lineTotal = Number(item.subtotal || 0);
-        const discountAmount = Number(item.discount || 0); // ← REAL DISCOUNT FROM DB
-
+        const unitPrice = Number(item.unit_price || 0); // ← NOW USING unit_price
+        const lineTotal = Number(item.subtotal || 0); // ← Line total
         const itemName = (item.inventory?.item_name || '').trim();
         const lotNumber = (item.lot_number || '').trim();
         const expiryDate = item.expiry_date || '';
@@ -1622,10 +1619,10 @@ export default function StaffDashboard() {
           rowY += lineHeight;
         }
 
-        // CORRECT MONEY COLUMNS (2 decimal places)
-        doc.text(unitPrice.toFixed(2), 160, currentY, { align: 'right' }); // Amount = unit_price
-        doc.text(discountAmount.toFixed(2), 177, currentY, { align: 'right' }); // Discount from DB
-        doc.text(lineTotal.toFixed(2), 195, currentY, { align: 'right' }); // Total = subtotal
+        // CORRECTED COLUMNS
+        doc.text(unitPrice.toFixed(2), 160, currentY, { align: 'right' }); // ← Amount = unit_price
+        doc.text('0.00', 177, currentY, { align: 'right' });
+        doc.text(lineTotal.toFixed(2), 195, currentY, { align: 'right' }); // ← Total = subtotal
 
         grandTotal += lineTotal;
         itemCount += qty;
