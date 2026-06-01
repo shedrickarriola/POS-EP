@@ -82,7 +82,9 @@ export default function NewOrderPOS() {
   const [showSuccess, setShowSuccess] = useState(false);
   const [showTextPaste, setShowTextPaste] = useState(false);
   const [pastedText, setPastedText] = useState('');
-
+  const [priceErrors, setPriceErrors] = useState<Record<string, string>>({});
+  const [showPriceError, setShowPriceError] = useState(false);
+  const [priceErrorMessages, setPriceErrorMessages] = useState<string[]>([]);
   const [user, setUser] = useState<any>(null);
   const [isAdmin, setIsAdmin] = useState(false); // ← NEW: Admin check from profiles
   const [products, setProducts] = useState<Product[]>([]);
@@ -583,6 +585,39 @@ export default function NewOrderPOS() {
       return;
     }
     // === END TERMS VALIDATION ===
+
+    // === FINAL PRICE VALIDATION FOR OFFICE USE (NON-ADMIN STAFF) ===
+    // === FINAL PRICE VALIDATION FOR OFFICE USE (NON-ADMIN STAFF) ===
+    if (isOfficeUse && !isAdmin) {
+      const errors: string[] = [];
+
+      items.forEach((item) => {
+        if (!item.is_override || !item.product_id) return;
+
+        const buyCost = Number(item.buy_cost || 0);
+        const currentPrice = Number(item.price_piece);
+
+        if (buyCost <= 0) {
+          errors.push(
+            `${item.item_name}: Buy cost not set properly. Ask the Admin to recheck the product and set the proper Buy Cost.`
+          );
+        } else {
+          const minPrice = buyCost * 1.1;
+          if (currentPrice < minPrice) {
+            errors.push(`${item.item_name}: Price too low.`);
+          }
+        }
+      });
+
+      if (errors.length > 0) {
+        setPriceErrorMessages(errors);
+        setShowPriceError(true);
+        setLoading(false);
+        return;
+      }
+    }
+    // === END PRICE VALIDATION ===
+    // === END PRICE VALIDATION ===
 
     setLoading(true);
 
@@ -1373,11 +1408,11 @@ export default function NewOrderPOS() {
                         />
                       </td>
 
-                      {/* UNIT PRICE COLUMN - Improved alignment */}
+                      {/* UNIT PRICE COLUMN - Modal validation (no inline errors) */}
                       <td className="p-1.5 text-right">
                         <div className="flex items-center justify-end gap-1.5">
-                          {/* Price override lock - only for Office + Admin */}
-                          {isOfficeUse && isAdmin && (
+                          {/* Lock/Unlock - visible to ALL office staff */}
+                          {isOfficeUse && (
                             <button
                               onClick={() =>
                                 setItems(
@@ -1400,24 +1435,45 @@ export default function NewOrderPOS() {
 
                           <input
                             type="number"
-                            disabled={
-                              !item.is_override || !(isOfficeUse && isAdmin)
-                            }
+                            step="0.01"
+                            disabled={!item.is_override || !isOfficeUse}
                             value={item.price_piece}
-                            onChange={(e) =>
+                            onChange={(e) => {
+                              const newPrice = Number(e.target.value);
                               setItems(
                                 items.map((i) =>
                                   i.id === item.id
-                                    ? {
-                                        ...i,
-                                        price_piece: Number(e.target.value),
-                                      }
+                                    ? { ...i, price_piece: newPrice }
                                     : i
                                 )
-                              )
-                            }
+                              );
+                            }}
+                            onBlur={() => {
+                              if (!isOfficeUse || !item.is_override || isAdmin)
+                                return;
+
+                              const buyCost = Number(item.buy_cost || 0);
+                              const currentPrice = Number(item.price_piece);
+
+                              let errorMsg = '';
+
+                              if (buyCost <= 0) {
+                                errorMsg =
+                                  'Buy cost for this item is not set properly. Ask the Admin to recheck the product and set the proper buy_cost.';
+                              } else {
+                                const minPrice = buyCost * 1.1;
+                                if (currentPrice < minPrice) {
+                                  errorMsg = `Price too low.`;
+                                }
+                              }
+
+                              if (errorMsg) {
+                                setPriceErrorMessages([errorMsg]);
+                                setShowPriceError(true);
+                              }
+                            }}
                             className={`w-20 bg-transparent text-right font-bold outline-none text-emerald-400 transition-all ${
-                              item.is_override && isOfficeUse && isAdmin
+                              item.is_override && isOfficeUse
                                 ? 'border-b border-orange-500'
                                 : ''
                             }`}
@@ -1575,6 +1631,42 @@ export default function NewOrderPOS() {
           </button>
         </div>
       </main>
+
+      {/* PRICE ERROR MODAL */}
+      {showPriceError && (
+        <div className="fixed inset-0 z-[2500] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 border border-red-500/30 rounded-2xl w-full max-w-md p-6 text-center">
+            <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-red-500/10 flex items-center justify-center">
+              <AlertCircle size={28} className="text-red-400" />
+            </div>
+            <h2 className="text-xl font-black text-red-400 uppercase tracking-tight mb-2">
+              PRICE VALIDATION ERROR
+            </h2>
+            <p className="text-slate-300 mb-4">
+              The following price issue was detected:
+            </p>
+            <div className="bg-slate-950 border border-red-500/20 rounded-xl p-4 mb-6 text-left text-sm font-medium max-h-64 overflow-auto">
+              {priceErrorMessages.map((msg, i) => (
+                <div
+                  key={i}
+                  className="py-2 border-b border-white/10 last:border-none"
+                >
+                  • {msg}
+                </div>
+              ))}
+            </div>
+            <button
+              onClick={() => {
+                setShowPriceError(false);
+                setPriceErrorMessages([]);
+              }}
+              className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-sm"
+            >
+              OK — FIX PRICES
+            </button>
+          </div>
+        </div>
+      )}
       {/* EXPIRY ERROR MODAL */}
       {showExpiryError && (
         <div className="fixed inset-0 z-[2500] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
