@@ -22,6 +22,7 @@ import { parseInvoiceImage } from '@/app/actions/parseInvoice';
 // ====================== PRICE ANOMALY CONFIG ======================
 // Change this number if you want stricter/looser blocking
 const PRICE_ANOMALY_THRESHOLD = 3; // 3× = 300% higher than current selling price
+
 // =================================================================
 const EMPTY_ITEM = {
   inventory_id: '',
@@ -44,17 +45,25 @@ const EMPTY_ITEM = {
 
 const calculateMarkup = (
   type: string | null | undefined,
-  name: string | null | undefined
+  name: string | null | undefined,
+  isOfficeUse: boolean = false
 ): number => {
   const upperType = (type ?? 'GENERIC').toUpperCase();
   const lowerName = (name ?? '').toLowerCase();
 
+  // ====================== OFFICE USE BRANCH ======================
+  if (isOfficeUse) {
+    if (upperType === 'GENERIC') return 20;
+    if (upperType === 'BRANDED') return 5;
+    return 10; // fallback for any other type
+  }
+
+  // ====================== NORMAL PHARMACY BRANCH ======================
   // Rule 1: Generic is always 50%
   if (upperType === 'GENERIC') return 50;
 
   // Rule 2: Branded Logic
   if (upperType === 'BRANDED') {
-    // List of common medicine indicators
     const medicineKeywords = [
       'tab',
       'tablet',
@@ -66,7 +75,6 @@ const calculateMarkup = (
       'suspension',
     ];
 
-    // Check if the name contains any of these keywords
     const isMedicine = medicineKeywords.some((keyword) =>
       lowerName.includes(keyword)
     );
@@ -229,6 +237,7 @@ export default function NewPurchaseOrder() {
   const [poNumber, setPoNumber] = useState('');
   const [invoiceId, setInvoiceId] = useState('');
   const [items, setItems] = useState([{ ...EMPTY_ITEM }]);
+  const [isOfficeUse, setIsOfficeUse] = useState<boolean>(false);
   const [searchTerms, setSearchTerms] = useState<string[]>(['']);
   const [activeSearchIndex, setActiveSearchIndex] = useState<number | null>(
     null
@@ -308,6 +317,8 @@ export default function NewPurchaseOrder() {
       try {
         const parsedBranch = JSON.parse(savedBranch);
         const branchId = parsedBranch.id;
+        setCurrentBranchId(branchId);
+        setIsOfficeUse(!!parsedBranch.is_office_use);
 
         // Ensure branchId itself isn't null/undefined before state update
         if (branchId) {
@@ -395,7 +406,11 @@ export default function NewPurchaseOrder() {
         item.packaging_type = selected.packaging_type || 1;
 
         // AUTO-MARKUP based on type and name
-        item.markup = calculateMarkup(item.item_type, item.item_name);
+        item.markup = calculateMarkup(
+          item.item_type,
+          item.item_name,
+          isOfficeUse
+        );
         item.match_score = 0;
 
         // Sync search term
@@ -410,7 +425,11 @@ export default function NewPurchaseOrder() {
 
       // Re-calculate markup only when type or name changes manually
       if (field === 'item_name' || field === 'item_type') {
-        item.markup = calculateMarkup(item.item_type, item.item_name);
+        item.markup = calculateMarkup(
+          item.item_type,
+          item.item_name,
+          isOfficeUse
+        );
         if (field === 'item_name') {
           item.match_score = 999;
         }
@@ -609,7 +628,8 @@ export default function NewPurchaseOrder() {
 
               const markupVal = calculateMarkup(
                 matchedItem?.item_type || 'GENERIC',
-                finalName
+                finalName,
+                isOfficeUse
               );
 
               return {
