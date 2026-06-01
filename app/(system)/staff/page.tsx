@@ -45,6 +45,9 @@ export default function StaffDashboard() {
   const [dayPayments, setDayPayments] = useState<any[]>([]); // Remittances Table
   const [dayExpenses, setDayExpenses] = useState<any[]>([]); // Expenses Table
   const [last7DaysOrders, setLast7DaysOrders] = useState<any[]>([]); // ← NEW for calendar
+  // === NEW: Print Options Modal ===
+  const [showPrintOptionsModal, setShowPrintOptionsModal] = useState(false);
+  const [pendingPrintOrder, setPendingPrintOrder] = useState<any>(null);
   // Office Workflow Filters
   const [prepFilter, setPrepFilter] = useState({
     date: '',
@@ -1445,22 +1448,23 @@ export default function StaffDashboard() {
       alert('Failed to delete expense: ' + err.message);
     }
   };
-  const handlePrintOrder = async (orderId: string, orderNumber: string) => {
+  const handlePrintOrder = async (
+    orderId: string,
+    orderNumber: string,
+    withHeader: boolean = true
+  ) => {
     try {
-      // Update status
       await supabase
         .from('orders')
         .update({ status: 'FOR DELIVERY' })
         .eq('id', orderId);
 
-      // Fetch order
       const { data: order } = await supabase
         .from('orders')
         .select('*')
         .eq('id', orderId)
         .single();
 
-      // Get Processed By
       let processedBy = order?.created_by || 'Staff';
       if (order?.created_by) {
         const { data: profile } = await supabase
@@ -1471,7 +1475,6 @@ export default function StaffDashboard() {
         if (profile?.full_name) processedBy = profile.full_name;
       }
 
-      // Fetch items
       const { data: itemsData } = await supabase
         .from('order_items')
         .select(
@@ -1487,101 +1490,142 @@ export default function StaffDashboard() {
         .eq('order_id', orderId);
 
       const items = itemsData || [];
-
       const { jsPDF } = await import('jspdf');
       const doc = new jsPDF('p', 'mm', 'a4');
 
       let y = 18;
 
-      // ==================== HEADER ====================
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(16);
-      doc.text('ECONO PHARMA TRADING', 105, y, { align: 'center' });
-      y += 6;
+      if (withHeader) {
+        // ==================== WITH HEADERS (unchanged) ====================
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(16);
+        doc.text('ECONO PHARMA TRADING', 105, y, { align: 'center' });
+        y += 6;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        doc.text(
+          'Unit A-3 Regalena Bldg., 9049 National Highway, Brgy. Turbina, Calamba Laguna',
+          105,
+          y,
+          { align: 'center' }
+        );
+        y += 5;
+        doc.text('Frederick SJ Arriola - (Proprietor)', 105, y, {
+          align: 'center',
+        });
+        y += 5;
+        doc.text('NON VAT TIN# 110-194-523-000', 105, y, { align: 'center' });
+        y += 12;
 
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(9);
-      doc.text(
-        'Unit A-3 Regalena Bldg., 9049 National Highway, Brgy. Turbina, Calamba Laguna',
-        105,
-        y,
-        { align: 'center' }
-      );
-      y += 5;
-      doc.text('Frederick SJ Arriola - (Proprietor)', 105, y, {
-        align: 'center',
-      });
-      y += 5;
-      doc.text('NON VAT TIN# 110-194-523-000', 105, y, { align: 'center' });
-      y += 12;
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(14);
+        doc.text('DELIVERY RECEIPT', 105, y, { align: 'center' });
+        y += 10;
 
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(14);
-      doc.text('DELIVERY RECEIPT', 105, y, { align: 'center' });
-      y += 10;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+        doc.text(`SALES ORDER #: ${orderNumber}`, 20, y);
+        doc.text(`DATE: ${new Date().toLocaleDateString('en-US')}`, 145, y);
+        y += 7;
+        doc.text(`CUSTOMER: ${order?.client_name || 'WALK-IN'}`, 20, y);
+        y += 7;
+        doc.text(`ADDRESS: ${order?.address || ''}`, 20, y);
+        y += 10;
+      } else {
+        // ==================== WITHOUT HEADERS - ONLY VALUES + INDENTED ====================
+        y = 42; // ← Top blank space (change if needed)
 
-      // Order Info
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(10);
-      doc.text(`SALES ORDER #: ${orderNumber}`, 20, y);
-      doc.text(`DATE: ${new Date().toLocaleDateString('en-US')}`, 145, y);
-      y += 7;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
 
-      doc.text(`CUSTOMER: ${order?.client_name || 'WALK-IN'}`, 20, y);
-      y += 7;
-      doc.text(`ADDRESS: ${order?.address || ''}`, 20, y);
-      y += 10;
+        doc.text(`${orderNumber}`, 20, y); // ← INDENTED SO#
+        doc.text(`${new Date().toLocaleDateString('en-US')}`, 165, y);
+        y += 7;
 
-      // ==================== TABLE HEADER ====================
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      doc.text('Qty', 18, y);
-      doc.text('Unit', 25, y);
-      doc.text('Lot No.', 32, y);
-      doc.text('Expiry', 42, y);
-      doc.text('Particulars', 82, y);
-      doc.text('Amount', 160, y, { align: 'right' });
-      doc.text('Discount', 177, y, { align: 'right' });
-      doc.text('Total', 195, y, { align: 'right' });
+        doc.text(`${order?.client_name || 'WALK-IN'}`, 45, y); // ← INDENTED Customer
+        y += 7;
 
-      y += 4;
-      doc.setLineWidth(0.3);
-      doc.line(18, y, 195, y); // ← SHORTER LINE (now ends at Total column)
-      y += 6;
+        doc.text(`${order?.address || ''}`, 45, y); // ← INDENTED Address
+        y += 14;
+      }
 
-      // ==================== TABLE ROWS ====================
+      // Table header only for WITH HEADERS
+      if (withHeader) {
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9);
+        doc.text('Qty', 18, y);
+        doc.text('Unit', 25, y);
+        doc.text('Lot No.', 32, y);
+        doc.text('Expiry', 55, y);
+        doc.text('Particulars', 80, y);
+        doc.text('Amount', 160, y, { align: 'right' });
+        doc.text('Discount', 177, y, { align: 'right' });
+        doc.text('Total', 195, y, { align: 'right' });
+
+        y += 4;
+        doc.setLineWidth(0.3);
+        doc.line(18, y, 195, y);
+        y += 6;
+      }
+
+      // ==================== ITEM ROWS WITH WRAPPING ====================
       let itemCount = 0;
       let grandTotal = 0;
+      let currentY = y;
 
       items.forEach((item: any) => {
         const qty = Number(item.quantity || 1);
         const amount = Number(item.subtotal || 0);
+        const itemName = (item.inventory?.item_name || '').trim();
+        const lotNumber = (item.lot_number || '').trim();
+        const expiryDate = item.expiry_date || '';
 
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(9);
+        const lotMaxWidth = 36;
+        const particularsMaxWidth = 68;
 
-        doc.text(String(qty), 18, y);
-        doc.text('1s', 25, y);
-        doc.text(item.lot_number || '', 32, y);
-        doc.text(item.expiry_date || '', 42, y);
-        doc.text((item.inventory?.item_name || '').substring(0, 48), 82, y);
+        const itemNameLines = itemName
+          ? doc.splitTextToSize(itemName, particularsMaxWidth)
+          : [''];
+        const lotLines = lotNumber
+          ? doc.splitTextToSize(lotNumber, lotMaxWidth)
+          : [''];
 
-        doc.text(amount.toFixed(2), 160, y, { align: 'right' });
-        doc.text('0.00', 177, y, { align: 'right' });
-        doc.text(amount.toFixed(2), 195, y, { align: 'right' });
+        const numLines = Math.max(itemNameLines.length, lotLines.length, 1);
+        const lineHeight = 6.5;
+        let rowY = currentY;
+
+        for (let i = 0; i < numLines; i++) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(9);
+
+          if (i === 0) {
+            doc.text(String(qty), 18, rowY);
+            doc.text('1s', 25, rowY);
+            if (expiryDate) doc.text(expiryDate, 55, rowY);
+          }
+          if (lotLines[i]) doc.text(lotLines[i], 32, rowY);
+          if (itemNameLines[i]) doc.text(itemNameLines[i], 80, rowY);
+
+          rowY += lineHeight;
+        }
+
+        doc.text(amount.toFixed(2), 160, currentY, { align: 'right' });
+        doc.text('0.00', 177, currentY, { align: 'right' });
+        doc.text(amount.toFixed(2), 195, currentY, { align: 'right' });
 
         grandTotal += amount;
         itemCount += qty;
-        y += 6.5;
+        currentY += lineHeight * numLines + 1;
       });
 
-      // ==================== SUMMARY ====================
+      y = currentY;
+
+      // Summary + Footer
       y += 8;
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(11);
       doc.text('ITEMS', 20, y);
       doc.text(String(itemCount), 48, y);
-
       doc.text('TOTAL', 160, y, { align: 'right' });
       doc.text(grandTotal.toFixed(2), 195, y, { align: 'right' });
 
@@ -1589,7 +1633,20 @@ export default function StaffDashboard() {
       doc.setFontSize(10);
       doc.text(`PROCESSED BY: ${processedBy}`, 20, y);
 
-      // Save
+      y += 25;
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.text(
+        'WE ONLY ACCEPT RETURN ITEM WITHIN 30 DAYS FROM PURCHASE',
+        105,
+        y,
+        { align: 'center' }
+      );
+      y += 5;
+      doc.text('STORE AT TEMPERATURE NOT EXCEEDING 30°C', 105, y, {
+        align: 'center',
+      });
+
       const client = (order?.client_name || 'WALKIN').replace(
         /[^a-zA-Z0-9]/g,
         '_'
@@ -2753,10 +2810,15 @@ export default function StaffDashboard() {
                           <div className="text-emerald-400 text-sm font-bold">
                             ₱{Number(order.total_amount).toLocaleString()}
                           </div>
+                          {/* Replace the old PRINT button with this */}
                           <button
-                            onClick={() =>
-                              handlePrintOrder(order.id, order.order_number)
-                            }
+                            onClick={() => {
+                              setPendingPrintOrder({
+                                id: order.id,
+                                order_number: order.order_number,
+                              });
+                              setShowPrintOptionsModal(true);
+                            }}
                             className="px-5 py-1 bg-amber-500 hover:bg-amber-400 text-white text-[10px] font-black rounded-lg whitespace-nowrap"
                           >
                             PRINT
@@ -2888,11 +2950,15 @@ export default function StaffDashboard() {
 
                           {/* Two smaller buttons side-by-side */}
                           <div className="flex gap-1.5">
-                            {/* REPRINT - same function as PRINT in Preparation table */}
+                            {/* Replace the old REPRINT button with this */}
                             <button
-                              onClick={() =>
-                                handlePrintOrder(order.id, order.order_number)
-                              }
+                              onClick={() => {
+                                setPendingPrintOrder({
+                                  id: order.id,
+                                  order_number: order.order_number,
+                                });
+                                setShowPrintOptionsModal(true);
+                              }}
                               className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-white text-[9px] font-black rounded-lg whitespace-nowrap transition-colors"
                             >
                               REPRINT
@@ -3494,6 +3560,65 @@ export default function StaffDashboard() {
                   );
                 });
               })()}
+            </div>
+          </div>
+        )}
+
+        {/* ==================== PRINT OPTIONS MODAL ==================== */}
+        {showPrintOptionsModal && pendingPrintOrder && (
+          <div className="fixed inset-0 z-[3000] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+            <div className="bg-slate-900 border border-white/10 rounded-3xl w-full max-w-md p-6">
+              <h2 className="text-lg font-black text-amber-400 uppercase mb-1">
+                DELIVERY RECEIPT
+              </h2>
+              <p className="text-slate-400 mb-6">
+                Order{' '}
+                <span className="font-bold text-white">
+                  {pendingPrintOrder.order_number}
+                </span>
+              </p>
+
+              <div className="grid grid-cols-1 gap-3">
+                <button
+                  onClick={async () => {
+                    setShowPrintOptionsModal(false);
+                    await handlePrintOrder(
+                      pendingPrintOrder.id,
+                      pendingPrintOrder.order_number,
+                      true
+                    );
+                    setPendingPrintOrder(null);
+                  }}
+                  className="py-4 bg-white text-slate-900 font-black uppercase rounded-2xl hover:bg-emerald-500 hover:text-white transition-all"
+                >
+                  WITH HEADERS
+                </button>
+
+                <button
+                  onClick={async () => {
+                    setShowPrintOptionsModal(false);
+                    await handlePrintOrder(
+                      pendingPrintOrder.id,
+                      pendingPrintOrder.order_number,
+                      false
+                    );
+                    setPendingPrintOrder(null);
+                  }}
+                  className="py-4 bg-slate-800 text-white font-black uppercase rounded-2xl hover:bg-slate-700 transition-all"
+                >
+                  WITHOUT HEADERS (for pre-printed DR)
+                </button>
+              </div>
+
+              <button
+                onClick={() => {
+                  setShowPrintOptionsModal(false);
+                  setPendingPrintOrder(null);
+                }}
+                className="mt-4 w-full py-3 text-slate-400 hover:text-white text-sm font-medium"
+              >
+                Cancel
+              </button>
             </div>
           </div>
         )}
