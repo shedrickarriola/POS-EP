@@ -44,6 +44,19 @@ export default function StaffDashboard() {
   const [dayOrders, setDayOrders] = useState<any[]>([]); // Daily Sales Table
   const [dayPayments, setDayPayments] = useState<any[]>([]); // Remittances Table
   const [dayExpenses, setDayExpenses] = useState<any[]>([]); // Expenses Table
+  // === NEW: Legacy / Standalone Payments (order_id = null) ===
+  const [legacyPayments, setLegacyPayments] = useState<any[]>([]);
+  // === NEW: Standalone / Legacy Payment Modal (for old POS) ===
+  const [showAddStandalonePaymentModal, setShowAddStandalonePaymentModal] =
+    useState(false);
+  const [standalonePayment, setStandalonePayment] = useState({
+    customer_name: '',
+    amount: 0,
+    payment_method: 'CASH' as 'CASH' | 'CHEQUE' | 'ONLINE',
+    cheque_date: '',
+    notes: '',
+    pr_number: '',
+  });
   const [last7DaysOrders, setLast7DaysOrders] = useState<any[]>([]); // ← NEW for calendar
   // === NEW: Print Options Modal ===
   const [showPrintOptionsModal, setShowPrintOptionsModal] = useState(false);
@@ -114,7 +127,7 @@ export default function StaffDashboard() {
     useState<any>(null);
   const [paymentAmount, setPaymentAmount] = useState<number>(0);
   const [paymentMethodModal, setPaymentMethodModal] = useState<
-    'CASH' | 'CHEQUE'
+    'CASH' | 'CHEQUE' | 'ONLINE'
   >('CASH');
   const [chequeDateModal, setChequeDateModal] = useState<string>('');
   const [collectionNotes, setCollectionNotes] = useState<string>('');
@@ -300,6 +313,66 @@ export default function StaffDashboard() {
     }
   };
 
+  // === NEW: Handle Standalone / Legacy Payment (no order linked) ===
+  const handleAddStandalonePayment = async () => {
+    if (standalonePayment.amount <= 0) {
+      triggerToast('Amount is required', 'error');
+      return;
+    }
+    if (
+      standalonePayment.payment_method === 'ONLINE' &&
+      (!standalonePayment.notes || standalonePayment.notes.trim() === '')
+    ) {
+      triggerToast(
+        'Reference number / Notes is REQUIRED for ONLINE payments',
+        'error'
+      );
+      return;
+    }
+
+    try {
+      const today = new Date().toISOString().split('T')[0];
+
+      const { error } = await supabase.from('daily_payments').insert([
+        {
+          branch_id: selectedBranch.id,
+          report_date: today,
+          customer_name:
+            standalonePayment.customer_name.trim() || 'LEGACY PAYMENT',
+          amount: standalonePayment.amount,
+          payment_method: standalonePayment.payment_method,
+          cheque_date:
+            standalonePayment.payment_method === 'CHEQUE'
+              ? standalonePayment.cheque_date || null
+              : null,
+          notes: standalonePayment.notes || '',
+          pr_number: standalonePayment.pr_number.trim() || null,
+          order_id: null, // ← No order linked
+        },
+      ]);
+
+      if (error) throw error;
+
+      triggerToast('Standalone payment recorded successfully', 'success');
+
+      // Reset and close
+      setShowAddStandalonePaymentModal(false);
+      setStandalonePayment({
+        customer_name: '',
+        amount: 0,
+        payment_method: 'CASH',
+        cheque_date: '',
+        notes: '',
+        pr_number: '',
+      });
+
+      // Refresh view
+      if (selectedBranch?.is_office_use)
+        await fetchOfficeOrders(selectedBranch.id);
+    } catch (err: any) {
+      triggerToast(`Failed to record payment: ${err.message}`, 'error');
+    }
+  };
   const handleSaveSingleRow = async (branchId: string) => {
     if (!currentWeekStart) return;
 
@@ -1044,7 +1117,7 @@ export default function StaffDashboard() {
         .eq('created_date_pht', dateStr)
         .order('order_number', { ascending: true });
 
-      // 2. ALL PAYMENTS made on this day (original query)
+      // 2. ALL PAYMENTS made on this day
       const { data: paymentsData } = await supabase
         .from('daily_payments')
         .select(
@@ -1072,17 +1145,22 @@ export default function StaffDashboard() {
         .eq('report_date', dateStr)
         .order('created_at', { ascending: true });
 
-      // Split payments (same as before)
+      // === LEGACY / STANDALONE PAYMENTS (order_id IS NULL) ===
+      const legacyPaymentsRaw =
+        paymentsData?.filter((p: any) => !p.order_id || p.order_id === null) ||
+        [];
+
+      // Regular payments (exclude legacy)
       const sameDayPaymentsRaw =
         paymentsData?.filter((p: any) => {
           const orderDate = p.orders?.created_date_pht;
-          return orderDate === dateStr;
+          return orderDate === dateStr && p.order_id;
         }) || [];
 
       const previousPaymentsRaw =
         paymentsData?.filter((p: any) => {
           const orderDate = p.orders?.created_date_pht;
-          return orderDate && orderDate !== dateStr;
+          return orderDate && orderDate !== dateStr && p.order_id;
         }) || [];
 
       // 3. Collect all unique client_names for lookup
@@ -1091,8 +1169,10 @@ export default function StaffDashboard() {
         ...(ordersData || []),
         ...sameDayPaymentsRaw,
         ...previousPaymentsRaw,
+        ...legacyPaymentsRaw,
       ].forEach((item) => {
-        const name = item.client_name || item.orders?.client_name;
+        const name =
+          item.client_name || item.orders?.client_name || item.customer_name;
         if (name) clientNames.add(name);
       });
 
@@ -1118,7 +1198,7 @@ export default function StaffDashboard() {
         },
       }));
 
-      // 6. Enrich payments
+      // 6. Enrich regular payments
       const enrichedSameDay = sameDayPaymentsRaw.map((p: any) => ({
         ...p,
         orders: p.orders
@@ -1143,12 +1223,19 @@ export default function StaffDashboard() {
           : null,
       }));
 
+      // === Enrich legacy payments ===
+      const enrichedLegacy = legacyPaymentsRaw.map((p: any) => ({
+        ...p,
+        orders: null,
+      }));
+
       // Final state updates
       setDayOrders(enrichedOrders);
       setSameDayPayments(enrichedSameDay);
       setDayPayments(enrichedPrevious);
+      setLegacyPayments(enrichedLegacy); // ←←← IMPORTANT
 
-      // 7. EXPENSES (unchanged)
+      // 7. EXPENSES
       const { data: expensesData } = await supabase
         .from('daily_expenses')
         .select('*')
@@ -1161,7 +1248,6 @@ export default function StaffDashboard() {
       console.error('Failed to fetch day details:', err);
     }
   };
-
   // === OFFICE USE - FETCH 3 TABLES ===
   const fetchOfficeOrders = async (branchId: string) => {
     if (!branchId) return;
@@ -1290,6 +1376,18 @@ export default function StaffDashboard() {
   const handleCollectPayment = async () => {
     if (!selectedCollectionOrder || paymentAmount <= 0) return;
 
+    // ←←← NEW: Require reference/notes for ONLINE payments
+    if (
+      paymentMethodModal === 'ONLINE' &&
+      (!collectionNotes || collectionNotes.trim() === '')
+    ) {
+      triggerToast(
+        'Reference number / Notes is REQUIRED for ONLINE payments',
+        'error'
+      );
+      return;
+    }
+
     try {
       const currentRemaining = Number(
         selectedCollectionOrder.remaining_balance || 0
@@ -1369,7 +1467,7 @@ export default function StaffDashboard() {
 
       if (paymentError) console.warn('daily_payments warning:', paymentError);
 
-      // ✅ SUCCESS TOAST (replaces old alert)
+      // ✅ SUCCESS TOAST
       triggerToast(
         isFullyPaid
           ? `✅ Full payment recorded. Order marked as COMPLETED.`
@@ -1387,7 +1485,6 @@ export default function StaffDashboard() {
 
       await fetchOfficeOrders(selectedBranch.id);
     } catch (err: any) {
-      // ❌ ERROR TOAST (replaces old alert)
       triggerToast(`❌ Failed to record payment: ${err.message}`, 'error');
     }
   };
@@ -1730,32 +1827,22 @@ export default function StaffDashboard() {
     y += 14;
 
     // ====================== SUMMARY ======================
-    doc.setFontSize(12);
-    doc.setFont('helvetica', 'bold');
-    doc.text('SUMMARY', 20, y);
-    y += 7;
+    // Legacy payments are now treated as REMITTANCES
+    const allDailyPayments = [...(sameDayPayments || [])];
+    const allRemittances = [...(dayPayments || []), ...(legacyPayments || [])];
 
-    doc.setFontSize(9);
-    doc.setFont('helvetica', 'normal');
-
-    const dailyCash = sameDayPayments
+    const dailyCash = allDailyPayments
       .filter((p: any) => p.payment_method === 'CASH')
       .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
-    const dailyCheque = sameDayPayments
+    const dailyCheque = allDailyPayments
       .filter((p: any) => p.payment_method === 'CHEQUE')
       .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
 
-    const remCash = dayPayments
-      .filter(
-        (p: any) =>
-          !p.orders?.clients?.is_office_account && p.payment_method === 'CASH'
-      )
+    const remCash = allRemittances
+      .filter((p: any) => p.payment_method === 'CASH')
       .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
-    const remCheque = dayPayments
-      .filter(
-        (p: any) =>
-          !p.orders?.clients?.is_office_account && p.payment_method === 'CHEQUE'
-      )
+    const remCheque = allRemittances
+      .filter((p: any) => p.payment_method === 'CHEQUE')
       .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
     const remTotal = remCash + remCheque;
 
@@ -1768,6 +1855,14 @@ export default function StaffDashboard() {
       0
     );
     const actualCash = totalCash - totalExpenses;
+
+    doc.setFontSize(12);
+    doc.setFont('helvetica', 'bold');
+    doc.text('SUMMARY', 20, y);
+    y += 7;
+
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
 
     doc.text(`Daily Sales Cash : PHP ${dailyCash.toLocaleString()}`, 20, y);
     doc.text(
@@ -1870,7 +1965,7 @@ export default function StaffDashboard() {
         [...new Set(group.cheque_dates)].join(', ').substring(0, 18) || '—';
 
       doc.text(group.client_name.substring(0, 22), 18, y);
-      doc.text(soList, 45, y, { maxWidth: 28 }); // SO# wraps early
+      doc.text(soList, 45, y, { maxWidth: 28 });
       doc.text(drList, 68, y, { maxWidth: 20 });
       doc.text(prList, 95, y, { maxWidth: 20 });
       doc.text(`PHP ${group.cash.toLocaleString()}`, 125, y, {
@@ -1885,7 +1980,7 @@ export default function StaffDashboard() {
         align: 'right',
       });
 
-      y += 6.5; // ← increased spacing so wrapped lines don't overlap next row
+      y += 6.5;
 
       if (y > 275) {
         doc.addPage();
@@ -1986,6 +2081,89 @@ export default function StaffDashboard() {
 
     y += 15;
 
+    // ====================== LEGACY / STANDALONE PAYMENTS ======================
+    if (legacyPayments.length > 0) {
+      doc.setFontSize(11);
+      doc.setFont('helvetica', 'bold');
+      doc.text('LEGACY / STANDALONE PAYMENTS (Old POS)', 20, y);
+      y += 8;
+
+      doc.setFontSize(9);
+      doc.text('CUSTOMER', 20, y);
+      doc.text('AMOUNT', 95, y, { align: 'right' });
+      doc.text('METHOD', 125, y);
+      doc.text('PR#', 155, y);
+      doc.text('NOTES', 180, y);
+      y += 7;
+
+      legacyPayments.forEach((p: any) => {
+        if (y > 275) {
+          doc.addPage();
+          y = 20;
+        }
+        doc.setFont('helvetica', 'normal');
+        doc.text((p.customer_name || '—').substring(0, 35), 20, y);
+        doc.text(`PHP ${Number(p.amount).toLocaleString()}`, 95, y, {
+          align: 'right',
+        });
+        doc.text(p.payment_method, 125, y);
+        doc.text(p.pr_number || '—', 155, y);
+        doc.text((p.notes || '—').substring(0, 40), 180, y);
+        y += 7;
+      });
+      y += 15;
+    }
+
+    // ====================== ONLINE PAYMENTS TABLE ======================
+    const allOnline = [
+      ...sameDayPayments.filter((p: any) => p.payment_method === 'ONLINE'),
+      ...dayPayments.filter((p: any) => p.payment_method === 'ONLINE'),
+    ];
+
+    if (allOnline.length > 0) {
+      doc.setFontSize(11);
+      doc.setFont('helvetica', 'bold');
+      doc.text('ONLINE PAYMENTS', 20, y);
+      y += 8;
+
+      doc.setFontSize(9);
+      doc.text('CLIENT NAME', 20, y);
+      doc.text('SO#', 68, y);
+      doc.text('DR#', 88, y);
+      doc.text('PR#', 108, y);
+      doc.text('AMOUNT', 135, y, { align: 'right' });
+      doc.text('METHOD', 160, y);
+      doc.text('REFERENCE / NOTES', 180, y);
+      y += 7;
+
+      allOnline.forEach((payment: any) => {
+        if (y > 275) {
+          doc.addPage();
+          y = 20;
+        }
+        const order = payment.orders || {};
+        doc.setFont('helvetica', 'normal');
+        doc.text(
+          (payment.customer_name || order.client_name || '—').substring(0, 28),
+          20,
+          y
+        );
+        doc.text(order.order_number || '—', 68, y);
+        doc.text(order.dr_number || '—', 88, y);
+        doc.text(payment.pr_number || order.pr_number || '—', 108, y);
+        doc.text(
+          `PHP ${Number(payment.amount || 0).toLocaleString()}`,
+          135,
+          y,
+          { align: 'right' }
+        );
+        doc.text('ONLINE', 160, y);
+        doc.text((payment.notes || '—').substring(0, 35), 180, y);
+        y += 7;
+      });
+      y += 15;
+    }
+
     // ====================== EXPENSES ======================
     doc.setFontSize(11);
     doc.setFont('helvetica', 'bold');
@@ -1994,6 +2172,10 @@ export default function StaffDashboard() {
 
     doc.setFontSize(8);
     dayExpenses.forEach((exp: any) => {
+      if (y > 275) {
+        doc.addPage();
+        y = 20;
+      }
       doc.text(exp.expense_name || '—', 20, y);
       doc.text(`PHP ${Number(exp.amount || 0).toLocaleString()}`, 195, y, {
         align: 'right',
@@ -2009,6 +2191,7 @@ export default function StaffDashboard() {
 
     triggerToast('Modern daily report PDF downloaded', 'success');
   };
+
   const handleBranchSelect = async (branch: any) => {
     setSelectedBranch(branch);
     localStorage.setItem('active_branch', JSON.stringify(branch));
@@ -2994,11 +3177,22 @@ export default function StaffDashboard() {
                 </div>
               </div>
 
-              {/* ====================== 3. FOR COLLECTION (Past Due + Compact Clear) ====================== */}
+              {/* ====================== 3. FOR COLLECTION ====================== */}
               <div className="bg-slate-900/40 border border-purple-500/30 rounded-3xl p-4 flex flex-col h-full">
-                <h4 className="font-black text-purple-400 text-sm mb-3">
-                  💰 FOR COLLECTION
-                </h4>
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="font-black text-purple-400 text-sm">
+                    💰 FOR COLLECTION
+                  </h4>
+
+                  {/* COMPACT ADD PAYMENT BUTTON */}
+                  <button
+                    onClick={() => setShowAddStandalonePaymentModal(true)}
+                    className="flex items-center gap-1 px-2 py-1 text-[10px] font-black bg-purple-600 hover:bg-purple-500 text-white rounded-lg transition-colors active:scale-95"
+                  >
+                    <Plus size={12} />
+                    LEGACY PAYMENT
+                  </button>
+                </div>
 
                 <div className="flex gap-2 mb-3">
                   <div className="grid grid-cols-3 gap-2 flex-1">
@@ -3062,7 +3256,6 @@ export default function StaffDashboard() {
                     </select>
                   </div>
 
-                  {/* Past Due Button - Now smaller */}
                   <button
                     onClick={() =>
                       setShowOverdueCollection(!showOverdueCollection)
@@ -3073,10 +3266,9 @@ export default function StaffDashboard() {
                         : 'bg-slate-800 hover:bg-red-500/10 hover:text-red-400 text-slate-400'
                     }`}
                   >
-                    {showOverdueCollection ? 'PAST DUE' : 'PAST DUE'}
+                    PAST DUE
                   </button>
 
-                  {/* Clear Button - Smaller with X icon */}
                   <button
                     onClick={() => {
                       setCollectionFilter({ date: '', client: '', agent: '' });
@@ -3744,7 +3936,7 @@ export default function StaffDashboard() {
                 {/* ==================== OVERVIEW TAB ==================== */}
                 {dayTab === 'overview' && (
                   <>
-                    {/* 1. LARGE DAILY SALES CARDS - adjusted for 6-7 digits */}
+                    {/* 1. LARGE DAILY SALES CARDS */}
                     <div>
                       <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-6">
                         DAILY SALES (totals exclude office accounts. It can be
@@ -3836,215 +4028,227 @@ export default function StaffDashboard() {
                       </div>
                     </div>
 
-                    {/* 2. SUMMARY ROW - FIXED: DAILY SALES Cash/Cheque now exclude OFFICE ACCOUNTS */}
-                    <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-                      {/* DAILY SALES - NOW CONSISTENT */}
-                      <div className="bg-slate-950 rounded-3xl p-6 text-center border border-emerald-500/30">
-                        <div className="text-emerald-400 text-xs font-black uppercase tracking-widest mb-2">
-                          DAILY SALES
-                        </div>
-                        <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-white mb-4">
-                          ₱
-                          {(dayOrders || [])
-                            .filter((o: any) => !o.clients?.is_office_account)
-                            .reduce(
-                              (sum, o) => sum + Number(o.total_amount || 0),
-                              0
-                            )
-                            .toLocaleString()}
-                        </div>
-                        <div className="text-xs space-y-1">
-                          <div className="flex justify-between">
-                            <span className="text-emerald-400">Cash</span>
-                            <span>
-                              ₱
-                              {sameDayPayments
-                                .filter(
-                                  (p: any) =>
-                                    !p.orders?.clients?.is_office_account &&
-                                    p.payment_method === 'CASH'
-                                )
-                                .reduce(
-                                  (sum, p) => sum + Number(p.amount || 0),
-                                  0
-                                )
-                                .toLocaleString()}
-                            </span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-purple-400">Cheque</span>
-                            <span>
-                              ₱
-                              {sameDayPayments
-                                .filter(
-                                  (p: any) =>
-                                    !p.orders?.clients?.is_office_account &&
-                                    p.payment_method === 'CHEQUE'
-                                )
-                                .reduce(
-                                  (sum, p) => sum + Number(p.amount || 0),
-                                  0
-                                )
-                                .toLocaleString()}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
+                    {/* 2. SUMMARY ROW - Cash and Online SEPARATED */}
+                    {/* Legacy payments now added to REMITTANCES (as requested) */}
+                    {(() => {
+                      const allDailyPayments = [...(sameDayPayments || [])]; // only linked today's orders
+                      const allRemittances = [
+                        ...(dayPayments || []),
+                        ...(legacyPayments || []),
+                      ]; // legacy + previous payments
 
-                      {/* REMITTANCES (unchanged - already correct) */}
-                      <div className="bg-slate-950 rounded-3xl p-6 text-center border border-cyan-500/30">
-                        <div className="text-cyan-400 text-xs font-black uppercase tracking-widest mb-2">
-                          REMITTANCES
-                        </div>
-                        <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-white mb-4">
-                          ₱
-                          {(dayPayments || [])
-                            .filter(
-                              (p: any) => !p.orders?.clients?.is_office_account
-                            )
-                            .reduce((sum, p) => sum + Number(p.amount || 0), 0)
-                            .toLocaleString()}
-                        </div>
-                        <div className="text-xs space-y-1">
-                          <div className="flex justify-between">
-                            <span className="text-emerald-400">Cash</span>
-                            <span>
+                      const dailyCash = allDailyPayments
+                        .filter((p: any) => p.payment_method === 'CASH')
+                        .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+                      const dailyOnline = allDailyPayments
+                        .filter((p: any) => p.payment_method === 'ONLINE')
+                        .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+                      const dailyCheque = allDailyPayments
+                        .filter((p: any) => p.payment_method === 'CHEQUE')
+                        .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+                      const remCash = allRemittances
+                        .filter((p: any) => p.payment_method === 'CASH')
+                        .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+                      const remOnline = allRemittances
+                        .filter((p: any) => p.payment_method === 'ONLINE')
+                        .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+                      const remCheque = allRemittances
+                        .filter((p: any) => p.payment_method === 'CHEQUE')
+                        .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+                      return (
+                        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+                          {/* DAILY SALES - does NOT include legacy */}
+                          <div className="bg-slate-950 rounded-3xl p-6 text-center border border-emerald-500/30">
+                            <div className="text-emerald-400 text-xs font-black uppercase tracking-widest mb-2">
+                              DAILY SALES
+                            </div>
+                            <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-white mb-4">
                               ₱
-                              {dayPayments
+                              {(dayOrders || [])
+                                .filter(
+                                  (o: any) => !o.clients?.is_office_account
+                                )
+                                .reduce(
+                                  (sum, o) => sum + Number(o.total_amount || 0),
+                                  0
+                                )
+                                .toLocaleString()}
+                            </div>
+                            <div className="text-xs space-y-1">
+                              <div className="flex justify-between">
+                                <span className="text-emerald-400">Cash</span>
+                                <span>₱{dailyCash.toLocaleString()}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-sky-400">Online</span>
+                                <span>₱{dailyOnline.toLocaleString()}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-purple-400">Cheque</span>
+                                <span>₱{dailyCheque.toLocaleString()}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* REMITTANCES - NOW INCLUDES LEGACY PAYMENTS */}
+                          <div className="bg-slate-950 rounded-3xl p-6 text-center border border-cyan-500/30">
+                            <div className="text-cyan-400 text-xs font-black uppercase tracking-widest mb-2">
+                              REMITTANCES
+                            </div>
+                            <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-white mb-4">
+                              ₱
+                              {allRemittances
                                 .filter(
                                   (p: any) =>
-                                    !p.orders?.clients?.is_office_account &&
-                                    p.payment_method === 'CASH'
+                                    !p.orders?.clients?.is_office_account
                                 )
                                 .reduce(
                                   (sum, p) => sum + Number(p.amount || 0),
                                   0
                                 )
                                 .toLocaleString()}
-                            </span>
+                            </div>
+                            <div className="text-xs space-y-1">
+                              <div className="flex justify-between">
+                                <span className="text-emerald-400">Cash</span>
+                                <span>₱{remCash.toLocaleString()}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-sky-400">Online</span>
+                                <span>₱{remOnline.toLocaleString()}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-purple-400">Cheque</span>
+                                <span>₱{remCheque.toLocaleString()}</span>
+                              </div>
+                            </div>
                           </div>
-                          <div className="flex justify-between">
-                            <span className="text-purple-400">Cheque</span>
-                            <span>
+
+                          {/* TOTAL PAYMENTS */}
+                          <div className="bg-slate-950 rounded-3xl p-6 text-center border border-amber-500/50">
+                            <div className="text-amber-400 text-xs font-black uppercase tracking-widest mb-2">
+                              TOTAL PAYMENTS
+                            </div>
+                            <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-white mb-4">
                               ₱
-                              {dayPayments
+                              {[...allDailyPayments, ...allRemittances]
                                 .filter(
                                   (p: any) =>
-                                    !p.orders?.clients?.is_office_account &&
-                                    p.payment_method === 'CHEQUE'
+                                    !p.orders?.clients?.is_office_account
                                 )
                                 .reduce(
                                   (sum, p) => sum + Number(p.amount || 0),
                                   0
                                 )
                                 .toLocaleString()}
-                            </span>
+                            </div>
+                            <div className="text-xs space-y-1">
+                              <div className="flex justify-between">
+                                <span className="text-emerald-400">Cash</span>
+                                <span>
+                                  ₱
+                                  {[...allDailyPayments, ...allRemittances]
+                                    .filter(
+                                      (p: any) =>
+                                        !p.orders?.clients?.is_office_account &&
+                                        p.payment_method === 'CASH'
+                                    )
+                                    .reduce(
+                                      (sum, p) => sum + Number(p.amount || 0),
+                                      0
+                                    )
+                                    .toLocaleString()}
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-sky-400">Online</span>
+                                <span>
+                                  ₱
+                                  {[...allDailyPayments, ...allRemittances]
+                                    .filter(
+                                      (p: any) =>
+                                        !p.orders?.clients?.is_office_account &&
+                                        p.payment_method === 'ONLINE'
+                                    )
+                                    .reduce(
+                                      (sum, p) => sum + Number(p.amount || 0),
+                                      0
+                                    )
+                                    .toLocaleString()}
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-purple-400">Cheque</span>
+                                <span>
+                                  ₱
+                                  {[...allDailyPayments, ...allRemittances]
+                                    .filter(
+                                      (p: any) =>
+                                        !p.orders?.clients?.is_office_account &&
+                                        p.payment_method === 'CHEQUE'
+                                    )
+                                    .reduce(
+                                      (sum, p) => sum + Number(p.amount || 0),
+                                      0
+                                    )
+                                    .toLocaleString()}
+                                </span>
+                              </div>
+                            </div>
                           </div>
-                        </div>
-                      </div>
 
-                      {/* TOTAL PAYMENTS (unchanged - already correct) */}
-                      <div className="bg-slate-950 rounded-3xl p-6 text-center border border-amber-500/50">
-                        <div className="text-amber-400 text-xs font-black uppercase tracking-widest mb-2">
-                          TOTAL PAYMENTS
-                        </div>
-                        <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-white mb-4">
-                          ₱
-                          {[...(sameDayPayments || []), ...(dayPayments || [])]
-                            .filter(
-                              (p: any) => !p.orders?.clients?.is_office_account
-                            )
-                            .reduce((sum, p) => sum + Number(p.amount || 0), 0)
-                            .toLocaleString()}
-                        </div>
-                        <div className="text-xs space-y-1">
-                          <div className="flex justify-between">
-                            <span className="text-emerald-400">Cash</span>
-                            <span>
+                          {/* EXPENSES */}
+                          <div className="bg-slate-950 rounded-3xl p-6 text-center border border-red-500/30">
+                            <div className="text-red-400 text-xs font-black uppercase tracking-widest mb-2">
+                              EXPENSES
+                            </div>
+                            <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-red-400">
                               ₱
-                              {[
-                                ...(sameDayPayments || []),
-                                ...(dayPayments || []),
-                              ]
-                                .filter(
-                                  (p: any) =>
-                                    !p.orders?.clients?.is_office_account &&
-                                    p.payment_method === 'CASH'
-                                )
+                              {(dayExpenses || [])
                                 .reduce(
-                                  (sum, p) => sum + Number(p.amount || 0),
+                                  (sum, exp) => sum + Number(exp.amount || 0),
                                   0
                                 )
                                 .toLocaleString()}
-                            </span>
+                            </div>
                           </div>
-                          <div className="flex justify-between">
-                            <span className="text-purple-400">Cheque</span>
-                            <span>
+
+                          {/* ACTUAL CASH */}
+                          <div className="bg-slate-950 rounded-3xl p-6 text-center border border-emerald-500">
+                            <div className="text-emerald-400 text-xs font-black uppercase tracking-widest mb-2">
+                              ACTUAL CASH
+                            </div>
+                            <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-emerald-400">
                               ₱
-                              {[
-                                ...(sameDayPayments || []),
-                                ...(dayPayments || []),
-                              ]
-                                .filter(
-                                  (p: any) =>
-                                    !p.orders?.clients?.is_office_account &&
-                                    p.payment_method === 'CHEQUE'
-                                )
-                                .reduce(
-                                  (sum, p) => sum + Number(p.amount || 0),
+                              {(
+                                [...allDailyPayments, ...allRemittances]
+                                  .filter(
+                                    (p: any) =>
+                                      !p.orders?.clients?.is_office_account &&
+                                      p.payment_method === 'CASH'
+                                  )
+                                  .reduce(
+                                    (sum, p) => sum + Number(p.amount || 0),
+                                    0
+                                  ) -
+                                (dayExpenses || []).reduce(
+                                  (sum, exp) => sum + Number(exp.amount || 0),
                                   0
                                 )
-                                .toLocaleString()}
-                            </span>
+                              ).toLocaleString()}
+                            </div>
                           </div>
                         </div>
-                      </div>
+                      );
+                    })()}
 
-                      {/* EXPENSES (unchanged) */}
-                      <div className="bg-slate-950 rounded-3xl p-6 text-center border border-red-500/30">
-                        <div className="text-red-400 text-xs font-black uppercase tracking-widest mb-2">
-                          EXPENSES
-                        </div>
-                        <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-red-400">
-                          ₱
-                          {(dayExpenses || [])
-                            .reduce(
-                              (sum, exp) => sum + Number(exp.amount || 0),
-                              0
-                            )
-                            .toLocaleString()}
-                        </div>
-                      </div>
-
-                      {/* ACTUAL CASH (unchanged) */}
-                      <div className="bg-slate-950 rounded-3xl p-6 text-center border border-emerald-500">
-                        <div className="text-emerald-400 text-xs font-black uppercase tracking-widest mb-2">
-                          ACTUAL CASH
-                        </div>
-                        <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter leading-none text-emerald-400">
-                          ₱
-                          {(
-                            [...(sameDayPayments || []), ...(dayPayments || [])]
-                              .filter(
-                                (p: any) =>
-                                  !p.orders?.clients?.is_office_account &&
-                                  p.payment_method === 'CASH'
-                              )
-                              .reduce(
-                                (sum, p) => sum + Number(p.amount || 0),
-                                0
-                              ) -
-                            (dayExpenses || []).reduce(
-                              (sum, exp) => sum + Number(exp.amount || 0),
-                              0
-                            )
-                          ).toLocaleString()}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* 3. DAILY SALES TABLE (unchanged - already correct) */}
+                    {/* 3. DAILY SALES TABLE */}
                     <div>
                       <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">
                         DAILY SALES TABLE
@@ -4066,7 +4270,7 @@ export default function StaffDashboard() {
                                 PR#
                               </th>
                               <th className="text-right p-4 font-black text-slate-400">
-                                CASH
+                                CASH / ONLINE
                               </th>
                               <th className="text-right p-4 font-black text-slate-400">
                                 CHECK
@@ -4183,7 +4387,7 @@ export default function StaffDashboard() {
                       </div>
                     </div>
 
-                    {/* 4. REMITTANCES / PAYMENTS TABLE (unchanged) */}
+                    {/* 4. REMITTANCES / PAYMENTS TABLE - FIXED: Now shows standalone payments */}
                     <div>
                       <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">
                         REMITTANCES / PAYMENTS
@@ -4205,7 +4409,7 @@ export default function StaffDashboard() {
                                 PR#
                               </th>
                               <th className="text-right p-4 font-black text-slate-400">
-                                CASH
+                                CASH / ONLINE
                               </th>
                               <th className="text-right p-4 font-black text-slate-400">
                                 CHECK
@@ -4226,17 +4430,29 @@ export default function StaffDashboard() {
                           </thead>
                           <tbody className="divide-y divide-white/10 text-slate-300">
                             {(() => {
-                              const grouped = dayPayments.reduce(
+                              // Use all payments from dayPayments (includes standalone with order_id = null)
+                              const allPayments = [...(dayPayments || [])];
+
+                              const grouped = allPayments.reduce(
                                 (acc: any, p: any) => {
-                                  const key =
-                                    p.order_id ||
-                                    (p.orders && p.orders.id) ||
-                                    Math.random();
-                                  if (!acc[key])
+                                  // For standalone payments (no order), use a unique key
+                                  let key =
+                                    'standalone-' + (p.id || Math.random());
+
+                                  if (p.order_id) {
+                                    key =
+                                      p.order_id ||
+                                      (p.orders && p.orders.id) ||
+                                      Math.random();
+                                  }
+
+                                  if (!acc[key]) {
                                     acc[key] = {
                                       order: p.orders || {},
                                       payments: [],
+                                      isStandalone: !p.order_id,
                                     };
+                                  }
                                   acc[key].payments.push(p);
                                   return acc;
                                 },
@@ -4245,17 +4461,21 @@ export default function StaffDashboard() {
 
                               const rows = Object.values(grouped).map(
                                 (group: any) => {
-                                  const order = group.order;
                                   const payments = group.payments;
+                                  const order = group.order || {};
+
                                   const cashAmount = payments
                                     .filter(
-                                      (p: any) => p.payment_method === 'CASH'
+                                      (p: any) =>
+                                        p.payment_method === 'CASH' ||
+                                        p.payment_method === 'ONLINE'
                                     )
                                     .reduce(
                                       (sum: number, p: any) =>
                                         sum + Number(p.amount || 0),
                                       0
                                     );
+
                                   const chequeAmount = payments
                                     .filter(
                                       (p: any) => p.payment_method === 'CHEQUE'
@@ -4265,6 +4485,7 @@ export default function StaffDashboard() {
                                         sum + Number(p.amount || 0),
                                       0
                                     );
+
                                   const displayPrNumber =
                                     payments
                                       .map((p: any) => p.pr_number?.trim())
@@ -4272,6 +4493,7 @@ export default function StaffDashboard() {
                                       .join(', ') ||
                                     order.pr_number ||
                                     '—';
+
                                   const displayChequeDate =
                                     payments
                                       .filter(
@@ -4288,6 +4510,11 @@ export default function StaffDashboard() {
                                     chequeAmount,
                                     displayPrNumber,
                                     displayChequeDate,
+                                    isStandalone: group.isStandalone,
+                                    customer_name:
+                                      payments[0]?.customer_name ||
+                                      order.client_name ||
+                                      'LEGACY PAYMENT',
                                   };
                                 }
                               );
@@ -4300,12 +4527,13 @@ export default function StaffDashboard() {
                                     row.cashAmount + row.chequeAmount;
 
                                   return (
-                                    <tr key={row.id || i}>
+                                    <tr key={i}>
                                       <td className="p-4">
-                                        {row.client_name || '—'}
+                                        {row.customer_name}
                                       </td>
                                       <td className="p-4 text-center font-mono">
-                                        {row.order_number || '—'}
+                                        {row.order_number ||
+                                          (row.isStandalone ? '—' : '—')}
                                       </td>
                                       <td className="p-4 text-center">
                                         {row.dr_number || '—'}
@@ -4352,8 +4580,172 @@ export default function StaffDashboard() {
                         </table>
                       </div>
                     </div>
+                    {/* 5. ONLINE PAYMENTS TABLE */}
+                    <div>
+                      <h3 className="text-xs font-black uppercase tracking-widest text-sky-400 mb-4 flex items-center gap-2">
+                        ONLINE PAYMENTS
+                      </h3>
+                      <div className="bg-slate-950 rounded-3xl overflow-hidden">
+                        <table className="w-full text-sm">
+                          <thead className="bg-slate-900 border-b border-white/10">
+                            <tr>
+                              <th className="text-left p-4 font-black text-slate-400">
+                                CLIENT NAME
+                              </th>
+                              <th className="text-center p-4 font-black text-slate-400">
+                                SO#
+                              </th>
+                              <th className="text-center p-4 font-black text-slate-400">
+                                DR#
+                              </th>
+                              <th className="text-center p-4 font-black text-slate-400">
+                                PR#
+                              </th>
+                              <th className="text-right p-4 font-black text-slate-400">
+                                AMOUNT
+                              </th>
+                              <th className="text-center p-4 font-black text-slate-400">
+                                METHOD
+                              </th>
+                              <th className="text-left p-4 font-black text-slate-400">
+                                REFERENCE / NOTES
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-white/10 text-slate-300">
+                            {(() => {
+                              const allOnline = [
+                                ...sameDayPayments.filter(
+                                  (p: any) => p.payment_method === 'ONLINE'
+                                ),
+                                ...dayPayments.filter(
+                                  (p: any) => p.payment_method === 'ONLINE'
+                                ),
+                              ];
 
-                    {/* 5. EXPENSES TABLE (unchanged) */}
+                              if (allOnline.length === 0) {
+                                return (
+                                  <tr className="text-slate-400">
+                                    <td className="p-4" colSpan={7}>
+                                      No online payments recorded for this day
+                                    </td>
+                                  </tr>
+                                );
+                              }
+
+                              return allOnline.map(
+                                (payment: any, index: number) => {
+                                  const order = payment.orders || {};
+                                  return (
+                                    <tr key={payment.id || index}>
+                                      <td className="p-4">
+                                        {payment.customer_name ||
+                                          order.client_name ||
+                                          '—'}
+                                      </td>
+                                      <td className="p-4 text-center font-mono">
+                                        {order.order_number || '—'}
+                                      </td>
+                                      <td className="p-4 text-center">
+                                        {order.dr_number || '—'}
+                                      </td>
+                                      <td className="p-4 text-center font-mono text-amber-300">
+                                        {payment.pr_number ||
+                                          order.pr_number ||
+                                          '—'}
+                                      </td>
+                                      <td className="p-4 text-right font-bold text-sky-400">
+                                        ₱
+                                        {Number(
+                                          payment.amount || 0
+                                        ).toLocaleString()}
+                                      </td>
+                                      <td className="p-4 text-center">
+                                        <span className="px-3 py-1 bg-sky-500/10 text-sky-400 text-xs font-bold rounded-full">
+                                          ONLINE
+                                        </span>
+                                      </td>
+                                      <td className="p-4 text-sm text-sky-300 font-medium">
+                                        {payment.notes?.trim() || '—'}
+                                      </td>
+                                    </tr>
+                                  );
+                                }
+                              );
+                            })()}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                    {/* LEGACY / STANDALONE PAYMENTS (Old POS) - Matching header style */}
+                    {legacyPayments.length > 0 && (
+                      <div className="mt-8">
+                        <h3 className="text-xs font-black uppercase tracking-widest text-purple-400 mb-4 flex items-center gap-2">
+                          LEGACY / STANDALONE PAYMENTS (Old POS)
+                        </h3>
+
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <thead className="bg-slate-900 border-b border-white/10">
+                              <tr>
+                                <th className="text-left p-4 font-black text-slate-400">
+                                  CUSTOMER
+                                </th>
+                                <th className="text-right p-4 font-black text-slate-400">
+                                  AMOUNT
+                                </th>
+                                <th className="text-center p-4 font-black text-slate-400">
+                                  METHOD
+                                </th>
+                                <th className="text-center p-4 font-black text-slate-400">
+                                  PR#
+                                </th>
+                                <th className="text-left p-4 font-black text-slate-400">
+                                  NOTES
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-white/10">
+                              {legacyPayments.map((payment: any) => (
+                                <tr
+                                  key={payment.id}
+                                  className="hover:bg-white/5"
+                                >
+                                  <td className="p-4 font-medium">
+                                    {payment.customer_name}
+                                  </td>
+                                  <td className="p-4 text-right font-mono text-emerald-400">
+                                    ₱{Number(payment.amount).toLocaleString()}
+                                  </td>
+                                  <td className="p-4 text-center">
+                                    <span
+                                      className={`inline-flex items-center px-3 py-1 text-xs font-bold rounded-2xl 
+                  ${
+                    payment.payment_method === 'CASH'
+                      ? 'bg-emerald-500/20 text-emerald-300'
+                      : payment.payment_method === 'CHEQUE'
+                      ? 'bg-amber-500/20 text-amber-300'
+                      : 'bg-purple-500/20 text-purple-300'
+                  }`}
+                                    >
+                                      {payment.payment_method}
+                                    </span>
+                                  </td>
+                                  <td className="p-4 text-center font-mono text-amber-300">
+                                    {payment.pr_number || '—'}
+                                  </td>
+                                  <td className="p-4 text-sm text-slate-400">
+                                    {payment.notes || '—'}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 6. EXPENSES TABLE */}
                     <div>
                       <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">
                         EXPENSES
@@ -5023,6 +5415,191 @@ export default function StaffDashboard() {
         )}
         {/* ================================================================== */}
         {/* ================================================================== */}
+
+        {/* ==================== STANDALONE / LEGACY ADD PAYMENT MODAL ==================== */}
+        {showAddStandalonePaymentModal && (
+          <div className="fixed inset-0 z-[3100] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+            <div className="bg-slate-900 border border-white/10 rounded-2xl w-full max-w-md p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-lg font-black text-purple-400 uppercase tracking-tight">
+                  ADD STANDALONE PAYMENT
+                </h2>
+                <button
+                  onClick={() => setShowAddStandalonePaymentModal(false)}
+                  className="text-slate-500 hover:text-white"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                {/* Customer Name */}
+                <div>
+                  <label className="text-xs font-black text-slate-400 mb-2 block">
+                    CUSTOMER NAME
+                  </label>
+                  <input
+                    type="text"
+                    value={standalonePayment.customer_name}
+                    onChange={(e) =>
+                      setStandalonePayment({
+                        ...standalonePayment,
+                        customer_name: e.target.value,
+                      })
+                    }
+                    className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-white outline-none"
+                    placeholder="Enter customer name"
+                  />
+                </div>
+
+                {/* PR# (Payment Receipt Number) - Dedicated field */}
+                <div>
+                  <label className="text-xs font-black text-slate-400 mb-2 block">
+                    PR# (Payment Receipt Number)
+                  </label>
+                  <input
+                    type="text"
+                    value={standalonePayment.pr_number}
+                    onChange={(e) =>
+                      setStandalonePayment({
+                        ...standalonePayment,
+                        pr_number: e.target.value,
+                      })
+                    }
+                    className="w-full bg-slate-950 border border-white/10 rounded-2xl px-5 py-4 text-xl font-mono outline-none focus:border-purple-400"
+                    placeholder="Enter PR#"
+                  />
+                </div>
+
+                {/* Payment Method */}
+                <div>
+                  <label className="text-xs font-black text-slate-400 mb-2 block">
+                    PAYMENT METHOD
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      onClick={() =>
+                        setStandalonePayment({
+                          ...standalonePayment,
+                          payment_method: 'CASH',
+                        })
+                      }
+                      className={`py-3 rounded-xl font-bold text-sm ${
+                        standalonePayment.payment_method === 'CASH'
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+                      }`}
+                    >
+                      CASH
+                    </button>
+                    <button
+                      onClick={() =>
+                        setStandalonePayment({
+                          ...standalonePayment,
+                          payment_method: 'CHEQUE',
+                        })
+                      }
+                      className={`py-3 rounded-xl font-bold text-sm ${
+                        standalonePayment.payment_method === 'CHEQUE'
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+                      }`}
+                    >
+                      CHEQUE
+                    </button>
+                    <button
+                      onClick={() =>
+                        setStandalonePayment({
+                          ...standalonePayment,
+                          payment_method: 'ONLINE',
+                        })
+                      }
+                      className={`py-3 rounded-xl font-bold text-sm ${
+                        standalonePayment.payment_method === 'ONLINE'
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+                      }`}
+                    >
+                      ONLINE
+                    </button>
+                  </div>
+                </div>
+
+                {/* Amount */}
+                <div>
+                  <label className="text-xs font-black text-slate-400 mb-2 block">
+                    AMOUNT
+                  </label>
+                  <input
+                    type="number"
+                    value={standalonePayment.amount}
+                    onChange={(e) =>
+                      setStandalonePayment({
+                        ...standalonePayment,
+                        amount: parseFloat(e.target.value) || 0,
+                      })
+                    }
+                    step="0.01"
+                    className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3 text-xl font-mono outline-none"
+                    placeholder="0.00"
+                  />
+                </div>
+
+                {/* Cheque Date */}
+                {standalonePayment.payment_method === 'CHEQUE' && (
+                  <div>
+                    <label className="text-xs font-black text-slate-400 mb-2 block">
+                      CHEQUE DATE
+                    </label>
+                    <input
+                      type="date"
+                      value={standalonePayment.cheque_date}
+                      onChange={(e) =>
+                        setStandalonePayment({
+                          ...standalonePayment,
+                          cheque_date: e.target.value,
+                        })
+                      }
+                      className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3"
+                    />
+                  </div>
+                )}
+
+                {/* Reference / Notes */}
+                <div>
+                  <label className="text-xs font-black text-slate-400 mb-2 block">
+                    {standalonePayment.payment_method === 'ONLINE'
+                      ? 'REFERENCE NUMBER / NOTES (required)'
+                      : 'NOTES'}
+                  </label>
+                  <textarea
+                    value={standalonePayment.notes}
+                    onChange={(e) =>
+                      setStandalonePayment({
+                        ...standalonePayment,
+                        notes: e.target.value,
+                      })
+                    }
+                    className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3 h-24 resize-none"
+                    placeholder={
+                      standalonePayment.payment_method === 'ONLINE'
+                        ? 'Enter reference / transaction ID...'
+                        : 'Additional notes...'
+                    }
+                  />
+                </div>
+
+                <button
+                  onClick={handleAddStandalonePayment}
+                  disabled={standalonePayment.amount <= 0}
+                  className="w-full py-4 bg-purple-600 hover:bg-purple-500 disabled:bg-slate-700 text-white font-black text-sm uppercase tracking-widest rounded-xl"
+                >
+                  RECORD STANDALONE PAYMENT
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {/* Add Product Modal */}
         {showAddModal && (
           <div className="fixed inset-0 z- flex items-center justify-center p-6">
@@ -5585,6 +6162,20 @@ export default function StaffDashboard() {
                     selectedCollectionOrder.remaining_balance || 0
                   ).toLocaleString()}
                 </p>
+
+                {/* PAY FULL BUTTON */}
+                <button
+                  onClick={() => {
+                    const balance = Number(
+                      selectedCollectionOrder.remaining_balance || 0
+                    );
+                    const rounded = parseFloat(balance.toFixed(2));
+                    setPaymentAmount(rounded);
+                  }}
+                  className="mt-4 w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-sm uppercase tracking-widest rounded-xl shadow-lg transition-all active:scale-[0.98]"
+                >
+                  💰 PAY FULL BALANCE
+                </button>
               </div>
 
               <div className="space-y-4">
@@ -5602,31 +6193,42 @@ export default function StaffDashboard() {
                     autoFocus
                   />
                 </div>
-                {/* Payment Method */}
+
+                {/* Payment Method - 3 options */}
                 <div>
                   <label className="text-xs font-black text-slate-500 block mb-2">
                     PAYMENT METHOD
                   </label>
-                  <div className="flex gap-2">
+                  <div className="grid grid-cols-3 gap-2">
                     <button
                       onClick={() => setPaymentMethodModal('CASH')}
-                      className={`flex-1 py-3 rounded-xl font-bold text-sm ${
+                      className={`py-3 rounded-xl font-bold text-sm transition-all ${
                         paymentMethodModal === 'CASH'
-                          ? 'bg-emerald-600 text-white'
-                          : 'bg-slate-800 text-slate-400'
+                          ? 'bg-emerald-600 text-white shadow-inner'
+                          : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
                       }`}
                     >
                       CASH
                     </button>
                     <button
                       onClick={() => setPaymentMethodModal('CHEQUE')}
-                      className={`flex-1 py-3 rounded-xl font-bold text-sm ${
+                      className={`py-3 rounded-xl font-bold text-sm transition-all ${
                         paymentMethodModal === 'CHEQUE'
-                          ? 'bg-emerald-600 text-white'
-                          : 'bg-slate-800 text-slate-400'
+                          ? 'bg-emerald-600 text-white shadow-inner'
+                          : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
                       }`}
                     >
                       CHEQUE
+                    </button>
+                    <button
+                      onClick={() => setPaymentMethodModal('ONLINE')}
+                      className={`py-3 rounded-xl font-bold text-sm transition-all ${
+                        paymentMethodModal === 'ONLINE'
+                          ? 'bg-emerald-600 text-white shadow-inner'
+                          : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+                      }`}
+                    >
+                      ONLINE
                     </button>
                   </div>
                 </div>
@@ -5642,12 +6244,13 @@ export default function StaffDashboard() {
                     onChange={(e) =>
                       setPaymentAmount(parseFloat(e.target.value) || 0)
                     }
+                    step="0.01"
                     className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3 text-xl font-mono outline-none"
                     placeholder="0.00"
                   />
                 </div>
 
-                {/* Cheque Date */}
+                {/* Cheque Date - only for CHEQUE */}
                 {paymentMethodModal === 'CHEQUE' && (
                   <div>
                     <label className="text-xs font-black text-slate-500 block mb-2">
@@ -5662,16 +6265,22 @@ export default function StaffDashboard() {
                   </div>
                 )}
 
-                {/* Notes */}
+                {/* REFERENCE / NOTES - now clearly labeled as Reference for ONLINE */}
                 <div>
-                  <label className="text-xs font-black text-slate-500 block mb-2">
-                    NOTES
+                  <label className="block text-xs font-black text-slate-400 mb-2">
+                    {paymentMethodModal === 'ONLINE'
+                      ? 'REFERENCE NUMBER / NOTES (required)'
+                      : 'REFERENCE / NOTES'}
                   </label>
                   <textarea
                     value={collectionNotes}
                     onChange={(e) => setCollectionNotes(e.target.value)}
-                    className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3 h-20 resize-none"
-                    placeholder="Additional notes..."
+                    className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3 h-24 resize-none"
+                    placeholder={
+                      paymentMethodModal === 'ONLINE'
+                        ? 'Enter reference number, transaction ID, or notes...'
+                        : 'Additional notes...'
+                    }
                   />
                 </div>
 
