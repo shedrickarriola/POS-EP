@@ -1482,6 +1482,7 @@ export default function StaffDashboard() {
           quantity,
           unit_price,
           subtotal,
+          discount,           -- ← NOW PULLING REAL DISCOUNT
           lot_number,
           expiry_date,
           inventory (item_name)
@@ -1568,22 +1569,24 @@ export default function StaffDashboard() {
         y += 6;
       }
 
-      // ==================== ITEM ROWS WITH EXPIRY MAX WIDTH ====================
+      // ==================== ITEM ROWS ====================
       let itemCount = 0;
       let grandTotal = 0;
       let currentY = y;
 
       items.forEach((item: any) => {
         const qty = Number(item.quantity || 1);
-        const amount = Number(item.subtotal || 0);
+        const unitPrice = Number(item.unit_price || 0);
+        const lineTotal = Number(item.subtotal || 0);
+        const discountAmount = Number(item.discount || 0); // ← REAL DISCOUNT FROM DB
+
         const itemName = (item.inventory?.item_name || '').trim();
         const lotNumber = (item.lot_number || '').trim();
         const expiryDate = item.expiry_date || '';
 
-        // ==================== CHANGE THESE VALUES ====================
-        const lotMaxWidth = 32; // Lot# max width before wrapping
-        const expiryMaxWidth = 38; // ←←← EXPIRY DATE MAX WIDTH (this is what you asked for)
-        const particularsMaxWidth = 68; // Item name max width
+        const lotMaxWidth = 32;
+        const expiryMaxWidth = 38;
+        const particularsMaxWidth = 68;
 
         const itemNameLines = itemName
           ? doc.splitTextToSize(itemName, particularsMaxWidth)
@@ -1611,20 +1614,20 @@ export default function StaffDashboard() {
           if (i === 0) {
             doc.text(String(qty), 18, rowY);
             doc.text('1s', 25, rowY);
+            if (expiryDate) doc.text(expiryLines[i] || expiryDate, 52, rowY);
           }
-
           if (lotLines[i]) doc.text(lotLines[i], 33, rowY);
-          if (expiryLines[i]) doc.text(expiryLines[i], 52, rowY); // Expiry now wraps
           if (itemNameLines[i]) doc.text(itemNameLines[i], 78, rowY);
 
           rowY += lineHeight;
         }
 
-        doc.text(amount.toFixed(2), 160, currentY, { align: 'right' });
-        doc.text('0.00', 177, currentY, { align: 'right' });
-        doc.text(amount.toFixed(2), 195, currentY, { align: 'right' });
+        // CORRECT MONEY COLUMNS (2 decimal places)
+        doc.text(unitPrice.toFixed(2), 160, currentY, { align: 'right' }); // Amount = unit_price
+        doc.text(discountAmount.toFixed(2), 177, currentY, { align: 'right' }); // Discount from DB
+        doc.text(lineTotal.toFixed(2), 195, currentY, { align: 'right' }); // Total = subtotal
 
-        grandTotal += amount;
+        grandTotal += lineTotal;
         itemCount += qty;
         currentY += lineHeight * numLines + 1;
       });
