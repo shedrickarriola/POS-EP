@@ -41,6 +41,9 @@ const EMPTY_ITEM = {
   // === NEW: Price anomaly safeguard ===
   price_anomaly: false,
   price_ratio: 1,
+  // === NEW for Office Use branches only: Lot & Expiry batch tracking ===
+  lot_number: '',
+  expiry_date: '',
 };
 
 const calculateMarkup = (
@@ -197,13 +200,24 @@ const findBestInventoryMatch = (aiName: string, inventoryList: any[]) => {
 
   return { bestMatch, score: bestScore };
 };
-const TableSkeleton = () => (
+const TableSkeleton = ({ isOfficeUse = false }: { isOfficeUse?: boolean }) => (
   <>
     {[...Array(5)].map((_, i) => (
       <tr key={i} className="animate-pulse border-b border-white/5">
         <td className="px-1">
           <div className="h-10 bg-white/5 rounded-lg w-full" />
         </td>
+        {/* Extra columns for Office Use: Lot# + Expiry (only rendered when needed) */}
+        {isOfficeUse && (
+          <>
+            <td className="px-1">
+              <div className="h-8 bg-white/5 rounded-lg w-full mx-auto" />
+            </td>
+            <td className="px-1">
+              <div className="h-8 bg-white/5 rounded-lg w-full mx-auto" />
+            </td>
+          </>
+        )}
         <td className="px-1">
           <div className="h-10 bg-white/5 rounded-lg w-full" />
         </td>
@@ -247,6 +261,31 @@ export default function NewPurchaseOrder() {
   const [finalBrandedAmt, setFinalBrandedAmt] = useState(0);
   const [showPriceError, setShowPriceError] = useState(false);
   const [priceErrorItems, setPriceErrorItems] = useState<any[]>([]);
+
+  // === NEW: Modern modal for missing Lot# / Expiry in Office Use mode (no old alert()) ===
+  const [showLotExpiryError, setShowLotExpiryError] = useState(false);
+  const [lotExpiryErrorItems, setLotExpiryErrorItems] = useState<any[]>([]);
+
+  // Helper: Returns tomorrow's date in YYYY-MM-DD format (for restricting expiry input to future dates only)
+  const getTomorrowDateString = (): string => {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    return tomorrow.toISOString().split('T')[0];
+  };
+
+  // Returns a clear, specific reason why the item failed the Lot/Expiry check (for the modal)
+  const getLotExpiryIssue = (item: any): string => {
+    const hasLot = !!item.lot_number?.trim();
+    const hasExpiry = !!item.expiry_date;
+    const today = new Date().toISOString().split('T')[0];
+    const isFutureExpiry = hasExpiry && item.expiry_date > today;
+
+    if (!hasLot && !hasExpiry) return 'Missing Lot # and Expiry';
+    if (!hasLot) return 'Missing Lot #';
+    if (!hasExpiry) return 'Missing Expiry';
+    if (!isFutureExpiry) return 'Expiry must be a future date';
+    return 'Invalid entry';
+  };
 
   const getNextPoNumber = useCallback(async () => {
     // 1. Fetch the total count of all purchase orders in the system
@@ -417,6 +456,10 @@ export default function NewPurchaseOrder() {
         const newST = [...searchTerms];
         newST[index] = selected.item_name;
         setSearchTerms(newST);
+
+        // Reset lot/expiry when changing the mapped inventory item (new purchase batch)
+        item.lot_number = '';
+        item.expiry_date = '';
       }
       setActiveSearchIndex(null);
     } else {
@@ -709,6 +752,26 @@ export default function NewPurchaseOrder() {
     }
     // =====================================
 
+    // === OFFICE USE ONLY: Require Lot# and Expiry Date (future dates only) ===
+    if (isOfficeUse) {
+      const today = new Date().toISOString().split('T')[0];
+
+      const incomplete = items.filter((i) => {
+        const hasLot = !!i.lot_number?.trim();
+        const hasExpiry = !!i.expiry_date;
+        const isFutureExpiry = hasExpiry && i.expiry_date > today;
+
+        return !hasLot || !hasExpiry || !isFutureExpiry;
+      });
+
+      if (incomplete.length > 0) {
+        setLotExpiryErrorItems(incomplete);
+        setShowLotExpiryError(true);
+        return;
+      }
+    }
+    // ======================================================
+
     if (items.some((i) => !i.inventory_id))
       return alert('Some items are not matched to inventory.');
 
@@ -764,6 +827,40 @@ export default function NewPurchaseOrder() {
         console.error('RPC Error Details:', error);
         throw new Error(error.message || 'Failed to process purchase order');
       }
+
+      // === OFFICE USE ONLY: Save to item_details table for lot/expiry tracking ===
+      // Includes po_number so you can trace which PO a specific lot came from.
+      // This runs AFTER the main PO/inventory update succeeds.
+      // Regular drugstore branches skip this entirely.
+      if (isOfficeUse && currentBranchId) {
+        const detailsToInsert = items.map((item) => {
+          const totalUnits =
+            (Number(item.qty) || 0) * (Number(item.packaging_type) || 1);
+          return {
+            branch_id: currentBranchId,
+            po_number: poNumber,
+            item_name: item.item_name,
+            buy_cost: Number(item.buy_cost) || 0,
+            lot_number: item.lot_number?.trim() || null,
+            expiry_date: item.expiry_date || null,
+            stock: totalUnits,
+            current_stock: totalUnits,
+          };
+        });
+
+        const { error: detailsError } = await supabase
+          .from('item_details')
+          .insert(detailsToInsert);
+
+        if (detailsError) {
+          console.error(
+            'item_details insert failed (PO still succeeded):',
+            detailsError
+          );
+          // Non-blocking: PO is already recorded. Admin can investigate if needed.
+        }
+      }
+      // =============================================================================
 
       setFinalGenericAmt(splitTotals.generic);
       setFinalBrandedAmt(splitTotals.branded);
@@ -991,7 +1088,24 @@ export default function NewPurchaseOrder() {
             <table className="w-full text-left table-auto border-separate border-spacing-0">
               <thead className="bg-slate-950 text-slate-500 text-[10px] uppercase font-black sticky top-0 z-[10]">
                 <tr>
-                  <th className="p-5 min-w-[300px]">Inventory Item Mapping</th>
+                  {/* Shortened for Office Use so we can fit Lot# + Expiry columns without breaking regular drugstore view */}
+                  <th
+                    className={`p-5 ${
+                      isOfficeUse ? 'min-w-[220px]' : 'min-w-[300px]'
+                    }`}
+                  >
+                    Inventory Item Mapping
+                  </th>
+
+                  {/* === OFFICE USE ONLY: Lot & Expiry columns === */}
+                  {isOfficeUse && (
+                    <th className="p-5 text-center w-[110px]">Lot #</th>
+                  )}
+                  {isOfficeUse && (
+                    <th className="p-5 text-center w-[130px]">Expiry</th>
+                  )}
+                  {/* ============================================== */}
+
                   <th className="p-5 text-center w-[120px]">Type</th>
                   <th className="p-5 text-center w-[80px]">Qty</th>
                   <th className="p-5 text-center w-[80px]">Pack</th>
@@ -1016,7 +1130,7 @@ export default function NewPurchaseOrder() {
               </thead>
               <tbody className="divide-y divide-white/5">
                 {isScanning ? (
-                  <TableSkeleton />
+                  <TableSkeleton isOfficeUse={isOfficeUse} />
                 ) : (
                   items.map((item, idx) => {
                     const matchScore = item.match_score ?? 999;
@@ -1134,6 +1248,39 @@ export default function NewPurchaseOrder() {
                               </button>
                             )}
                         </td>
+
+                        {/* === OFFICE USE ONLY: Lot # and Expiry Date inputs === */}
+                        {isOfficeUse && (
+                          <td className="px-1">
+                            <input
+                              type="text"
+                              className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none uppercase"
+                              value={item.lot_number || ''}
+                              onChange={(e) =>
+                                updateItem(
+                                  idx,
+                                  'lot_number',
+                                  e.target.value.toUpperCase()
+                                )
+                              }
+                              placeholder="LOT#"
+                            />
+                          </td>
+                        )}
+                        {isOfficeUse && (
+                          <td className="px-1">
+                            <input
+                              type="date"
+                              min={getTomorrowDateString()}
+                              className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
+                              value={item.expiry_date || ''}
+                              onChange={(e) =>
+                                updateItem(idx, 'expiry_date', e.target.value)
+                              }
+                            />
+                          </td>
+                        )}
+                        {/* ========================================================== */}
 
                         <td className="px-1 text-center">
                           <button
@@ -1350,6 +1497,64 @@ export default function NewPurchaseOrder() {
               className="w-full bg-red-500 hover:bg-red-600 text-white font-black uppercase tracking-widest py-5 rounded-2xl transition-all active:scale-95"
             >
               GOT IT — I’LL FIX THE PRICES
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* === LOT / EXPIRY MISSING ERROR MODAL (Office Use only - modern, not old alert) === */}
+      {showLotExpiryError && (
+        <div className="fixed inset-0 z-[3000] flex items-center justify-center bg-slate-950/90 backdrop-blur-xl">
+          <div className="max-w-lg w-full bg-slate-900 border border-amber-500/30 rounded-3xl p-8 shadow-2xl">
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-10 h-10 bg-amber-500/10 rounded-2xl flex items-center justify-center">
+                <AlertCircle className="text-amber-400" size={28} />
+              </div>
+              <div>
+                <h2 className="text-2xl font-black text-amber-400 tracking-tighter">
+                  OFFICE USE — MISSING INFO
+                </h2>
+                <p className="text-slate-400 text-sm">
+                  Lot # and Expiry Date required
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-slate-950 rounded-2xl p-5 mb-8 border border-amber-500/20">
+              <p className="text-amber-400 text-sm font-bold mb-4">
+                {lotExpiryErrorItems.length} item(s) have incomplete or invalid
+                Lot # / Expiry information.
+              </p>
+              <ul className="space-y-3 text-sm max-h-64 overflow-y-auto">
+                {lotExpiryErrorItems.map((item, i) => (
+                  <li
+                    key={i}
+                    className="flex justify-between bg-white/5 px-4 py-3 rounded-xl"
+                  >
+                    <span className="font-bold text-white">
+                      {item.item_name || 'Unnamed Item'}
+                    </span>
+                    <span className="font-black text-amber-400 text-xs">
+                      {getLotExpiryIssue(item)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <p className="text-slate-400 text-center mb-8 leading-relaxed text-sm">
+              Please go back and fill in the <strong>Lot #</strong> and{' '}
+              <strong>Expiry Date</strong> columns for the items listed above.
+            </p>
+
+            <button
+              onClick={() => {
+                setShowLotExpiryError(false);
+                setLotExpiryErrorItems([]);
+              }}
+              className="w-full bg-amber-500 hover:bg-amber-600 text-white font-black uppercase tracking-widest py-5 rounded-2xl transition-all active:scale-95"
+            >
+              GOT IT — I’LL ADD THE LOT &amp; EXPIRY
             </button>
           </div>
         </div>

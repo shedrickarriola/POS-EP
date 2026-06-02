@@ -52,6 +52,14 @@ interface OrderLineItem {
   match_status?: 'exact' | 'fuzzy' | 'none';
   lot_number?: string;
   expiry_date?: string;
+  // === OFFICE USE: Available lots from item_details ===
+  lot_options?: Array<{
+    lot_number: string;
+    expiry_date: string;
+    current_stock: number;
+  }>;
+  selected_lot_stock?: number;
+  lot_locked?: boolean; // when true, lock lot# and expiry after selecting from dropdown
 }
 
 // --- LEVENSHTEIN DISTANCE UTILITY ---
@@ -99,6 +107,10 @@ export default function NewOrderPOS() {
   const [clientName, setClientName] = useState('WALK-IN'); // ← CHANGED: now defaults to WALK-IN
   const [showExpiryError, setShowExpiryError] = useState(false);
   const [invalidExpiryItems, setInvalidExpiryItems] = useState<string[]>([]);
+
+  // === NEW: Lot Stock Error Modal (better than alert) ===
+  const [showLotStockError, setShowLotStockError] = useState(false);
+  const [lotStockErrorMessage, setLotStockErrorMessage] = useState('');
   const [officeClients, setOfficeClients] = useState<
     {
       id: string;
@@ -417,6 +429,50 @@ export default function NewOrderPOS() {
       alert('Failed to save new client: ' + err.message);
     }
   };
+
+  // === OFFICE USE: Fetch available lots from item_details for a specific item ===
+  const fetchAvailableLots = async (itemName: string, rowIndex: number) => {
+    if (!isOfficeUse || !currentBranchId || !itemName) return;
+
+    try {
+      const today = new Date().toISOString().split('T')[0];
+
+      const { data, error } = await supabase
+        .from('item_details')
+        .select('lot_number, expiry_date, current_stock')
+        .eq('branch_id', currentBranchId)
+        .eq('item_name', itemName)
+        .gt('current_stock', 0)
+        .gte('expiry_date', today) // ← Exclude lots with past expiry dates
+        .order('expiry_date', { ascending: true });
+
+      if (error) throw error;
+
+      // Exclude lots already chosen in other rows of this order
+      const usedLots = items
+        .filter((_, idx) => idx !== rowIndex)
+        .map((i) => i.lot_number)
+        .filter(Boolean);
+
+      const filteredLots = (data || []).filter(
+        (lot) => !usedLots.includes(lot.lot_number)
+      );
+
+      // Update the specific row with available lot options
+      setItems((prevItems) =>
+        prevItems.map((item, idx) =>
+          idx === rowIndex
+            ? {
+                ...item,
+                lot_options: filteredLots,
+              }
+            : item
+        )
+      );
+    } catch (err: any) {
+      console.error('Error fetching available lots:', err);
+    }
+  };
   useEffect(() => {
     const initPage = async () => {
       try {
@@ -564,6 +620,11 @@ export default function NewOrderPOS() {
     newSearchTerms[idx] = '';
     setSearchTerms(newSearchTerms);
     setActiveSearchIndex(null);
+
+    // === OFFICE USE: Load available lots from item_details ===
+    if (isOfficeUse) {
+      fetchAvailableLots(product.item_name, idx);
+    }
   };
 
   const [confirmedSONumber, setConfirmedSONumber] = useState<string>('');
@@ -617,7 +678,35 @@ export default function NewOrderPOS() {
       }
     }
     // === END PRICE VALIDATION ===
-    // === END PRICE VALIDATION ===
+
+    // === OFFICE USE: Validate lot stock before submitting ===
+    if (isOfficeUse) {
+      for (const item of items) {
+        if (!item.product_id || !item.lot_number) continue;
+
+        // Re-fetch latest stock for this lot to be safe
+        const { data: lotData } = await supabase
+          .from('item_details')
+          .select('current_stock')
+          .eq('branch_id', currentBranchId)
+          .eq('item_name', item.item_name)
+          .eq('lot_number', item.lot_number)
+          .eq('expiry_date', item.expiry_date)
+          .single();
+
+        const latestStock = lotData?.current_stock ?? 0;
+
+        if (item.qty > latestStock) {
+          setLotStockErrorMessage(
+            `Cannot proceed with this order.\n\nLot# ${item.lot_number} (Expiry: ${item.expiry_date})\nfor "${item.item_name}" only has ${latestStock} pcs left.\n\nYou are trying to sell ${item.qty} pcs from this lot.`
+          );
+          setShowLotStockError(true);
+          setLoading(false);
+          return;
+        }
+      }
+    }
+    // === END LOT STOCK VALIDATION ===
 
     setLoading(true);
 
@@ -763,6 +852,40 @@ export default function NewOrderPOS() {
         .from('order_items')
         .insert(payload);
       if (itemsErr) throw itemsErr;
+
+      // === OFFICE USE: Deduct stock from item_details (lot level) ===
+      if (isOfficeUse) {
+        for (const item of items) {
+          if (!item.lot_number || !item.expiry_date) continue;
+
+          try {
+            // Direct math deduction (we already validated qty <= current_stock)
+            const { data: currentLot } = await supabase
+              .from('item_details')
+              .select('current_stock')
+              .eq('branch_id', currentBranchId)
+              .eq('item_name', item.item_name)
+              .eq('lot_number', item.lot_number)
+              .eq('expiry_date', item.expiry_date)
+              .single();
+
+            if (currentLot) {
+              const newStock = Math.max(0, currentLot.current_stock - item.qty);
+              await supabase
+                .from('item_details')
+                .update({ current_stock: newStock })
+                .eq('branch_id', currentBranchId)
+                .eq('item_name', item.item_name)
+                .eq('lot_number', item.lot_number)
+                .eq('expiry_date', item.expiry_date);
+            }
+          } catch (deductErr) {
+            console.error('Failed to deduct from item_details:', deductErr);
+            // Non-critical for now — main inventory was already updated
+          }
+        }
+      }
+      // === END item_details DEDUCTION ===
 
       // 3. Inventory deduction
       const itemsPayloadForRPC = items.map((i) => ({
@@ -1329,40 +1452,138 @@ export default function NewOrderPOS() {
                       {/* NEW: OFFICE USE ONLY COLUMNS */}
                       {isOfficeUse && (
                         <>
-                          {/* Lot# */}
-                          <td className="p-1.5">
-                            <input
-                              type="text"
-                              value={item.lot_number || ''}
-                              onChange={(e) => {
-                                setItems(
-                                  items.map((i) =>
-                                    i.id === item.id
-                                      ? { ...i, lot_number: e.target.value }
-                                      : i
-                                  )
-                                );
-                              }}
-                              className="w-full bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-center uppercase font-mono outline-none"
-                              placeholder="LOT#"
-                            />
+                          {/* Lot# Column - OFFICE USE (Single Line + Full Details) */}
+                          <td className="p-1 w-[165px]">
+                            <div className="flex items-center gap-1">
+                              {/* Dropdown with full details */}
+                              {item.lot_options &&
+                                item.lot_options.length > 0 && (
+                                  <select
+                                    value={item.lot_number || ''}
+                                    onChange={(e) => {
+                                      const value = e.target.value;
+
+                                      if (!value) {
+                                        // User selected the placeholder → clear everything and unlock
+                                        setItems(
+                                          items.map((i) =>
+                                            i.id === item.id
+                                              ? {
+                                                  ...i,
+                                                  lot_number: '',
+                                                  expiry_date: '',
+                                                  selected_lot_stock: undefined,
+                                                  lot_locked: false,
+                                                }
+                                              : i
+                                          )
+                                        );
+                                        return;
+                                      }
+
+                                      const selectedLot =
+                                        item.lot_options?.find(
+                                          (l) => l.lot_number === value
+                                        );
+
+                                      if (selectedLot) {
+                                        setItems(
+                                          items.map((i) =>
+                                            i.id === item.id
+                                              ? {
+                                                  ...i,
+                                                  lot_number:
+                                                    selectedLot.lot_number,
+                                                  expiry_date:
+                                                    selectedLot.expiry_date,
+                                                  selected_lot_stock:
+                                                    selectedLot.current_stock,
+                                                  lot_locked: true,
+                                                }
+                                              : i
+                                          )
+                                        );
+                                      }
+                                    }}
+                                    className="w-[115px] bg-slate-950 border border-white/10 rounded-md px-1.5 py-1 text-[10px] text-center uppercase font-mono outline-none"
+                                  >
+                                    <option value="">-- Select lot --</option>
+                                    {item.lot_options.map((lot, i) => (
+                                      <option key={i} value={lot.lot_number}>
+                                        {lot.lot_number} | {lot.expiry_date} |{' '}
+                                        {lot.current_stock}pcs
+                                      </option>
+                                    ))}
+                                  </select>
+                                )}
+
+                              {/* Lot# Input (locked when lot selected from dropdown) */}
+                              <input
+                                type="text"
+                                value={item.lot_number || ''}
+                                disabled={!!item.lot_locked}
+                                readOnly={!!item.lot_locked}
+                                onChange={(e) => {
+                                  setItems(
+                                    items.map((i) =>
+                                      i.id === item.id
+                                        ? {
+                                            ...i,
+                                            lot_number: e.target.value,
+                                            selected_lot_stock: undefined,
+                                            lot_locked: false,
+                                          }
+                                        : i
+                                    )
+                                  );
+                                }}
+                                className={`flex-1 bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[10px] text-center uppercase font-mono outline-none min-w-[55px] ${
+                                  item.lot_locked
+                                    ? 'opacity-70 bg-slate-900 cursor-not-allowed'
+                                    : ''
+                                }`}
+                                placeholder="LOT#"
+                              />
+
+                              {/* Refresh button */}
+                              {isOfficeUse && item.product_id && (
+                                <button
+                                  onClick={() =>
+                                    fetchAvailableLots(item.item_name, idx)
+                                  }
+                                  className="shrink-0 p-0.5 text-slate-500 hover:text-blue-400"
+                                  title="Refresh lots from item_details"
+                                >
+                                  <RefreshCcw size={12} />
+                                </button>
+                              )}
+                            </div>
                           </td>
 
-                          {/* Expiry Date */}
-                          <td className="p-1.5">
+                          {/* Expiry Date Column - Restored */}
+                          <td className="p-1 w-[115px]">
                             <input
                               type="date"
                               value={item.expiry_date || ''}
+                              disabled={!!item.lot_locked}
                               onChange={(e) => {
                                 setItems(
                                   items.map((i) =>
                                     i.id === item.id
-                                      ? { ...i, expiry_date: e.target.value }
+                                      ? {
+                                          ...i,
+                                          expiry_date: e.target.value,
+                                          lot_locked: false,
+                                        }
                                       : i
                                   )
                                 );
                               }}
-                              className="w-full bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-center font-mono outline-none"
+                              className={`w-full bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[10px] text-center font-mono outline-none ${
+                                item.lot_locked
+                                  ? 'opacity-60 cursor-not-allowed'
+                                  : ''
+                              }`}
                             />
                           </td>
                         </>
@@ -1373,6 +1594,22 @@ export default function NewOrderPOS() {
                           value={item.qty}
                           onChange={(e) => {
                             const newQty = Math.max(1, Number(e.target.value));
+
+                            // === OFFICE USE: Validate against selected lot stock ===
+                            if (
+                              isOfficeUse &&
+                              item.lot_number &&
+                              item.selected_lot_stock !== undefined
+                            ) {
+                              if (newQty > item.selected_lot_stock) {
+                                setLotStockErrorMessage(
+                                  `Lot# ${item.lot_number} (Expiry: ${item.expiry_date})\nonly has ${item.selected_lot_stock} pcs remaining.\n\nYou cannot sell ${newQty} pcs from this specific lot.`
+                                );
+                                setShowLotStockError(true);
+                                return; // prevent invalid qty
+                              }
+                            }
+
                             setItems(
                               items.map((i) => {
                                 if (i.id === item.id) {
@@ -1705,6 +1942,32 @@ export default function NewOrderPOS() {
               className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-sm"
             >
               OK — FIX EXPIRY DATES
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* === LOT STOCK ERROR MODAL (Office Use) === */}
+      {showLotStockError && (
+        <div className="fixed inset-0 z-[2500] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 border border-red-500/30 rounded-2xl w-full max-w-md p-6 text-center">
+            <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-red-500/10 flex items-center justify-center">
+              <AlertCircle size={28} className="text-red-400" />
+            </div>
+            <h2 className="text-xl font-black text-red-400 uppercase tracking-tight mb-2">
+              LOT STOCK LIMIT REACHED
+            </h2>
+            <div className="bg-slate-950 border border-red-500/20 rounded-xl p-4 mb-6 text-left text-sm font-medium whitespace-pre-line">
+              {lotStockErrorMessage}
+            </div>
+            <button
+              onClick={() => {
+                setShowLotStockError(false);
+                setLotStockErrorMessage('');
+              }}
+              className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-sm"
+            >
+              OK — I’LL ADJUST THE QUANTITY
             </button>
           </div>
         </div>
