@@ -648,7 +648,6 @@ export default function NewOrderPOS() {
     // === END TERMS VALIDATION ===
 
     // === FINAL PRICE VALIDATION FOR OFFICE USE (NON-ADMIN STAFF) ===
-    // === FINAL PRICE VALIDATION FOR OFFICE USE (NON-ADMIN STAFF) ===
     if (isOfficeUse && !isAdmin) {
       const errors: string[] = [];
 
@@ -680,9 +679,16 @@ export default function NewOrderPOS() {
     // === END PRICE VALIDATION ===
 
     // === OFFICE USE: Validate lot stock before submitting ===
+    // Only block if lot# + expiry came from the DROPDOWN (selected_lot_stock is set).
+    // Manually typed lot numbers are allowed without this strict pre-check.
     if (isOfficeUse) {
       for (const item of items) {
-        if (!item.product_id || !item.lot_number) continue;
+        if (
+          !item.product_id ||
+          !item.lot_number ||
+          item.selected_lot_stock === undefined
+        )
+          continue;
 
         // Re-fetch latest stock for this lot to be safe
         const { data: lotData } = await supabase
@@ -859,7 +865,6 @@ export default function NewOrderPOS() {
           if (!item.lot_number || !item.expiry_date) continue;
 
           try {
-            // Direct math deduction (we already validated qty <= current_stock)
             const { data: currentLot } = await supabase
               .from('item_details')
               .select('current_stock')
@@ -881,13 +886,13 @@ export default function NewOrderPOS() {
             }
           } catch (deductErr) {
             console.error('Failed to deduct from item_details:', deductErr);
-            // Non-critical for now — main inventory was already updated
+            // Non-critical — main inventory was already updated via RPC
           }
         }
       }
       // === END item_details DEDUCTION ===
 
-      // 3. Inventory deduction
+      // 3. Inventory deduction (main inventory table)
       const itemsPayloadForRPC = items.map((i) => ({
         product_id: i.product_id,
         qty: Number(i.qty),
@@ -931,7 +936,6 @@ export default function NewOrderPOS() {
       setLoading(false);
     }
   };
-
   const resetForm = () => {
     setClientName('WALK-IN');
     setCashReceived(0);
