@@ -125,6 +125,12 @@ export default function StaffDashboard() {
   const [showCollectionModal, setShowCollectionModal] = useState(false);
   const [selectedCollectionOrder, setSelectedCollectionOrder] =
     useState<any>(null);
+
+  // === REVERSE PAYMENT STATES (Day-wide - for header REVERSE PAYMENT button) ===
+  const [showDayReverseModal, setShowDayReverseModal] = useState(false);
+  const [dayPaymentsList, setDayPaymentsList] = useState<any[]>([]);
+  const [selectedDayPayment, setSelectedDayPayment] = useState<any>(null);
+
   const [paymentAmount, setPaymentAmount] = useState<number>(0);
   const [paymentMethodModal, setPaymentMethodModal] = useState<
     'CASH' | 'CHEQUE' | 'ONLINE'
@@ -1489,6 +1495,128 @@ export default function StaffDashboard() {
     }
   };
 
+  // === GLOBAL DAY PAYMENTS REVERSE (All today's payments) ===
+  const openDayPaymentsReverseModal = async () => {
+    if (!selectedBranch?.id) return;
+
+    const today = new Date().toISOString().split('T')[0];
+
+    try {
+      const { data: payments, error } = await supabase
+        .from('daily_payments')
+        .select(
+          `
+          id,
+          amount,
+          payment_method,
+          pr_number,
+          customer_name,
+          notes,
+          created_at,
+          order_id,
+          orders (
+            order_number,
+            client_name,
+            status,
+            remaining_balance
+          )
+        `
+        )
+        .eq('branch_id', selectedBranch.id)
+        .eq('report_date', today)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+
+      setDayPaymentsList(payments || []);
+      setSelectedDayPayment(null);
+      setShowDayReverseModal(true);
+    } catch (err: any) {
+      triggerToast("Failed to load today's payments: " + err.message, 'error');
+    }
+  };
+
+  const handleReverseDayPayment = async () => {
+    if (!selectedDayPayment) return;
+
+    const payment = selectedDayPayment;
+    const amount = Number(payment.amount || 0);
+
+    let confirmMsg = `Reverse payment of ₱${amount.toLocaleString()}?\n\n`;
+    confirmMsg += `Customer: ${
+      payment.customer_name || payment.orders?.client_name || 'N/A'
+    }\n`;
+    confirmMsg += `Method: ${payment.payment_method}\n`;
+    if (payment.pr_number) confirmMsg += `PR#: ${payment.pr_number}\n`;
+    confirmMsg += `\nThis will delete the payment record`;
+
+    if (payment.order_id) {
+      confirmMsg += ` and restore the balance on Order ${
+        payment.orders?.order_number || ''
+      }`;
+    }
+
+    if (!window.confirm(confirmMsg)) return;
+
+    try {
+      const { error: deleteErr } = await supabase
+        .from('daily_payments')
+        .delete()
+        .eq('id', payment.id);
+      if (deleteErr) throw deleteErr;
+
+      if (payment.order_id && payment.orders) {
+        const currentBalance = Number(payment.orders.remaining_balance || 0);
+        const originalTotal = Number(payment.orders.total_amount || 0);
+
+        // Safe restoration: never allow remaining_balance to exceed original total_amount
+        const newBalance = Math.min(currentBalance + amount, originalTotal);
+
+        // CRITICAL REQUIREMENT FIX:
+        // If remaining balance equals the original total (0 payments made toward it),
+        // or if original total itself is 0, do not let it accidentally revert or switch away
+        // from its appropriate transactional state incorrectly.
+        let finalStatus = 'FOR COLLECTION';
+        if (newBalance <= 0 && originalTotal === 0) {
+          finalStatus = payment.orders.status; // Do not alter status if total is 0[cite: 1]
+        } else if (newBalance <= 0) {
+          finalStatus = 'completed';
+        }
+
+        const updatePayload: any = {
+          remaining_balance: newBalance,
+          status: finalStatus,
+        };
+
+        if (
+          payment.orders.status === 'completed' &&
+          finalStatus === 'FOR COLLECTION'
+        ) {
+          updatePayload.paid_date = null;
+        }
+
+        await supabase
+          .from('orders')
+          .update(updatePayload)
+          .eq('id', payment.order_id);
+      }
+
+      triggerToast(
+        `✅ Payment of ₱${amount.toLocaleString()} reversed`,
+        'success'
+      );
+      setShowDayReverseModal(false);
+      setDayPaymentsList([]);
+      setSelectedDayPayment(null);
+
+      if (selectedBranch?.is_office_use) {
+        await fetchOfficeOrders(selectedBranch.id);
+      }
+    } catch (err: any) {
+      triggerToast('Failed to reverse: ' + err.message, 'error');
+    }
+  };
+
   // === ADD EXPENSE HANDLER ===
   const handleAddExpense = async () => {
     if (!newExpenseName || newExpenseAmount <= 0 || !selectedDay?.dateStr)
@@ -1899,15 +2027,16 @@ export default function StaffDashboard() {
     doc.setFontSize(5.8);
     doc.setFont('helvetica', 'normal');
 
-    doc.text('CLIENT', 18, y);
-    doc.text('SO#', 45, y);
-    doc.text('DR#', 68, y);
-    doc.text('PR#', 95, y);
-    doc.text('CASH', 125, y, { align: 'right' });
-    doc.text('CHECK', 148, y, { align: 'right' });
-    doc.text('CHECK DATE', 167, y);
-    doc.text('DELIVERY DATE', 183, y);
-    doc.text('TOTAL', 207, y, { align: 'right' });
+    // Professional balanced columns (no overlap, good margins, TOTAL has space)
+    doc.text('CLIENT', 15, y);
+    doc.text('SO#', 42, y);
+    doc.text('DR#', 62, y);
+    doc.text('PR#', 82, y);
+    doc.text('CASH', 115, y, { align: 'right' });
+    doc.text('CHECK', 138, y, { align: 'right' });
+    doc.text('CHECK DATE', 155, y);
+    doc.text('DELIVERY DATE', 172, y);
+    doc.text('TOTAL', 195, y, { align: 'right' });
     y += 5;
 
     const groupedSales = dayOrders.reduce((acc: any, order: any) => {
@@ -1952,37 +2081,77 @@ export default function StaffDashboard() {
     }, {});
 
     Object.values(groupedSales).forEach((group: any) => {
-      const soList = group.order_numbers.join(', ').substring(0, 45) || '—';
-      const drList =
-        [...new Set(group.dr_numbers)].join(', ').substring(0, 18) || '—';
-      const prList =
-        [...new Set(group.pr_numbers)].join(', ').substring(0, 18) || '—';
-      const delList =
-        [...new Set(group.delivery_dates.filter(Boolean))]
-          .join(', ')
-          .substring(0, 18) || '—';
-      const chequeDateList =
-        [...new Set(group.cheque_dates)].join(', ').substring(0, 18) || '—';
+      // Proper wrapping (prevents overlap + professional look)
+      const clientLines = doc.splitTextToSize(
+        group.client_name || 'WALK-IN',
+        26
+      );
+      const soLines = doc.splitTextToSize(
+        group.order_numbers.join(', ') || '—',
+        22
+      );
+      const drLines = doc.splitTextToSize(
+        [...new Set(group.dr_numbers)].join(', ') || '—',
+        20
+      );
+      const prLines = doc.splitTextToSize(
+        [...new Set(group.pr_numbers)].join(', ') || '—',
+        18
+      );
+      const delLines = doc.splitTextToSize(
+        [...new Set(group.delivery_dates.filter(Boolean))].join(', ') || '—',
+        17
+      );
+      const chequeDateLines = doc.splitTextToSize(
+        [...new Set(group.cheque_dates)].join(', ') || '—',
+        14
+      );
 
-      doc.text(group.client_name.substring(0, 22), 18, y);
-      doc.text(soList, 45, y, { maxWidth: 28 });
-      doc.text(drList, 68, y, { maxWidth: 20 });
-      doc.text(prList, 95, y, { maxWidth: 20 });
-      doc.text(`PHP ${group.cash.toLocaleString()}`, 125, y, {
-        align: 'right',
-      });
-      doc.text(`PHP ${group.cheque.toLocaleString()}`, 148, y, {
-        align: 'right',
-      });
-      doc.text(chequeDateList, 167, y, { maxWidth: 14 });
-      doc.text(delList, 183, y, { maxWidth: 19 });
-      doc.text(`PHP ${group.total_amount.toLocaleString()}`, 207, y, {
-        align: 'right',
-      });
+      const maxLines = Math.max(
+        clientLines.length,
+        soLines.length,
+        drLines.length,
+        prLines.length,
+        delLines.length,
+        chequeDateLines.length,
+        1
+      );
 
-      y += 6.5;
+      const lineHeight = 5.2;
+      let rowY = y;
 
-      if (y > 275) {
+      for (let i = 0; i < maxLines; i++) {
+        if (clientLines[i]) doc.text(clientLines[i], 15, rowY);
+        if (soLines[i]) doc.text(soLines[i], 42, rowY);
+        if (drLines[i]) doc.text(drLines[i], 62, rowY);
+        if (prLines[i]) doc.text(prLines[i], 82, rowY);
+        if (chequeDateLines[i]) doc.text(chequeDateLines[i], 155, rowY);
+        if (delLines[i]) doc.text(delLines[i], 172, rowY);
+
+        // Amounts only on first line
+        if (i === 0) {
+          doc.text(`${group.cash.toLocaleString()}`, 115, rowY, {
+            align: 'right',
+          });
+          doc.text(`${group.cheque.toLocaleString()}`, 138, rowY, {
+            align: 'right',
+          });
+          doc.text(`${group.total_amount.toLocaleString()}`, 195, rowY, {
+            align: 'right',
+          });
+        }
+
+        rowY += lineHeight;
+
+        if (rowY > 265) {
+          doc.addPage();
+          rowY = 20;
+        }
+      }
+
+      y = rowY + 2;
+
+      if (y > 265) {
         doc.addPage();
         y = 20;
       }
@@ -1999,15 +2168,16 @@ export default function StaffDashboard() {
     doc.setFontSize(5.8);
     doc.setFont('helvetica', 'normal');
 
-    doc.text('CLIENT', 18, y);
-    doc.text('SO#', 45, y);
-    doc.text('DR#', 68, y);
-    doc.text('PR#', 95, y);
-    doc.text('CASH', 125, y, { align: 'right' });
-    doc.text('CHECK', 148, y, { align: 'right' });
-    doc.text('CHECK DATE', 167, y);
-    doc.text('DELIVERY DATE', 183, y);
-    doc.text('TOTAL', 207, y, { align: 'right' });
+    // Exact same formatting as Daily Sales table
+    doc.text('CLIENT', 15, y);
+    doc.text('SO#', 42, y);
+    doc.text('DR#', 62, y);
+    doc.text('PR#', 82, y);
+    doc.text('CASH', 115, y, { align: 'right' });
+    doc.text('CHECK', 138, y, { align: 'right' });
+    doc.text('CHECK DATE', 155, y);
+    doc.text('DELIVERY DATE', 172, y);
+    doc.text('TOTAL', 198, y, { align: 'right' });
     y += 5;
 
     const groupedRem = dayPayments.reduce((acc: any, p: any) => {
@@ -2042,38 +2212,72 @@ export default function StaffDashboard() {
     }, {});
 
     Object.values(groupedRem).forEach((group: any) => {
-      const soList =
-        [...new Set(group.order_numbers)].join(', ').substring(0, 45) || '—';
-      const drList =
-        [...new Set(group.dr_numbers)].join(', ').substring(0, 18) || '—';
-      const prList =
-        [...new Set(group.pr_numbers)].join(', ').substring(0, 18) || '—';
-      const delList =
-        [...new Set(group.delivery_dates.filter(Boolean))]
-          .join(', ')
-          .substring(0, 18) || '—';
-      const chequeDateList =
-        [...new Set(group.cheque_dates)].join(', ').substring(0, 18) || '—';
+      // Exact same clean formatting + wrapping as Daily Sales table
+      const clientLines = doc.splitTextToSize(
+        group.client_name || 'WALK-IN',
+        26
+      );
+      const soLines = doc.splitTextToSize(
+        [...new Set(group.order_numbers)].join(', ') || '—',
+        22
+      );
+      const drLines = doc.splitTextToSize(
+        [...new Set(group.dr_numbers)].join(', ') || '—',
+        20
+      );
+      const prLines = doc.splitTextToSize(
+        [...new Set(group.pr_numbers)].join(', ') || '—',
+        18
+      );
+      const delLines = doc.splitTextToSize(
+        [...new Set(group.delivery_dates.filter(Boolean))].join(', ') || '—',
+        17
+      );
+      const chequeDateLines = doc.splitTextToSize(
+        [...new Set(group.cheque_dates)].join(', ') || '—',
+        14
+      );
 
-      doc.text(group.client_name.substring(0, 22), 18, y);
-      doc.text(soList, 45, y, { maxWidth: 28 });
-      doc.text(drList, 68, y, { maxWidth: 20 });
-      doc.text(prList, 95, y, { maxWidth: 20 });
-      doc.text(`PHP ${group.cash.toLocaleString()}`, 125, y, {
-        align: 'right',
-      });
-      doc.text(`PHP ${group.cheque.toLocaleString()}`, 148, y, {
-        align: 'right',
-      });
-      doc.text(chequeDateList, 167, y, { maxWidth: 14 });
-      doc.text(delList, 183, y, { maxWidth: 19 });
-      doc.text(`PHP ${group.total.toLocaleString()}`, 207, y, {
-        align: 'right',
-      });
+      const maxLines = Math.max(
+        clientLines.length,
+        soLines.length,
+        drLines.length,
+        prLines.length,
+        delLines.length,
+        chequeDateLines.length,
+        1
+      );
 
-      y += 6.5;
+      const lineHeight = 5.2;
+      let rowY = y;
 
-      if (y > 275) {
+      for (let i = 0; i < maxLines; i++) {
+        if (clientLines[i]) doc.text(clientLines[i], 15, rowY);
+        if (soLines[i]) doc.text(soLines[i], 42, rowY);
+        if (drLines[i]) doc.text(drLines[i], 62, rowY);
+        if (prLines[i]) doc.text(prLines[i], 82, rowY);
+        if (chequeDateLines[i]) doc.text(chequeDateLines[i], 155, rowY);
+        if (delLines[i]) doc.text(delLines[i], 172, rowY);
+
+        if (i === 0) {
+          doc.text(group.cash.toLocaleString(), 115, rowY, { align: 'right' });
+          doc.text(group.cheque.toLocaleString(), 138, rowY, {
+            align: 'right',
+          });
+          doc.text(group.total.toLocaleString(), 198, rowY, { align: 'right' });
+        }
+
+        rowY += lineHeight;
+
+        if (rowY > 265) {
+          doc.addPage();
+          rowY = 20;
+        }
+      }
+
+      y = rowY + 2;
+
+      if (y > 265) {
         doc.addPage();
         y = 20;
       }
@@ -2092,8 +2296,8 @@ export default function StaffDashboard() {
       doc.text('CUSTOMER', 20, y);
       doc.text('AMOUNT', 95, y, { align: 'right' });
       doc.text('METHOD', 125, y);
-      doc.text('PR#', 155, y);
-      doc.text('NOTES', 180, y);
+      doc.text('PR#', 150, y);
+      doc.text('NOTES', 170, y);
       y += 7;
 
       legacyPayments.forEach((p: any) => {
@@ -2107,8 +2311,8 @@ export default function StaffDashboard() {
           align: 'right',
         });
         doc.text(p.payment_method, 125, y);
-        doc.text(p.pr_number || '—', 155, y);
-        doc.text((p.notes || '—').substring(0, 40), 180, y);
+        doc.text(p.pr_number || '—', 150, y);
+        doc.text((p.notes || '—').substring(0, 40), 170, y);
         y += 7;
       });
       y += 15;
@@ -2132,8 +2336,8 @@ export default function StaffDashboard() {
       doc.text('DR#', 88, y);
       doc.text('PR#', 108, y);
       doc.text('AMOUNT', 135, y, { align: 'right' });
-      doc.text('METHOD', 160, y);
-      doc.text('REFERENCE / NOTES', 180, y);
+      doc.text('METHOD', 140, y);
+      doc.text('REFERENCE / NOTES', 160, y);
       y += 7;
 
       allOnline.forEach((payment: any) => {
@@ -2157,8 +2361,8 @@ export default function StaffDashboard() {
           y,
           { align: 'right' }
         );
-        doc.text('ONLINE', 160, y);
-        doc.text((payment.notes || '—').substring(0, 35), 180, y);
+        doc.text('ONLINE', 140, y);
+        doc.text((payment.notes || '—').substring(0, 35), 160, y);
         y += 7;
       });
       y += 15;
@@ -2793,7 +2997,15 @@ export default function StaffDashboard() {
           <div className="flex items-center gap-6">
             <div>
               <h1 className="text-lg font-black italic tracking-tighter text-white uppercase leading-none">
-                ECONO_<span className="text-emerald-500">DRUGSTORE</span>
+                {selectedBranch?.is_office_use ? (
+                  <>
+                    ECONO_<span className="text-emerald-500">PHARMA</span>
+                  </>
+                ) : (
+                  <>
+                    ECONO_<span className="text-emerald-500">DRUGSTORE</span>
+                  </>
+                )}
               </h1>
               <p className="text-[9px] font-bold text-slate-500 uppercase mt-1 tracking-widest">
                 {selectedBranch.branch_name} | {profile?.role}
@@ -3190,8 +3402,18 @@ export default function StaffDashboard() {
                     className="flex items-center gap-1 px-2 py-1 text-[10px] font-black bg-purple-600 hover:bg-purple-500 text-white rounded-lg transition-colors active:scale-95"
                   >
                     <Plus size={12} />
-                    LEGACY PAYMENT
+                    LEGACY
                   </button>
+
+                  {/* REVERSE PAYMENT button - beside LEGACY PAYMENT, Office Use only */}
+                  {selectedBranch?.is_office_use && (
+                    <button
+                      onClick={openDayPaymentsReverseModal}
+                      className="flex items-center gap-1 px-3 py-1.5 text-[10px] font-black bg-red-600 hover:bg-red-500 text-white rounded-lg transition-colors active:scale-95"
+                    >
+                      REVERSE
+                    </button>
+                  )}
                 </div>
 
                 <div className="flex gap-2 mb-3">
@@ -6295,6 +6517,107 @@ export default function StaffDashboard() {
             </div>
           </div>
         )}
+
+        {/* ==================== DAY PAYMENTS REVERSE MODAL ==================== */}
+        {showDayReverseModal && (
+          <div className="fixed inset-0 z-[3200] flex items-center justify-center bg-slate-950/90 backdrop-blur-sm p-4">
+            <div className="bg-slate-900 border border-red-500/30 rounded-3xl w-full max-w-2xl p-6 max-h-[85vh] flex flex-col">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-black text-red-400 uppercase tracking-tight">
+                  REVERSE PAYMENT - Today's Payments
+                </h2>
+                <button
+                  onClick={() => {
+                    setShowDayReverseModal(false);
+                    setDayPaymentsList([]);
+                    setSelectedDayPayment(null);
+                  }}
+                  className="text-slate-400 hover:text-white"
+                >
+                  <X size={22} />
+                </button>
+              </div>
+
+              <p className="text-sm text-slate-400 mb-4">
+                Select any payment made today to reverse (works for orders +
+                legacy payments).
+              </p>
+
+              <div className="flex-1 overflow-auto space-y-2 pr-2 mb-4">
+                {dayPaymentsList.length === 0 ? (
+                  <div className="text-center py-8 text-slate-500">
+                    No payments found today.
+                  </div>
+                ) : (
+                  dayPaymentsList.map((payment) => (
+                    <div
+                      key={payment.id}
+                      onClick={() => setSelectedDayPayment(payment)}
+                      className={`p-4 rounded-2xl border cursor-pointer transition-all ${
+                        selectedDayPayment?.id === payment.id
+                          ? 'bg-red-500/10 border-red-500'
+                          : 'bg-slate-950 border-white/10 hover:border-white/30'
+                      }`}
+                    >
+                      <div className="flex justify-between">
+                        <div>
+                          <div className="font-bold text-lg">
+                            ₱{Number(payment.amount).toLocaleString()}
+                          </div>
+                          <div className="text-sm text-slate-300">
+                            {payment.customer_name ||
+                              payment.orders?.client_name ||
+                              'LEGACY PAYMENT'}
+                          </div>
+                          {payment.orders?.order_number && (
+                            <div className="text-xs font-mono text-amber-400 mt-0.5">
+                              {payment.orders.order_number}
+                            </div>
+                          )}
+                        </div>
+                        <div className="text-right text-xs">
+                          <div className="font-mono text-slate-400">
+                            {new Date(payment.created_at).toLocaleTimeString(
+                              [],
+                              { hour: '2-digit', minute: '2-digit' }
+                            )}
+                          </div>
+                          <div className="mt-1">{payment.payment_method}</div>
+                          {payment.pr_number && (
+                            <div className="text-amber-400 font-mono mt-1">
+                              PR#: {payment.pr_number}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="flex gap-3 pt-4 border-t border-white/10">
+                <button
+                  onClick={() => {
+                    setShowDayReverseModal(false);
+                    setDayPaymentsList([]);
+                    setSelectedDayPayment(null);
+                  }}
+                  className="flex-1 py-4 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-2xl"
+                >
+                  CANCEL
+                </button>
+                <button
+                  onClick={handleReverseDayPayment}
+                  disabled={!selectedDayPayment}
+                  className="flex-1 py-4 bg-red-600 hover:bg-red-500 disabled:bg-slate-700 text-white font-black rounded-2xl"
+                >
+                  CONFIRM REVERSE
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Footer Terminal Log */}
         <div className="fixed bottom-6 left-6 right-6 max-w-6xl mx-auto">
           <div className="bg-black/80 backdrop-blur-xl border border-emerald-500/20 p-4 rounded-2xl flex items-center gap-4 shadow-2xl">
