@@ -2015,9 +2015,14 @@ export default function StaffDashboard() {
       .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
     const remTotal = remCash + remCheque;
 
-    const totalCash = dailyCash + remCash;
+    let totalCash = dailyCash + remCash;
     const totalCheque = dailyCheque + remCheque;
-    const totalPayments = totalCash + totalCheque;
+    let totalPayments = totalCash + totalCheque;
+
+    // Deduct "Others" (office accounts) from both Total Payments and Total Cash
+    // so that Actual Cash correctly reflects only external transactions.
+    totalCash -= others;
+    totalPayments -= others;
 
     const totalExpenses = (dayExpenses || []).reduce(
       (sum: number, exp: any) => sum + Number(exp.amount || 0),
