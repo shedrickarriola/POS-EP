@@ -1718,10 +1718,12 @@ export default function StaffDashboard() {
       const { jsPDF } = await import('jspdf');
       const doc = new jsPDF('p', 'mm', 'a4');
 
+      const PAGE_HEIGHT = 278; // Safe bottom margin for A4
+
       let y = 18;
 
       if (withHeader) {
-        // WITH HEADERS - unchanged
+        // WITH HEADERS
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(16);
         doc.text('ECONO PHARMA TRADING', 105, y, { align: 'center' });
@@ -1757,7 +1759,7 @@ export default function StaffDashboard() {
         doc.text(`ADDRESS: ${order?.address || ''}`, 20, y);
         y += 10;
       } else {
-        // WITHOUT HEADERS - ONLY VALUES + INDENTED
+        // WITHOUT HEADERS (for pre-printed DR forms)
         y = 45;
 
         doc.setFont('helvetica', 'normal');
@@ -1793,15 +1795,48 @@ export default function StaffDashboard() {
         y += 6;
       }
 
-      // ==================== ITEM ROWS ====================
+      // ==================== ITEM ROWS (WITH MULTI-PAGE SUPPORT) ====================
       let itemCount = 0;
       let grandTotal = 0;
       let currentY = y;
 
+      // Helper function to add a new page when content overflows
+      const addPageIfNeeded = (spaceNeeded: number = 12) => {
+        if (currentY + spaceNeeded > PAGE_HEIGHT) {
+          doc.addPage();
+          currentY = 20;
+
+          // Continuation header on new pages
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(9);
+          doc.text('DELIVERY RECEIPT (continued)', 105, currentY, {
+            align: 'center',
+          });
+          currentY += 7;
+
+          // Repeat compact column headers on continuation pages
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(8);
+          doc.text('Qty', 18, currentY);
+          doc.text('Unit', 25, currentY);
+          doc.text('Lot No.', 33, currentY);
+          doc.text('Expiry', 52, currentY);
+          doc.text('Particulars', 78, currentY);
+          doc.text('Amount', 160, currentY, { align: 'right' });
+          doc.text('Discount', 177, currentY, { align: 'right' });
+          doc.text('Total', 195, currentY, { align: 'right' });
+
+          currentY += 4;
+          doc.setLineWidth(0.2);
+          doc.line(18, currentY, 195, currentY);
+          currentY += 5;
+        }
+      };
+
       items.forEach((item: any) => {
         const qty = Number(item.quantity || 1);
-        const unitPrice = Number(item.unit_price || 0); // ← NOW USING unit_price
-        const lineTotal = Number(item.subtotal || 0); // ← Line total
+        const unitPrice = Number(item.unit_price || 0);
+        const lineTotal = Number(item.subtotal || 0);
         const itemName = (item.inventory?.item_name || '').trim();
         const lotNumber = (item.lot_number || '').trim();
         const expiryDate = item.expiry_date || '';
@@ -1827,6 +1862,11 @@ export default function StaffDashboard() {
           1
         );
         const lineHeight = 6.5;
+        const rowHeight = lineHeight * numLines + 3;
+
+        // === KEY FIX: Check if we need a new page before drawing this row ===
+        addPageIfNeeded(rowHeight + 8);
+
         let rowY = currentY;
 
         for (let i = 0; i < numLines; i++) {
@@ -1844,19 +1884,21 @@ export default function StaffDashboard() {
           rowY += lineHeight;
         }
 
-        // CORRECTED COLUMNS
-        doc.text(unitPrice.toFixed(2), 160, currentY, { align: 'right' }); // ← Amount = unit_price
+        // Amounts aligned to the first line of the row
+        doc.text(unitPrice.toFixed(2), 160, currentY, { align: 'right' });
         doc.text('0.00', 177, currentY, { align: 'right' });
-        doc.text(lineTotal.toFixed(2), 195, currentY, { align: 'right' }); // ← Total = subtotal
+        doc.text(lineTotal.toFixed(2), 195, currentY, { align: 'right' });
 
         grandTotal += lineTotal;
         itemCount += qty;
-        currentY += lineHeight * numLines + 1;
+        currentY += rowHeight;
       });
 
       y = currentY;
 
-      // Summary + Footer
+      // Summary + Footer (also protected from overflow)
+      addPageIfNeeded(55);
+
       y += 8;
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(11);
@@ -1899,7 +1941,6 @@ export default function StaffDashboard() {
       triggerToast('Failed to generate PDF: ' + err.message, 'error');
     }
   };
-
   const handleDownloadDayPDF = async () => {
     if (!selectedDay || !selectedBranch) return;
 
