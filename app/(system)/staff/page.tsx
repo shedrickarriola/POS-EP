@@ -3610,20 +3610,39 @@ export default function StaffDashboard() {
                               Due: {order.due_date}
                             </div>
                           )}
-                          <button
-                            onClick={() => {
-                              setSelectedCollectionOrder(order);
-                              setPaymentAmount(0);
-                              setPaymentMethodModal('CASH');
-                              setChequeDateModal('');
-                              setCollectionNotes('');
-                              setPrNumberInput('');
-                              setShowCollectionModal(true);
-                            }}
-                            className="px-5 py-1 bg-purple-500 hover:bg-purple-400 text-white text-[10px] font-black rounded-lg whitespace-nowrap mt-1"
-                          >
-                            COLLECT
-                          </button>
+
+                          {/* Action buttons - REPRINT + COLLECT */}
+                          <div className="flex flex-col items-end gap-1.5 mt-1">
+                            {/* REPRINT button */}
+                            <button
+                              onClick={() => {
+                                setPendingPrintOrder({
+                                  id: order.id,
+                                  order_number: order.order_number,
+                                });
+                                setShowPrintOptionsModal(true);
+                              }}
+                              className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-white text-[9px] font-black rounded-lg whitespace-nowrap"
+                            >
+                              REPRINT
+                            </button>
+
+                            {/* COLLECT button */}
+                            <button
+                              onClick={() => {
+                                setSelectedCollectionOrder(order);
+                                setPaymentAmount(0);
+                                setPaymentMethodModal('CASH');
+                                setChequeDateModal('');
+                                setCollectionNotes('');
+                                setPrNumberInput('');
+                                setShowCollectionModal(true);
+                              }}
+                              className="px-3 py-1 bg-purple-500 hover:bg-purple-400 text-white text-[10px] font-black rounded-lg whitespace-nowrap"
+                            >
+                              COLLECT
+                            </button>
+                          </div>
                         </div>
                       </div>
                     ))}
