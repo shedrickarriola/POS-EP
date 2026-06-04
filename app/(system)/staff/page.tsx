@@ -1836,10 +1836,10 @@ export default function StaffDashboard() {
           if (i === 0) {
             doc.text(String(qty), 18, rowY);
             doc.text('1s', 25, rowY);
-            if (expiryDate) doc.text(expiryLines[i] || expiryDate, 52, rowY);
+            if (expiryDate) doc.text(expiryLines[i] || expiryDate, 46, rowY);
           }
-          if (lotLines[i]) doc.text(lotLines[i], 33, rowY);
-          if (itemNameLines[i]) doc.text(itemNameLines[i], 78, rowY);
+          if (lotLines[i]) doc.text(lotLines[i], 30, rowY);
+          if (itemNameLines[i]) doc.text(itemNameLines[i], 67, rowY);
 
           rowY += lineHeight;
         }
