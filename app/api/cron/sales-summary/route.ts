@@ -127,7 +127,7 @@ export async function GET(request: Request) {
         // Send email
         try {
           await resend.emails.send({
-            from: 'Econo Drugstore <reports@econo-pos.com>',
+            from: 'Econo Drugstore <stock@alerts.econo-pos.com>',
             to: org.owner_email,
             subject: `📊 Daily Report - ${yesterdayStr} | ${org.name} (Office)`,
             html: emailHtml,
