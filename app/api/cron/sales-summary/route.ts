@@ -61,7 +61,7 @@ export async function GET(request: Request) {
         if (!officeBranches || officeBranches.length === 0) continue;
 
         for (const b of officeBranches) {
-          // === Fetch all data needed for PDF ===
+          // === Fetch all data ===
           const { data: report } = await supabaseAdmin
             .from('daily_reports')
             .select('*')
@@ -71,7 +71,9 @@ export async function GET(request: Request) {
 
           const { data: allPayments } = await supabaseAdmin
             .from('daily_payments')
-            .select('*')
+            .select(
+              `*, orders (client_name, order_number, dr_number, delivery_date)`
+            )
             .eq('branch_id', b.id)
             .eq('report_date', yesterdayStr)
             .order('created_at', { ascending: true });
@@ -80,8 +82,7 @@ export async function GET(request: Request) {
             .from('daily_expenses')
             .select('*')
             .eq('branch_id', b.id)
-            .eq('report_date', yesterdayStr)
-            .order('created_at', { ascending: true });
+            .eq('report_date', yesterdayStr);
 
           const legacyPayments = (allPayments || []).filter(
             (p: any) => !p.order_id
@@ -89,206 +90,303 @@ export async function GET(request: Request) {
           const regularPayments = (allPayments || []).filter(
             (p: any) => p.order_id
           );
+          const onlinePayments = (allPayments || []).filter(
+            (p: any) => p.payment_method === 'ONLINE'
+          );
 
-          // === Generate PDF ===
-          const { jsPDF } = await import('jspdf');
-          const doc = new jsPDF('p', 'mm', 'a4');
+          // === Calculations ===
+          const gen = Number(report?.generic_sales || 0);
+          const brd = Number(report?.branded_sales || 0);
+          const disc = Number(report?.discount_total || 0);
+          const othersTotal = 0;
+          const netSales = gen + brd - disc - othersTotal;
 
-          let y = 15;
+          const totalRemittances = (allPayments || []).reduce(
+            (sum, p) => sum + Number(p.amount || 0),
+            0
+          );
+          const totalExpenses = (expenses || []).reduce(
+            (sum, e) => sum + Number(e.amount || 0),
+            0
+          );
 
-          // Header
-          doc.setFontSize(16);
-          doc.text('DAILY REPORT', 105, y, { align: 'center' });
-          y += 7;
-          doc.setFontSize(12);
-          doc.text(`${b.branch_name} — ${yesterdayStr}`, 105, y, {
-            align: 'center',
-          });
-          y += 10;
-
-          // DAILY SALES
-          doc.setFontSize(11);
-          doc.text('DAILY SALES', 20, y);
-          y += 6;
-          doc.setFontSize(10);
-          doc.text(
-            `Generic   : PHP ${Number(
-              report?.generic_sales || 0
-            ).toLocaleString()}`,
-            20,
-            y
-          );
-          y += 5;
-          doc.text(
-            `Branded   : PHP ${Number(
-              report?.branded_sales || 0
-            ).toLocaleString()}`,
-            20,
-            y
-          );
-          y += 5;
-          doc.text(
-            `Others    : PHP ${Number(
-              report?.others_sales || 0
-            ).toLocaleString()}`,
-            20,
-            y
-          );
-          y += 5;
-          doc.text(
-            `Discount  : PHP ${Number(
-              report?.discount_total || 0
-            ).toLocaleString()}`,
-            20,
-            y
-          );
-          y += 6;
-          doc.setFontSize(11);
-          doc.text(
-            `TOTAL SALES (NET) : PHP ${Number(
-              report?.total_sales || 0
-            ).toLocaleString()}`,
-            20,
-            y
-          );
-          y += 10;
-
-          // SUMMARY
-          doc.setFontSize(11);
-          doc.text('SUMMARY', 20, y);
-          y += 6;
-          doc.setFontSize(10);
-          doc.text(
-            `Daily Sales Cash     : PHP ${Number(
-              report?.daily_sales_cash || 0
-            ).toLocaleString()}`,
-            20,
-            y
-          );
-          y += 5;
-          doc.text(
-            `Remittances          : PHP ${Number(
-              report?.total_payments || 0
-            ).toLocaleString()}`,
-            20,
-            y
-          );
-          y += 5;
-          doc.text(
-            `Expenses             : PHP ${Number(
-              report?.expenses || 0
-            ).toLocaleString()}`,
-            20,
-            y
-          );
-          y += 6;
-          doc.setFontSize(12);
-          doc.text(
-            `Actual Cash          : PHP ${Number(
-              report?.actual_cash || 0
-            ).toLocaleString()}`,
-            20,
-            y
-          );
-          y += 12;
-
-          // REMITTANCES
-          doc.setFontSize(11);
-          doc.text('REMITTANCES / PAYMENTS', 20, y);
-          y += 7;
-
-          doc.setFontSize(9);
-          (regularPayments || []).forEach((p: any) => {
-            if (y > 270) {
-              doc.addPage();
-              y = 15;
-            }
-            const line = `${p.customer_name || '—'} | ${
-              p.payment_method
-            } | ₱${Number(p.amount).toLocaleString()} | ${
-              p.pr_number || p.notes || ''
-            }`;
-            doc.text(line, 20, y);
-            y += 5;
-          });
-
-          // LEGACY PAYMENTS
-          if (legacyPayments.length > 0) {
-            y += 5;
-            doc.setFontSize(11);
-            doc.text('LEGACY / STANDALONE PAYMENTS (Old POS)', 20, y);
-            y += 6;
-            doc.setFontSize(9);
-            legacyPayments.forEach((p: any) => {
-              if (y > 270) {
-                doc.addPage();
-                y = 15;
+          // === Build FULL HTML with EVERY section ===
+          let emailHtml = `
+            <div style="font-family: system-ui, Arial, sans-serif; max-width: 950px; margin: 0 auto; padding: 20px; background: #ffffff; color: #111827; border: 1px solid #e5e7eb;">
+              
+              <h1 style="text-align:center; margin:0 0 5px 0; font-size:22px;">DAILY REPORT</h1>
+              <h2 style="text-align:center; margin:0 0 25px 0; font-size:16px; color:#374151;">${
+                b.branch_name
+              } — ${yesterdayStr}</h2>
+    
+              <!-- DAILY SALES -->
+              <h3 style="background:#f3f4f6; padding:8px 12px; margin:0 0 10px 0; font-size:14px;">DAILY SALES</h3>
+              <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:14px;">
+                <tr><td style="padding:6px 12px;">Generic</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${gen.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px;">Branded</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${brd.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px;">Others</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${othersTotal.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px; color:#dc2626;">Discount</td><td style="padding:6px 12px; text-align:right; color:#dc2626; font-weight:600;">- ₱${disc.toLocaleString()}</td></tr>
+                <tr style="background:#f3f4f6; font-weight:700;">
+                  <td style="padding:10px 12px;">TOTAL SALES (NET)</td>
+                  <td style="padding:10px 12px; text-align:right;">₱${netSales.toLocaleString()}</td>
+                </tr>
+              </table>
+    
+              <!-- SUMMARY -->
+              <h3 style="background:#f3f4f6; padding:8px 12px; margin:0 0 10px 0; font-size:14px;">SUMMARY</h3>
+              <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:14px;">
+                <tr><td style="padding:8px 12px;">Daily Sales Cash</td><td style="padding:8px 12px; text-align:right;">₱${Number(
+                  report?.daily_sales_cash || 0
+                ).toLocaleString()}</td></tr>
+                <tr><td style="padding:8px 12px;">Remittances</td><td style="padding:8px 12px; text-align:right;">₱${totalRemittances.toLocaleString()}</td></tr>
+                <tr><td style="padding:8px 12px;">Expenses</td><td style="padding:8px 12px; text-align:right; color:#dc2626;">₱${totalExpenses.toLocaleString()}</td></tr>
+                <tr style="background:#ecfdf5; font-weight:700; font-size:15px;">
+                  <td style="padding:12px 12px;">Actual Cash</td>
+                  <td style="padding:12px 12px; text-align:right; color:#059669;">₱${Number(
+                    report?.actual_cash || 0
+                  ).toLocaleString()}</td>
+                </tr>
+              </table>
+    
+              <!-- DAILY SALES TABLE -->
+              <h3 style="background:#f3f4f6; padding:8px 12px; margin:0 0 10px 0; font-size:14px;">DAILY SALES TABLE</h3>
+              <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:12px;">
+                <thead>
+                  <tr style="background:#e5e7eb; text-align:left;">
+                    <th style="padding:6px 8px;">CLIENT</th>
+                    <th style="padding:6px 8px;">SO#</th>
+                    <th style="padding:6px 8px;">DR#</th>
+                    <th style="padding:6px 8px;">PR#</th>
+                    <th style="padding:6px 8px; text-align:right;">CASH</th>
+                    <th style="padding:6px 8px; text-align:right;">CHECK</th>
+                    <th style="padding:6px 8px;">CHECK DATE</th>
+                    <th style="padding:6px 8px;">DELIVERY DATE</th>
+                    <th style="padding:6px 8px; text-align:right;">OTHERS</th>
+                    <th style="padding:6px 8px; text-align:right;">TOTAL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${regularPayments
+                    .map((p: any) => {
+                      const order = p.orders || {};
+                      const cashAmt =
+                        p.payment_method === 'CASH' ||
+                        p.payment_method === 'ONLINE'
+                          ? Number(p.amount)
+                          : 0;
+                      const chequeAmt =
+                        p.payment_method === 'CHEQUE' ? Number(p.amount) : 0;
+                      return `
+                      <tr style="border-bottom:1px solid #e5e7eb;">
+                        <td style="padding:6px 8px;">${
+                          order.client_name || p.customer_name || '—'
+                        }</td>
+                        <td style="padding:6px 8px;">${
+                          order.order_number || '—'
+                        }</td>
+                        <td style="padding:6px 8px;">${
+                          order.dr_number || '—'
+                        }</td>
+                        <td style="padding:6px 8px;">${p.pr_number || '—'}</td>
+                        <td style="padding:6px 8px; text-align:right;">₱${cashAmt.toLocaleString()}</td>
+                        <td style="padding:6px 8px; text-align:right;">₱${chequeAmt.toLocaleString()}</td>
+                        <td style="padding:6px 8px;">${
+                          p.cheque_date || '—'
+                        }</td>
+                        <td style="padding:6px 8px;">${
+                          order.delivery_date || '—'
+                        }</td>
+                        <td style="padding:6px 8px; text-align:right;">₱0</td>
+                        <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(
+                          order.total_amount || 0
+                        ).toLocaleString()}</td>
+                      </tr>
+                    `;
+                    })
+                    .join('')}
+                </tbody>
+              </table>
+    
+              <!-- REMITTANCES / PAYMENTS -->
+              <h3 style="background:#f3f4f6; padding:8px 12px; margin:20px 0 10px 0; font-size:14px;">REMITTANCES / PAYMENTS</h3>
+              <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:12px;">
+                <thead>
+                  <tr style="background:#e5e7eb; text-align:left;">
+                    <th style="padding:6px 8px;">CLIENT</th>
+                    <th style="padding:6px 8px;">SO#</th>
+                    <th style="padding:6px 8px;">DR#</th>
+                    <th style="padding:6px 8px;">PR#</th>
+                    <th style="padding:6px 8px; text-align:right;">CASH</th>
+                    <th style="padding:6px 8px; text-align:right;">CHECK</th>
+                    <th style="padding:6px 8px;">CHECK DATE</th>
+                    <th style="padding:6px 8px;">DELIVERY DATE</th>
+                    <th style="padding:6px 8px; text-align:right;">TOTAL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${regularPayments
+                    .map((p: any) => {
+                      const order = p.orders || {};
+                      const cashAmt =
+                        p.payment_method === 'CASH' ||
+                        p.payment_method === 'ONLINE'
+                          ? Number(p.amount)
+                          : 0;
+                      const chequeAmt =
+                        p.payment_method === 'CHEQUE' ? Number(p.amount) : 0;
+                      return `
+                      <tr style="border-bottom:1px solid #e5e7eb;">
+                        <td style="padding:6px 8px;">${
+                          order.client_name || p.customer_name || '—'
+                        }</td>
+                        <td style="padding:6px 8px;">${
+                          order.order_number || '—'
+                        }</td>
+                        <td style="padding:6px 8px;">${
+                          order.dr_number || '—'
+                        }</td>
+                        <td style="padding:6px 8px;">${p.pr_number || '—'}</td>
+                        <td style="padding:6px 8px; text-align:right;">₱${cashAmt.toLocaleString()}</td>
+                        <td style="padding:6px 8px; text-align:right;">₱${chequeAmt.toLocaleString()}</td>
+                        <td style="padding:6px 8px;">${
+                          p.cheque_date || '—'
+                        }</td>
+                        <td style="padding:6px 8px;">${
+                          order.delivery_date || '—'
+                        }</td>
+                        <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(
+                          p.amount
+                        ).toLocaleString()}</td>
+                      </tr>
+                    `;
+                    })
+                    .join('')}
+                </tbody>
+              </table>
+    
+              <!-- LEGACY / STANDALONE PAYMENTS -->
+              ${
+                legacyPayments.length > 0
+                  ? `
+              <h3 style="background:#fef3c7; padding:8px 12px; margin:20px 0 10px 0; font-size:14px; color:#92400e;">LEGACY / STANDALONE PAYMENTS (Old POS)</h3>
+              <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:12px;">
+                <tbody>
+                  ${legacyPayments
+                    .map(
+                      (p: any) => `
+                    <tr style="border-bottom:1px solid #fef3c7;">
+                      <td style="padding:6px 12px;">${p.customer_name}</td>
+                      <td style="padding:6px 12px; text-align:right; font-weight:600;">₱${Number(
+                        p.amount
+                      ).toLocaleString()}</td>
+                      <td style="padding:6px 12px;">${p.payment_method}</td>
+                      <td style="padding:6px 12px;">${p.pr_number || ''}</td>
+                      <td style="padding:6px 12px;">${p.notes || ''}</td>
+                    </tr>
+                  `
+                    )
+                    .join('')}
+                </tbody>
+              </table>`
+                  : ''
               }
-              doc.text(
-                `${p.customer_name} | ${p.payment_method} | ₱${Number(
-                  p.amount
-                ).toLocaleString()} | ${p.pr_number || ''}`,
-                20,
-                y
-              );
-              y += 5;
-            });
-          }
+    
+              <!-- ONLINE PAYMENTS -->
+              ${
+                onlinePayments.length > 0
+                  ? `
+              <h3 style="background:#e0f2fe; padding:8px 12px; margin:20px 0 10px 0; font-size:14px; color:#0369a1;">ONLINE PAYMENTS</h3>
+              <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:12px;">
+                <thead>
+                  <tr style="background:#bae6fd; text-align:left;">
+                    <th style="padding:6px 8px;">CLIENT NAME</th>
+                    <th style="padding:6px 8px;">SO#</th>
+                    <th style="padding:6px 8px;">DR#</th>
+                    <th style="padding:6px 8px;">PR#</th>
+                    <th style="padding:6px 8px; text-align:right;">AMOUNT</th>
+                    <th style="padding:6px 8px;">METHOD</th>
+                    <th style="padding:6px 8px;">REFERENCE / NOTES</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${onlinePayments
+                    .map((p: any) => {
+                      const order = p.orders || {};
+                      return `
+                      <tr style="border-bottom:1px solid #bae6fd;">
+                        <td style="padding:6px 8px;">${
+                          p.customer_name || order.client_name || '—'
+                        }</td>
+                        <td style="padding:6px 8px;">${
+                          order.order_number || '—'
+                        }</td>
+                        <td style="padding:6px 8px;">${
+                          order.dr_number || '—'
+                        }</td>
+                        <td style="padding:6px 8px;">${p.pr_number || '—'}</td>
+                        <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(
+                          p.amount
+                        ).toLocaleString()}</td>
+                        <td style="padding:6px 8px;">ONLINE</td>
+                        <td style="padding:6px 8px;">${p.notes || '—'}</td>
+                      </tr>
+                    `;
+                    })
+                    .join('')}
+                </tbody>
+              </table>`
+                  : ''
+              }
+    
+              <!-- EXPENSES -->
+              <h3 style="background:#fee2e2; padding:8px 12px; margin:20px 0 10px 0; font-size:14px; color:#991b1b;">EXPENSES</h3>
+              <table style="width:100%; border-collapse:collapse; margin-bottom:30px; font-size:13px;">
+                <tbody>
+                  ${(expenses || [])
+                    .map(
+                      (e: any) => `
+                    <tr style="border-bottom:1px solid #fee2e2;">
+                      <td style="padding:8px 12px;">${e.expense_name}</td>
+                      <td style="padding:8px 12px; text-align:right; color:#dc2626; font-weight:600;">₱${Number(
+                        e.amount
+                      ).toLocaleString()}</td>
+                    </tr>
+                  `
+                    )
+                    .join('')}
+                  <tr style="background:#fee2e2; font-weight:700;">
+                    <td style="padding:10px 12px;">Total Expenses</td>
+                    <td style="padding:10px 12px; text-align:right;">₱${totalExpenses.toLocaleString()}</td>
+                  </tr>
+                </tbody>
+              </table>
+    
+              <p style="text-align:center; color:#6b7280; font-size:11px; margin-top:30px;">
+                Generated automatically • ${new Date().toLocaleString('en-PH')}
+              </p>
+            </div>
+          `;
 
-          // EXPENSES
-          y += 8;
-          doc.setFontSize(11);
-          doc.text('EXPENSES', 20, y);
-          y += 6;
-          doc.setFontSize(9);
-          (expenses || []).forEach((e: any) => {
-            if (y > 270) {
-              doc.addPage();
-              y = 15;
-            }
-            doc.text(
-              `${e.expense_name} — ₱${Number(e.amount).toLocaleString()}`,
-              20,
-              y
-            );
-            y += 5;
-          });
-
-          // Save PDF to buffer
-          const pdfBuffer = Buffer.from(doc.output('arraybuffer'));
-
-          // === Send Email with PDF Attachment ===
+          // Send
           try {
             await resend.emails.send({
               from: 'Econo Drugstore <stock@alerts.econo-pos.com>',
               to: org.owner_email,
               subject: `📊 Daily Report - ${yesterdayStr} | ${b.branch_name}`,
-              html: `<p>Please find attached the official Daily Report for <strong>${b.branch_name}</strong> on <strong>${yesterdayStr}</strong>.</p>`,
-              attachments: [
-                {
-                  filename: `Daily_Report_${yesterdayStr}_${b.branch_name.replace(
-                    /\s+/g,
-                    '_'
-                  )}.pdf`,
-                  content: pdfBuffer,
-                },
-              ],
+              html: emailHtml,
             });
-            console.log(
-              `✅ PDF Daily Report sent to ${org.owner_email} for ${b.branch_name}`
-            );
+            console.log(`✅ COMPLETE Daily Report sent to ${org.owner_email}`);
           } catch (err: any) {
-            console.error('Failed to send email with PDF:', err);
+            console.error('Email failed:', err);
           }
         }
       }
 
       return NextResponse.json({
         success: true,
-        message: 'Daily PDF reports sent with attachment',
+        message: 'Full detailed daily email sent',
       });
     }
-
     // =====================================================
     // ALL OTHER REPORT TYPES CONTINUE BELOW
     // (STOCK_ADVISORY, REPORT_CHECKER, LOGIN, UPDATE, EOD)
