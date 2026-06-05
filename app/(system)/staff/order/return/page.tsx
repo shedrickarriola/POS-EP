@@ -194,18 +194,50 @@ export default function ReturnOrder() {
       }
 
       // 3. Financial Recalculation
+      // Re-fetch latest values (including remaining_balance) so the update is accurate
+      const { data: latestOrder } = await supabase
+        .from('orders')
+        .select('branded_amt, generic_amt, total_amount, remaining_balance')
+        .eq('id', activeOrder.id)
+        .single();
+
+      const round2 = (n: number) => Math.round(n * 100) / 100;
+
+      const currentBranded = Number(
+        latestOrder?.branded_amt || activeOrder.branded_amt || 0
+      );
+      const currentGeneric = Number(
+        latestOrder?.generic_amt || activeOrder.generic_amt || 0
+      );
+      const currentTotal = Number(
+        latestOrder?.total_amount || activeOrder.total_amount || 0
+      );
+      const currentRemaining = Number(
+        latestOrder?.remaining_balance || activeOrder.remaining_balance || 0
+      );
+
       const newBranded = Math.max(
         0,
-        Number(activeOrder.branded_amt || 0) - brandedAdjustment
+        round2(currentBranded - brandedAdjustment)
       );
       const newGeneric = Math.max(
         0,
-        Number(activeOrder.generic_amt || 0) - genericAdjustment
+        round2(currentGeneric - genericAdjustment)
       );
-      const newTotal = Math.max(
+      const newTotal = Math.max(0, round2(currentTotal - totalAdjustment));
+      const newRemainingBalance = Math.max(
         0,
-        Number(activeOrder.total_amount || 0) - totalAdjustment
+        round2(currentRemaining - totalAdjustment)
       );
+
+      console.log('[Return] Updating order financials →', {
+        orderId: activeOrder.id,
+        totalAdjustment,
+        newBranded,
+        newGeneric,
+        newTotal,
+        newRemainingBalance,
+      });
 
       const { error: orderError } = await supabase
         .from('orders')
@@ -214,6 +246,7 @@ export default function ReturnOrder() {
           total_price: newTotal,
           branded_amt: newBranded,
           generic_amt: newGeneric,
+          remaining_balance: newRemainingBalance,
           updated_at: new Date().toISOString(),
         })
         .eq('id', activeOrder.id);
@@ -224,13 +257,19 @@ export default function ReturnOrder() {
       // This is critical because buy_cost may have changed since the original sale.
       // We run it AFTER stock has been restored and the order is adjusted.
       if (currentBranchId) {
-        const { error: healError } = await supabase.rpc('heal_inventory_buy_cost', {
-          p_branch_id: currentBranchId,
-        });
+        const { error: healError } = await supabase.rpc(
+          'heal_inventory_buy_cost',
+          {
+            p_branch_id: currentBranchId,
+          }
+        );
 
         if (healError) {
           // Non-blocking warning — the return succeeded, heal is just a safety net
-          console.warn('⚠️ heal_inventory_buy_cost warning:', healError.message);
+          console.warn(
+            '⚠️ heal_inventory_buy_cost warning:',
+            healError.message
+          );
         } else {
           console.log('✅ heal_inventory_buy_cost completed successfully');
         }
