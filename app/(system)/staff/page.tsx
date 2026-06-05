@@ -1518,7 +1518,8 @@ export default function StaffDashboard() {
             order_number,
             client_name,
             status,
-            remaining_balance
+            remaining_balance,
+            total_amount
           )
         `
         )
@@ -1559,38 +1560,33 @@ export default function StaffDashboard() {
     if (!window.confirm(confirmMsg)) return;
 
     try {
+      // 1. Delete the payment
       const { error: deleteErr } = await supabase
         .from('daily_payments')
         .delete()
         .eq('id', payment.id);
       if (deleteErr) throw deleteErr;
 
+      // 2. Restore order balance + status (if linked to an order)
       if (payment.order_id && payment.orders) {
         const currentBalance = Number(payment.orders.remaining_balance || 0);
         const originalTotal = Number(payment.orders.total_amount || 0);
 
-        // Safe restoration: never allow remaining_balance to exceed original total_amount
+        // Add back the reversed amount (never exceed original total)
         const newBalance = Math.min(currentBalance + amount, originalTotal);
 
-        // CRITICAL REQUIREMENT FIX:
-        // If remaining balance equals the original total (0 payments made toward it),
-        // or if original total itself is 0, do not let it accidentally revert or switch away
-        // from its appropriate transactional state incorrectly.
-        let finalStatus = 'FOR COLLECTION';
-        if (newBalance <= 0 && originalTotal === 0) {
-          finalStatus = payment.orders.status; // Do not alter status if total is 0[cite: 1]
-        } else if (newBalance <= 0) {
-          finalStatus = 'completed';
-        }
+        // Simple and correct status logic
+        const finalStatus = newBalance <= 0 ? 'completed' : 'FOR COLLECTION';
 
         const updatePayload: any = {
           remaining_balance: newBalance,
           status: finalStatus,
         };
 
+        // Clear paid_date if order is no longer fully paid
         if (
-          payment.orders.status === 'completed' &&
-          finalStatus === 'FOR COLLECTION'
+          finalStatus === 'FOR COLLECTION' &&
+          payment.orders.status === 'completed'
         ) {
           updatePayload.paid_date = null;
         }
@@ -1602,17 +1598,23 @@ export default function StaffDashboard() {
       }
 
       triggerToast(
-        `✅ Payment of ₱${amount.toLocaleString()} reversed`,
+        `✅ Payment of ₱${amount.toLocaleString()} reversed successfully`,
         'success'
       );
+
       setShowDayReverseModal(false);
       setDayPaymentsList([]);
       setSelectedDayPayment(null);
 
+      // Refresh views
       if (selectedBranch?.is_office_use) {
         await fetchOfficeOrders(selectedBranch.id);
       }
+      if (selectedDay?.dateStr) {
+        await fetchDayDetails(selectedDay.dateStr);
+      }
     } catch (err: any) {
+      console.error('Reverse payment error:', err);
       triggerToast('Failed to reverse: ' + err.message, 'error');
     }
   };
