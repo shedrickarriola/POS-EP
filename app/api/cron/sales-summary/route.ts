@@ -121,8 +121,8 @@ export async function GET(request: Request) {
           const disc = Number(report?.discount_total || 0);
           const dailySalesTotal = gen + brd - disc - othersTotal;
 
-          // Daily Sales breakdown by payment method
-          const dailyCash = regularPayments
+          // Raw daily collections
+          const rawDailyCash = regularPayments
             .filter((p: any) => p.payment_method === 'CASH')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
@@ -133,6 +133,9 @@ export async function GET(request: Request) {
           const dailyCheque = regularPayments
             .filter((p: any) => p.payment_method === 'CHEQUE')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+          // Cash under Daily Sales now deducts Others
+          const dailyCash = Math.max(0, rawDailyCash - othersTotal);
 
           // Remittances = ONLY legacyPayments
           const remCash = legacyPayments
@@ -149,14 +152,10 @@ export async function GET(request: Request) {
 
           const remittancesTotal = remCash + remOnline + remCheque;
 
-          // Total Payments (with Others deducted)
-          let totalPaymentsCash = dailyCash + remCash;
-          let totalPaymentsOnline = dailyOnline + remOnline;
-          let totalPaymentsCheque = dailyCheque + remCheque;
-
-          // Deduct Others from cash totals
-          totalPaymentsCash -= othersTotal;
-
+          // Total Payments (Others already deducted from cash)
+          const totalPaymentsCash = dailyCash + remCash;
+          const totalPaymentsOnline = dailyOnline + remOnline;
+          const totalPaymentsCheque = dailyCheque + remCheque;
           const totalPayments =
             totalPaymentsCash + totalPaymentsOnline + totalPaymentsCheque;
 
@@ -227,7 +226,7 @@ export async function GET(request: Request) {
                 </tr>
               </table>
     
-              <!-- Cash / Online / Cheque breakdown under Daily Sales -->
+              <!-- Cash / Online / Cheque under Daily Sales (Cash already deducts Others) -->
               <table style="width:100%; border-collapse:collapse; margin-bottom:20px; font-size:13px;">
                 <tr><td style="padding:6px 12px;">Cash</td><td style="padding:6px 12px; text-align:right;">₱${dailyCash.toLocaleString()}</td></tr>
                 <tr><td style="padding:6px 12px;">Online</td><td style="padding:6px 12px; text-align:right;">₱${dailyOnline.toLocaleString()}</td></tr>
@@ -246,7 +245,7 @@ export async function GET(request: Request) {
                 <tr><td style="padding:6px 12px;">Cheque</td><td style="padding:6px 12px; text-align:right;">₱${remCheque.toLocaleString()}</td></tr>
               </table>
     
-              <!-- TOTAL PAYMENTS (Others already deducted) -->
+              <!-- TOTAL PAYMENTS -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:15px 0 8px 0; font-size:14px;">TOTAL PAYMENTS</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
                 <tr style="background:#f3f4f6; font-weight:700;">
