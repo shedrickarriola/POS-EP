@@ -19,6 +19,7 @@ export async function GET(request: Request) {
     const BOT_TOKEN = '8743953425:AAF2qLUU5aMK7SySJ9txxkEoda08GeP8kb8';
     const { Resend } = await import('resend');
     const resend = new Resend(process.env.RESEND_API_KEY!);
+
     // Get reliable PHT date for today
     const { data: todayPHT, error: dateError } = await supabaseAdmin.rpc(
       'get_current_pht_date'
@@ -33,6 +34,120 @@ export async function GET(request: Request) {
     const yesterdayDate = new Date(todayPHT);
     yesterdayDate.setDate(yesterdayDate.getDate() - 1);
     const yesterdayStr = yesterdayDate.toISOString().split('T')[0];
+
+    // =====================================================
+    // DAILY_EMAIL (8PM) — ONLY OFFICE BRANCHES → EMAIL TO owner_email
+    // This is handled FIRST and returns early so it never touches
+    // the Telegram/orgGroups path or causes variable conflicts.
+    // =====================================================
+    if (type === 'DAILY_EMAIL') {
+      console.log(
+        '📧 Starting Daily Email Report (8PM) - Office Branches Only'
+      );
+
+      const { data: orgsForEmail } = await supabaseAdmin
+        .from('organizations')
+        .select('id, name, owner_email')
+        .not('owner_email', 'is', null);
+
+      for (const org of orgsForEmail || []) {
+        if (!org.owner_email) continue;
+
+        // ONLY office branches
+        const { data: officeBranches } = await supabaseAdmin
+          .from('branches')
+          .select('*')
+          .eq('org_id', org.id)
+          .eq('is_office_use', true);
+
+        if (!officeBranches || officeBranches.length === 0) {
+          console.log(`⏭️ ${org.name} has no office branches`);
+          continue;
+        }
+
+        let emailHtml = `
+              <div style="font-family: Arial, sans-serif; max-width: 900px; margin: 0 auto; padding: 30px; background: #0f172a; color: #e2e8f0;">
+                <h1 style="color: #10b981; text-align: center;">📊 Daily Report - ${yesterdayStr}</h1>
+                <h2 style="color: #64748b; text-align: center;">${org.name} (Office Use Only)</h2>
+                <hr style="border: 1px solid #334155;">
+            `;
+
+        for (const b of officeBranches) {
+          const { data: report } = await supabaseAdmin
+            .from('daily_reports')
+            .select('*')
+            .eq('branch_id', b.id)
+            .eq('report_date', yesterdayStr)
+            .single();
+
+          const { data: payments } = await supabaseAdmin
+            .from('daily_payments')
+            .select('amount, payment_method')
+            .eq('branch_id', b.id)
+            .eq('report_date', yesterdayStr);
+
+          const totalCash = (payments || [])
+            .filter((p: any) => p.payment_method === 'CASH')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+          const totalCheque = (payments || [])
+            .filter((p: any) => p.payment_method === 'CHEQUE')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+          const totalPayments = totalCash + totalCheque;
+
+          emailHtml += `
+                <div style="background:#1e2937; padding:20px; border-radius:12px; margin:20px 0;">
+                  <h3 style="margin:0 0 15px 0; color:#67e8f9;">${b.branch_name}</h3>
+                  <table style="width:100%; border-collapse:collapse; color:#e2e8f0;">
+                    <tr><td style="padding:8px 0;"><strong>Generic Sales</strong></td><td style="text-align:right;">₱${Number(
+                      report?.generic_sales || 0
+                    ).toLocaleString()}</td></tr>
+                    <tr><td style="padding:8px 0;"><strong>Branded Sales</strong></td><td style="text-align:right;">₱${Number(
+                      report?.branded_sales || 0
+                    ).toLocaleString()}</td></tr>
+                    <tr><td style="padding:8px 0; border-top:2px solid #64748b;"><strong>Total Sales</strong></td><td style="text-align:right; border-top:2px solid #64748b; font-weight:bold;">₱${Number(
+                      report?.total_sales || 0
+                    ).toLocaleString()}</td></tr>
+                    <tr><td style="padding:8px 0;"><strong>Remittances</strong></td><td style="text-align:right;">₱${totalPayments.toLocaleString()}</td></tr>
+                    <tr><td style="padding:8px 0;"><strong>Expenses</strong></td><td style="text-align:right; color:#f87171;">₱${Number(
+                      report?.expenses || 0
+                    ).toLocaleString()}</td></tr>
+                    <tr style="background:#0f172a;"><td style="padding:12px 0; font-size:18px; font-weight:bold;">Actual Cash</td>
+                        <td style="text-align:right; font-size:18px; font-weight:bold; color:#10b981;">₱${Number(
+                          report?.actual_cash || 0
+                        ).toLocaleString()}</td></tr>
+                  </table>
+                </div>
+              `;
+        }
+
+        emailHtml += `</div>`;
+
+        // Send email
+        try {
+          await resend.emails.send({
+            from: 'Econo Drugstore <reports@econo-pos.com>',
+            to: org.owner_email,
+            subject: `📊 Daily Report - ${yesterdayStr} | ${org.name} (Office)`,
+            html: emailHtml,
+          });
+          console.log(`✅ Daily email sent to ${org.owner_email}`);
+        } catch (emailErr: any) {
+          console.error(`❌ Failed to send daily email to ${org.owner_email}:`, emailErr);
+        }
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: 'Daily email reports sent (Office branches only)',
+      });
+    }
+
+    // =====================================================
+    // ALL OTHER REPORT TYPES CONTINUE BELOW
+    // (STOCK_ADVISORY, REPORT_CHECKER, LOGIN, UPDATE, EOD)
+    // =====================================================
 
     // 1. DATA FETCHING
     const [
@@ -149,9 +264,8 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 4. MESSAGE LOOP (unchanged)
+    // 4. MESSAGE LOOP (for STOCK_ADVISORY + regular drugstore reports)
     for (const group of Object.values(orgGroups) as any[]) {
-      let message = '';
       if (type === 'STOCK_ADVISORY') {
         console.log(
           '🚀 STOCK_ADVISORY → Telegram (per branch) + Email (consolidated)'
@@ -414,7 +528,7 @@ export async function GET(request: Request) {
           ).toLocaleString()}</strong></p><hr>`;
         }
 
-        // Send consolidated email
+        // Send consolidated email (AFTER all branches processed)
         if (group.orderingEmail) {
           const emailList = group.orderingEmail
             .split(',')
@@ -522,121 +636,8 @@ export async function GET(request: Request) {
           }),
         });
       }
-
-      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: group.chatId,
-          text: message,
-          parse_mode: 'HTML',
-        }),
-      });
     }
 
-    // ==================== DAILY EMAIL REPORT (8PM) - ONLY OFFICE BRANCHES ====================
-    if (type === 'DAILY_EMAIL') {
-      console.log(
-        '📧 Starting Daily Email Report (8PM) - Office Branches Only'
-      );
-
-      const { data: orgs } = await supabaseAdmin
-        .from('organizations')
-        .select('id, name, owner_email')
-        .not('owner_email', 'is', null);
-
-      for (const org of orgs || []) {
-        if (!org.owner_email) continue;
-
-        // ONLY office branches
-        const { data: branches } = await supabaseAdmin
-          .from('branches')
-          .select('*')
-          .eq('org_id', org.id)
-          .eq('is_office_use', true);
-
-        if (!branches || branches.length === 0) {
-          console.log(`⏭️ ${org.name} has no office branches`);
-          continue;
-        }
-
-        let emailHtml = `
-              <div style="font-family: Arial, sans-serif; max-width: 900px; margin: 0 auto; padding: 30px; background: #0f172a; color: #e2e8f0;">
-                <h1 style="color: #10b981; text-align: center;">📊 Daily Report - ${yesterdayStr}</h1>
-                <h2 style="color: #64748b; text-align: center;">${org.name} (Office Use Only)</h2>
-                <hr style="border: 1px solid #334155;">
-            `;
-
-        for (const b of branches) {
-          const { data: report } = await supabaseAdmin
-            .from('daily_reports')
-            .select('*')
-            .eq('branch_id', b.id)
-            .eq('report_date', yesterdayStr)
-            .single();
-
-          const { data: payments } = await supabaseAdmin
-            .from('daily_payments')
-            .select('amount, payment_method')
-            .eq('branch_id', b.id)
-            .eq('report_date', yesterdayStr);
-
-          const totalCash = (payments || [])
-            .filter((p) => p.payment_method === 'CASH')
-            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-          const totalCheque = (payments || [])
-            .filter((p) => p.payment_method === 'CHEQUE')
-            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-          const totalPayments = totalCash + totalCheque;
-
-          emailHtml += `
-                <div style="background:#1e2937; padding:20px; border-radius:12px; margin:20px 0;">
-                  <h3 style="margin:0 0 15px 0; color:#67e8f9;">${
-                    b.branch_name
-                  }</h3>
-                  <table style="width:100%; border-collapse:collapse; color:#e2e8f0;">
-                    <tr><td style="padding:8px 0;"><strong>Generic Sales</strong></td><td style="text-align:right;">₱${Number(
-                      report?.generic_sales || 0
-                    ).toLocaleString()}</td></tr>
-                    <tr><td style="padding:8px 0;"><strong>Branded Sales</strong></td><td style="text-align:right;">₱${Number(
-                      report?.branded_sales || 0
-                    ).toLocaleString()}</td></tr>
-                    <tr><td style="padding:8px 0; border-top:2px solid #64748b;"><strong>Total Sales</strong></td><td style="text-align:right; border-top:2px solid #64748b; font-weight:bold;">₱${Number(
-                      report?.total_sales || 0
-                    ).toLocaleString()}</td></tr>
-                    <tr><td style="padding:8px 0;"><strong>Remittances</strong></td><td style="text-align:right;">₱${totalPayments.toLocaleString()}</td></tr>
-                    <tr><td style="padding:8px 0;"><strong>Expenses</strong></td><td style="text-align:right; color:#f87171;">₱${Number(
-                      report?.expenses || 0
-                    ).toLocaleString()}</td></tr>
-                    <tr style="background:#0f172a;"><td style="padding:12px 0; font-size:18px; font-weight:bold;">Actual Cash</td>
-                        <td style="text-align:right; font-size:18px; font-weight:bold; color:#10b981;">₱${Number(
-                          report?.actual_cash || 0
-                        ).toLocaleString()}</td></tr>
-                  </table>
-                </div>
-              `;
-        }
-
-        emailHtml += `</div>`;
-
-        // Send email
-        await resend.emails.send({
-          from: 'Econo Drugstore <reports@econo-pos.com>',
-          to: org.owner_email,
-          subject: `📊 Daily Report - ${yesterdayStr} | ${org.name} (Office)`,
-          html: emailHtml,
-        });
-
-        console.log(`✅ Daily email sent to ${org.owner_email}`);
-      }
-
-      return NextResponse.json({
-        success: true,
-        message: 'Daily email reports sent (Office branches only)',
-      });
-    }
     return NextResponse.json({ success: true });
   } catch (err: any) {
     console.error('Telegram Report Error:', err);
