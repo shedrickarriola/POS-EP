@@ -266,11 +266,37 @@ export default function NewPurchaseOrder() {
   const [showLotExpiryError, setShowLotExpiryError] = useState(false);
   const [lotExpiryErrorItems, setLotExpiryErrorItems] = useState<any[]>([]);
 
-  // Helper: Returns tomorrow's date in YYYY-MM-DD format (for restricting expiry input to future dates only)
-  const getTomorrowDateString = (): string => {
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    return tomorrow.toISOString().split('T')[0];
+  // === MONTH/YEAR EXPIRY PICKER HELPERS (for Office Use) ===
+  // Returns current month in "YYYY-MM" format (for min attribute on <input type="month">)
+  const getCurrentMonthString = (): string => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = (now.getMonth() + 1).toString().padStart(2, '0');
+    return `${year}-${month}`;
+  };
+
+  // Converts "YYYY-MM" (from month picker) → last day of that month as "YYYY-MM-DD"
+  // This keeps DB column as proper DATE type while UI is month/year only.
+  // Expiry "July 2026" means valid until end of July (2026-07-31).
+  const monthToLastDayDate = (monthStr: string): string => {
+    if (!monthStr || !monthStr.includes('-')) return '';
+    const parts = monthStr.split('-');
+    if (parts.length < 2) return '';
+    const year = parseInt(parts[0], 10);
+    const month = parseInt(parts[1], 10); // 1=Jan ... 12=Dec
+    if (isNaN(year) || isNaN(month) || month < 1 || month > 12) return '';
+    // Standard JS trick: new Date(year, month, 0) gives last day of the target month
+    const lastDay = new Date(year, month, 0).getDate();
+    const mm = parts[1].padStart(2, '0');
+    const dd = lastDay.toString().padStart(2, '0');
+    return `${parts[0]}-${mm}-${dd}`;
+  };
+
+  // Extracts "YYYY-MM" portion from a full "YYYY-MM-DD" date string (for controlled <input type="month"> value)
+  const getMonthFromDate = (dateStr: string | undefined | null): string => {
+    if (!dateStr) return '';
+    // Works for both "YYYY-MM-DD" and "YYYY-MM"
+    return dateStr.substring(0, 7);
   };
 
   // Returns a clear, specific reason why the item failed the Lot/Expiry check (for the modal)
@@ -1270,13 +1296,17 @@ export default function NewPurchaseOrder() {
                         {isOfficeUse && (
                           <td className="px-1">
                             <input
-                              type="date"
-                              min={getTomorrowDateString()}
+                              type="month"
+                              min={getCurrentMonthString()}
                               className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
-                              value={item.expiry_date || ''}
-                              onChange={(e) =>
-                                updateItem(idx, 'expiry_date', e.target.value)
-                              }
+                              value={getMonthFromDate(item.expiry_date)}
+                              onChange={(e) => {
+                                const selectedMonth = e.target.value; // e.g. "2026-07"
+                                const fullDate = selectedMonth
+                                  ? monthToLastDayDate(selectedMonth)
+                                  : '';
+                                updateItem(idx, 'expiry_date', fullDate);
+                              }}
                             />
                           </td>
                         )}

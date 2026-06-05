@@ -82,6 +82,37 @@ const getLevenshteinDistance = (a: string, b: string): number => {
   return matrix[a.length][b.length];
 };
 
+// === MONTH/YEAR EXPIRY HELPERS (Office Use) - same pattern as Purchase Order ===
+const getCurrentMonthString = (): string => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = (now.getMonth() + 1).toString().padStart(2, '0');
+  return `${year}-${month}`;
+};
+
+const monthToLastDayDate = (monthStr: string): string => {
+  if (!monthStr || !monthStr.includes('-')) return '';
+  const parts = monthStr.split('-');
+  if (parts.length < 2) return '';
+  const year = parseInt(parts[0], 10);
+  const month = parseInt(parts[1], 10);
+  if (isNaN(year) || isNaN(month) || month < 1 || month > 12) return '';
+  const lastDay = new Date(year, month, 0).getDate();
+  const mm = parts[1].padStart(2, '0');
+  const dd = lastDay.toString().padStart(2, '0');
+  return `${parts[0]}-${mm}-${dd}`;
+};
+
+const getMonthFromDate = (dateStr: string | undefined | null): string => {
+  if (!dateStr) return '';
+  return dateStr.substring(0, 7);
+};
+
+const formatMonthYear = (dateStr: string | undefined | null): string => {
+  if (!dateStr) return '';
+  return dateStr.substring(0, 7);
+};
+
 export default function NewOrderPOS() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
@@ -704,7 +735,13 @@ export default function NewOrderPOS() {
 
         if (item.qty > latestStock) {
           setLotStockErrorMessage(
-            `Cannot proceed with this order.\n\nLot# ${item.lot_number} (Expiry: ${item.expiry_date})\nfor "${item.item_name}" only has ${latestStock} pcs left.\n\nYou are trying to sell ${item.qty} pcs from this lot.`
+            `Cannot proceed with this order.\n\nLot# ${
+              item.lot_number
+            } (Expiry: ${formatMonthYear(item.expiry_date)})\nfor "${
+              item.item_name
+            }" only has ${latestStock} pcs left.\n\nYou are trying to sell ${
+              item.qty
+            } pcs from this lot.`
           );
           setShowLotStockError(true);
           setLoading(false);
@@ -1514,7 +1551,8 @@ export default function NewOrderPOS() {
                                     <option value="">-- Select lot --</option>
                                     {item.lot_options.map((lot, i) => (
                                       <option key={i} value={lot.lot_number}>
-                                        {lot.lot_number} | {lot.expiry_date} |{' '}
+                                        {lot.lot_number} |{' '}
+                                        {formatMonthYear(lot.expiry_date)} |{' '}
                                         {lot.current_stock}pcs
                                       </option>
                                     ))}
@@ -1567,16 +1605,21 @@ export default function NewOrderPOS() {
                           {/* Expiry Date Column - Restored */}
                           <td className="p-1 w-[115px]">
                             <input
-                              type="date"
-                              value={item.expiry_date || ''}
+                              type="month"
+                              min={getCurrentMonthString()}
+                              value={getMonthFromDate(item.expiry_date)}
                               disabled={!!item.lot_locked}
                               onChange={(e) => {
+                                const selectedMonth = e.target.value;
+                                const fullDate = selectedMonth
+                                  ? monthToLastDayDate(selectedMonth)
+                                  : '';
                                 setItems(
                                   items.map((i) =>
                                     i.id === item.id
                                       ? {
                                           ...i,
-                                          expiry_date: e.target.value,
+                                          expiry_date: fullDate,
                                           lot_locked: false,
                                         }
                                       : i
@@ -1607,7 +1650,13 @@ export default function NewOrderPOS() {
                             ) {
                               if (newQty > item.selected_lot_stock) {
                                 setLotStockErrorMessage(
-                                  `Lot# ${item.lot_number} (Expiry: ${item.expiry_date})\nonly has ${item.selected_lot_stock} pcs remaining.\n\nYou cannot sell ${newQty} pcs from this specific lot.`
+                                  `Lot# ${
+                                    item.lot_number
+                                  } (Expiry: ${formatMonthYear(
+                                    item.expiry_date
+                                  )})\nonly has ${
+                                    item.selected_lot_stock
+                                  } pcs remaining.\n\nYou cannot sell ${newQty} pcs from this specific lot.`
                                 );
                                 setShowLotStockError(true);
                                 return; // prevent invalid qty

@@ -1835,13 +1835,24 @@ export default function StaffDashboard() {
         }
       };
 
+      // ==================== UPDATED: Expiry MM/YYYY + Uppercase LOT ====================
+      const formatExpiryMMYYYY = (dateStr: string): string => {
+        if (!dateStr) return '';
+        const parts = dateStr.split('-');
+        if (parts.length >= 2) {
+          return `${parts[1]}/${parts[0]}`; // MM/YYYY
+        }
+        return dateStr;
+      };
+
       items.forEach((item: any) => {
         const qty = Number(item.quantity || 1);
         const unitPrice = Number(item.unit_price || 0);
         const lineTotal = Number(item.subtotal || 0);
         const itemName = (item.inventory?.item_name || '').trim();
-        const lotNumber = (item.lot_number || '').trim();
+        const lotNumber = (item.lot_number || '').trim().toUpperCase(); // ← UPPERCASE
         const expiryDate = item.expiry_date || '';
+        const expiryDisplay = formatExpiryMMYYYY(expiryDate); // ← MM/YYYY
 
         const lotMaxWidth = 32;
         const expiryMaxWidth = 38;
@@ -1853,8 +1864,8 @@ export default function StaffDashboard() {
         const lotLines = lotNumber
           ? doc.splitTextToSize(lotNumber, lotMaxWidth)
           : [''];
-        const expiryLines = expiryDate
-          ? doc.splitTextToSize(expiryDate, expiryMaxWidth)
+        const expiryLines = expiryDisplay
+          ? doc.splitTextToSize(expiryDisplay, expiryMaxWidth)
           : [''];
 
         const numLines = Math.max(
@@ -1878,7 +1889,8 @@ export default function StaffDashboard() {
           if (i === 0) {
             doc.text(String(qty), 18, rowY);
             doc.text('1s', 25, rowY);
-            if (expiryDate) doc.text(expiryLines[i] || expiryDate, 46, rowY);
+            if (expiryDisplay)
+              doc.text(expiryLines[i] || expiryDisplay, 46, rowY);
           }
           if (lotLines[i]) doc.text(lotLines[i], 30, rowY);
           if (itemNameLines[i]) doc.text(itemNameLines[i], 67, rowY);
@@ -1943,6 +1955,7 @@ export default function StaffDashboard() {
       triggerToast('Failed to generate PDF: ' + err.message, 'error');
     }
   };
+
   const handleDownloadDayPDF = async () => {
     if (!selectedDay || !selectedBranch) return;
 
