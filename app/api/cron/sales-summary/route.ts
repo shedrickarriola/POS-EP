@@ -41,7 +41,7 @@ export async function GET(request: Request) {
     // the Telegram/orgGroups path or causes variable conflicts.
     if (type === 'DAILY_EMAIL') {
       console.log(
-        '📧 Starting Daily Email Report (8PM) - Office Branches Only'
+        "📧 Starting Daily Email Report (8PM) - TODAY'S DATA (End of Day)"
       );
 
       const { data: orgsForEmail } = await supabaseAdmin
@@ -61,28 +61,33 @@ export async function GET(request: Request) {
         if (!officeBranches || officeBranches.length === 0) continue;
 
         for (const b of officeBranches) {
-          // === Fetch all data ===
+          // === Use TODAY'S date instead of yesterday ===
+          const reportDate = todayPHT; // ← Changed to today
+
+          // === 1. Get daily_reports for TODAY ===
           const { data: report } = await supabaseAdmin
             .from('daily_reports')
             .select('*')
             .eq('branch_id', b.id)
-            .eq('report_date', yesterdayStr)
+            .eq('report_date', reportDate)
             .single();
 
+          // === 2. Get all payments for TODAY ===
           const { data: allPayments } = await supabaseAdmin
             .from('daily_payments')
             .select(
               `*, orders (client_name, order_number, dr_number, delivery_date)`
             )
             .eq('branch_id', b.id)
-            .eq('report_date', yesterdayStr)
+            .eq('report_date', reportDate)
             .order('created_at', { ascending: true });
 
+          // === 3. Get expenses for TODAY ===
           const { data: expenses } = await supabaseAdmin
             .from('daily_expenses')
             .select('*')
             .eq('branch_id', b.id)
-            .eq('report_date', yesterdayStr);
+            .eq('report_date', reportDate);
 
           const legacyPayments = (allPayments || []).filter(
             (p: any) => !p.order_id
@@ -94,11 +99,43 @@ export async function GET(request: Request) {
             (p: any) => p.payment_method === 'ONLINE'
           );
 
-          // === Calculations ===
+          // === 4. Calculate "OTHERS" (Office Account Sales) for TODAY ===
+          const { data: dayOrdersForOthers } = await supabaseAdmin
+            .from('orders')
+            .select('total_amount, client_name')
+            .eq('branch_id', b.id)
+            .eq('created_date_pht', reportDate);
+
+          const clientNames = [
+            ...new Set(
+              (dayOrdersForOthers || [])
+                .map((o) => o.client_name)
+                .filter(Boolean)
+            ),
+          ];
+
+          let othersTotal = 0;
+          if (clientNames.length > 0) {
+            const { data: clientsData } = await supabaseAdmin
+              .from('clients')
+              .select('client_name, is_office_account')
+              .in('client_name', clientNames);
+
+            const officeClientSet = new Set(
+              (clientsData || [])
+                .filter((c) => c.is_office_account === true)
+                .map((c) => c.client_name)
+            );
+
+            othersTotal = (dayOrdersForOthers || [])
+              .filter((o) => officeClientSet.has(o.client_name))
+              .reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
+          }
+
+          // === 5. Final calculations ===
           const gen = Number(report?.generic_sales || 0);
           const brd = Number(report?.branded_sales || 0);
           const disc = Number(report?.discount_total || 0);
-          const othersTotal = 0;
           const netSales = gen + brd - disc - othersTotal;
 
           const totalRemittances = (allPayments || []).reduce(
@@ -110,21 +147,21 @@ export async function GET(request: Request) {
             0
           );
 
-          // === Build FULL HTML with EVERY section ===
+          // === Build FULL HTML ===
           let emailHtml = `
             <div style="font-family: system-ui, Arial, sans-serif; max-width: 950px; margin: 0 auto; padding: 20px; background: #ffffff; color: #111827; border: 1px solid #e5e7eb;">
               
-              <h1 style="text-align:center; margin:0 0 5px 0; font-size:22px;">DAILY REPORT</h1>
+              <h1 style="text-align:center; margin:0 0 5px 0; font-size:22px;">DAILY REPORT (END OF DAY)</h1>
               <h2 style="text-align:center; margin:0 0 25px 0; font-size:16px; color:#374151;">${
                 b.branch_name
-              } — ${yesterdayStr}</h2>
+              } — ${reportDate}</h2>
     
               <!-- DAILY SALES -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:0 0 10px 0; font-size:14px;">DAILY SALES</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:14px;">
                 <tr><td style="padding:6px 12px;">Generic</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${gen.toLocaleString()}</td></tr>
                 <tr><td style="padding:6px 12px;">Branded</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${brd.toLocaleString()}</td></tr>
-                <tr><td style="padding:6px 12px;">Others</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${othersTotal.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px;">Others (Office Accounts)</td><td style="padding:6px 12px; text-align:right; font-weight:600; color:#d97706;">₱${othersTotal.toLocaleString()}</td></tr>
                 <tr><td style="padding:6px 12px; color:#dc2626;">Discount</td><td style="padding:6px 12px; text-align:right; color:#dc2626; font-weight:600;">- ₱${disc.toLocaleString()}</td></tr>
                 <tr style="background:#f3f4f6; font-weight:700;">
                   <td style="padding:10px 12px;">TOTAL SALES (NET)</td>
@@ -367,15 +404,17 @@ export async function GET(request: Request) {
             </div>
           `;
 
-          // Send
+          // Send email
           try {
             await resend.emails.send({
               from: 'Econo Drugstore <stock@alerts.econo-pos.com>',
               to: org.owner_email,
-              subject: `📊 Daily Report - ${yesterdayStr} | ${b.branch_name}`,
+              subject: `📊 Daily Report (End of Day) - ${reportDate} | ${b.branch_name}`,
               html: emailHtml,
             });
-            console.log(`✅ COMPLETE Daily Report sent to ${org.owner_email}`);
+            console.log(
+              `✅ Today's End of Day Report sent to ${org.owner_email}`
+            );
           } catch (err: any) {
             console.error('Email failed:', err);
           }
@@ -384,7 +423,7 @@ export async function GET(request: Request) {
 
       return NextResponse.json({
         success: true,
-        message: 'Full detailed daily email sent',
+        message: "Today's End of Day email sent",
       });
     }
     // =====================================================
