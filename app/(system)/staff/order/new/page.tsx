@@ -1725,9 +1725,8 @@ export default function NewOrderPOS() {
                       {/* === DISCOUNT / ADJUSTMENT COLUMN - Drugstore vs Office === */}
                       <td className="p-1.5 min-w-[130px]">
                         {isOfficeUse ? (
-                          // OFFICE MODE: Only admins can use 6% discount or +10% markup
+                          // OFFICE MODE: Staff + Admin can apply 6% discount or +10% markup
                           <select
-                            disabled={!isAdmin}
                             value={item.discount_percent}
                             onChange={(e) => {
                               const val = Number(e.target.value);
@@ -1739,11 +1738,7 @@ export default function NewOrderPOS() {
                                 )
                               );
                             }}
-                            className={`w-full bg-slate-800 text-blue-400 font-bold text-center py-1.5 rounded-md outline-none text-[10px] transition-all ${
-                              !isAdmin
-                                ? 'opacity-40 cursor-not-allowed'
-                                : 'border border-amber-400/30'
-                            }`}
+                            className="w-full bg-slate-800 text-blue-400 font-bold text-center py-1.5 rounded-md outline-none text-[10px] transition-all border border-amber-400/30"
                           >
                             <option value={0}>No Adjustment</option>
                             <option value={6}>6% Discount</option>
