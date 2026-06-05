@@ -38,7 +38,7 @@ export async function GET(request: Request) {
     // =====================================================
     if (type === 'DAILY_EMAIL') {
       console.log(
-        '📧 Daily Email Report - Full version with correct SUMMARY format'
+        '📧 Starting Daily Email Report (8PM) - Full version with fixed calculations'
       );
 
       const { data: orgsForEmail } = await supabaseAdmin
@@ -60,6 +60,7 @@ export async function GET(request: Request) {
         for (const b of officeBranches) {
           const reportDate = todayPHT;
 
+          // === Fetch Data ===
           const { data: report } = await supabaseAdmin
             .from('daily_reports')
             .select('*')
@@ -87,9 +88,8 @@ export async function GET(request: Request) {
           const regularPayments = (allPaymentsRaw || []).filter(
             (p: any) => p.order_id
           );
-          const allRemittances = [...regularPayments, ...legacyPayments];
 
-          // Others
+          // === Calculate Others (Office Accounts) ===
           const { data: dayOrders } = await supabaseAdmin
             .from('orders')
             .select('total_amount, client_name')
@@ -118,33 +118,41 @@ export async function GET(request: Request) {
             }
           }
 
-          // === Calculations ===
+          // === FIXED CALCULATIONS ===
           const gen = Number(report?.generic_sales || 0);
           const brd = Number(report?.branded_sales || 0);
           const disc = Number(report?.discount_total || 0);
           const dailySalesTotal = gen + brd - disc - othersTotal;
 
+          // Daily Sales breakdown (today's collections only)
           const dailyCash = regularPayments
-            .filter((p) => p.payment_method === 'CASH')
-            .reduce((s, p) => s + Number(p.amount || 0), 0);
-          const dailyOnline = regularPayments
-            .filter((p) => p.payment_method === 'ONLINE')
-            .reduce((s, p) => s + Number(p.amount || 0), 0);
-          const dailyCheque = regularPayments
-            .filter((p) => p.payment_method === 'CHEQUE')
-            .reduce((s, p) => s + Number(p.amount || 0), 0);
+            .filter((p: any) => p.payment_method === 'CASH')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-          const remCash = allRemittances
-            .filter((p) => p.payment_method === 'CASH')
-            .reduce((s, p) => s + Number(p.amount || 0), 0);
-          const remOnline = allRemittances
-            .filter((p) => p.payment_method === 'ONLINE')
-            .reduce((s, p) => s + Number(p.amount || 0), 0);
-          const remCheque = allRemittances
-            .filter((p) => p.payment_method === 'CHEQUE')
-            .reduce((s, p) => s + Number(p.amount || 0), 0);
+          const dailyOnline = regularPayments
+            .filter((p: any) => p.payment_method === 'ONLINE')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+          const dailyCheque = regularPayments
+            .filter((p: any) => p.payment_method === 'CHEQUE')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+          // Remittances = ONLY legacyPayments (do NOT include today's regularPayments)
+          const remCash = legacyPayments
+            .filter((p: any) => p.payment_method === 'CASH')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+          const remOnline = legacyPayments
+            .filter((p: any) => p.payment_method === 'ONLINE')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+          const remCheque = legacyPayments
+            .filter((p: any) => p.payment_method === 'CHEQUE')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
           const remittancesTotal = remCash + remOnline + remCheque;
 
+          // Total Payments
           const totalPaymentsCash = dailyCash + remCash;
           const totalPaymentsOnline = dailyOnline + remOnline;
           const totalPaymentsCheque = dailyCheque + remCheque;
@@ -152,24 +160,24 @@ export async function GET(request: Request) {
             totalPaymentsCash + totalPaymentsOnline + totalPaymentsCheque;
 
           const totalExpenses = (expenses || []).reduce(
-            (s, e) => s + Number(e.amount || 0),
+            (sum, e) => sum + Number(e.amount || 0),
             0
           );
           const actualCash = totalPaymentsCash - totalExpenses;
 
-          // Sort
+          // === Sort tables by Client Name ===
           const sortedRegular = [...regularPayments].sort((a, b) => {
-            const na = (
+            const nameA = (
               a.orders?.client_name ||
               a.customer_name ||
               ''
             ).toLowerCase();
-            const nb = (
+            const nameB = (
               b.orders?.client_name ||
               b.customer_name ||
               ''
             ).toLowerCase();
-            return na.localeCompare(nb);
+            return nameA.localeCompare(nameB);
           });
 
           const sortedLegacy = [...legacyPayments].sort((a, b) =>
@@ -177,25 +185,26 @@ export async function GET(request: Request) {
               .toLowerCase()
               .localeCompare((b.customer_name || '').toLowerCase())
           );
+
           const sortedOnline = [
             ...(allPaymentsRaw || []).filter(
-              (p) => p.payment_method === 'ONLINE'
+              (p: any) => p.payment_method === 'ONLINE'
             ),
           ].sort((a, b) => {
-            const na = (
+            const nameA = (
               a.customer_name ||
               a.orders?.client_name ||
               ''
             ).toLowerCase();
-            const nb = (
+            const nameB = (
               b.customer_name ||
               b.orders?.client_name ||
               ''
             ).toLowerCase();
-            return na.localeCompare(nb);
+            return nameA.localeCompare(nameB);
           });
 
-          // === FULL HTML ===
+          // === FULL HTML EMAIL ===
           let emailHtml = `
             <div style="font-family: system-ui, Arial, sans-serif; max-width: 950px; margin: 0 auto; padding: 20px; background: #ffffff; color: #111827; border: 1px solid #e5e7eb;">
               
@@ -312,7 +321,7 @@ export async function GET(request: Request) {
                 </tbody>
               </table>
     
-              <!-- REMITTANCES TABLE -->
+              <!-- REMITTANCES / PAYMENTS TABLE -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:20px 0 10px 0; font-size:14px;">REMITTANCES / PAYMENTS</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:12px;">
                 <thead>
@@ -479,14 +488,19 @@ export async function GET(request: Request) {
               subject: `📊 Daily Report (End of Day) - ${reportDate} | ${b.branch_name}`,
               html: emailHtml,
             });
-            console.log(`✅ Full Daily Report sent`);
+            console.log(
+              `✅ Daily Report sent successfully to ${org.owner_email}`
+            );
           } catch (err: any) {
             console.error('Email failed:', err);
           }
         }
       }
 
-      return NextResponse.json({ success: true, message: 'Full email sent' });
+      return NextResponse.json({
+        success: true,
+        message: 'Daily email sent with fixed calculations',
+      });
     }
     // =====================================================
     // ALL OTHER REPORT TYPES CONTINUE BELOW
