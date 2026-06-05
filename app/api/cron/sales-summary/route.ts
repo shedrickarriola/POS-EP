@@ -37,7 +37,9 @@ export async function GET(request: Request) {
 
     // =====================================================
     if (type === 'DAILY_EMAIL') {
-      console.log('📧 Starting Daily Email Report (8PM) - PDF Attachment');
+      console.log(
+        '📧 Starting Daily Email Report (8PM) - PDF (matching StaffHub logic)'
+      );
 
       const { data: orgsForEmail } = await supabaseAdmin
         .from('organizations')
@@ -58,7 +60,7 @@ export async function GET(request: Request) {
         for (const b of officeBranches) {
           const reportDate = todayPHT;
 
-          // Fetch all data
+          // === Fetch data (trying to match fetchDayDetails logic) ===
           const { data: report } = await supabaseAdmin
             .from('daily_reports')
             .select('*')
@@ -66,7 +68,7 @@ export async function GET(request: Request) {
             .eq('report_date', reportDate)
             .single();
 
-          const { data: allPayments } = await supabaseAdmin
+          const { data: allPaymentsRaw } = await supabaseAdmin
             .from('daily_payments')
             .select(
               `*, orders (client_name, order_number, dr_number, delivery_date)`
@@ -74,18 +76,19 @@ export async function GET(request: Request) {
             .eq('branch_id', b.id)
             .eq('report_date', reportDate);
 
-          const { data: expenses } = await supabaseAdmin
+          const { data: expensesRaw } = await supabaseAdmin
             .from('daily_expenses')
             .select('*')
             .eq('branch_id', b.id)
             .eq('report_date', reportDate);
 
-          const legacyPayments = (allPayments || []).filter(
+          const legacyPayments = (allPaymentsRaw || []).filter(
             (p: any) => !p.order_id
           );
-          const regularPayments = (allPayments || []).filter(
+          const dayPayments = (allPaymentsRaw || []).filter(
             (p: any) => p.order_id
-          );
+          ); // regular payments
+          const allRemittances = [...dayPayments, ...legacyPayments];
 
           // Calculate Others (Office Accounts)
           const { data: dayOrders } = await supabaseAdmin
@@ -110,62 +113,105 @@ export async function GET(request: Request) {
                   .filter((c) => c.is_office_account)
                   .map((c) => c.client_name)
               );
-
               othersTotal = dayOrders
                 .filter((o) => officeSet.has(o.client_name))
                 .reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
             }
           }
 
-          // Generate PDF
+          // === SUMMARY Calculations (matching handleDownloadDayPDF) ===
+          const dailyCash = dayPayments
+            .filter((p: any) => p.payment_method === 'CASH')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+          const dailyCheque = dayPayments
+            .filter((p: any) => p.payment_method === 'CHEQUE')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+          const remCash = allRemittances
+            .filter((p: any) => p.payment_method === 'CASH')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+          const remCheque = allRemittances
+            .filter((p: any) => p.payment_method === 'CHEQUE')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+          let totalCash = dailyCash + remCash;
+          const totalCheque = dailyCheque + remCheque;
+          let totalPayments = totalCash + totalCheque;
+
+          totalCash -= othersTotal;
+          totalPayments -= othersTotal;
+
+          const totalExpenses = (expensesRaw || []).reduce(
+            (sum, e) => sum + Number(e.amount || 0),
+            0
+          );
+          const actualCash = totalCash - totalExpenses;
+
+          // === Generate PDF ===
           const { jsPDF } = await import('jspdf');
           const doc = new jsPDF('p', 'mm', 'a4');
           let y = 20;
+          const lineHeight = 5.5;
+          const pageHeight = 290;
+
+          const addPageIfNeeded = (neededSpace = 10) => {
+            if (y + neededSpace > pageHeight) {
+              doc.addPage();
+              y = 20;
+            }
+          };
 
           // Header
           doc.setFontSize(16);
           doc.text('DAILY REPORT (END OF DAY)', 105, y, { align: 'center' });
-          y += 8;
+          y += 7;
           doc.setFontSize(12);
           doc.text(`${b.branch_name} — ${reportDate}`, 105, y, {
             align: 'center',
           });
-          y += 12;
+          y += 10;
 
           // DAILY SALES
+          addPageIfNeeded(40);
           doc.setFontSize(11);
           doc.text('DAILY SALES', 20, y);
           y += 7;
           doc.setFontSize(10);
           doc.text(
-            `Generic   : PHP ${Number(
+            `Generic                 : PHP ${Number(
               report?.generic_sales || 0
             ).toLocaleString()}`,
             20,
             y
           );
-          y += 5;
+          y += lineHeight;
           doc.text(
-            `Branded   : PHP ${Number(
+            `Branded                 : PHP ${Number(
               report?.branded_sales || 0
             ).toLocaleString()}`,
             20,
             y
           );
-          y += 5;
-          doc.text(`Others    : PHP ${othersTotal.toLocaleString()}`, 20, y);
-          y += 5;
+          y += lineHeight;
           doc.text(
-            `Discount  : PHP ${Number(
+            `Others (Office Accounts): PHP ${othersTotal.toLocaleString()}`,
+            20,
+            y
+          );
+          y += lineHeight;
+          doc.text(
+            `Discount                : PHP ${Number(
               report?.discount_total || 0
             ).toLocaleString()}`,
             20,
             y
           );
-          y += 6;
+          y += lineHeight + 2;
           doc.setFontSize(11);
           doc.text(
-            `TOTAL SALES (NET) : PHP ${(
+            `TOTAL SALES (NET)       : PHP ${(
               Number(report?.generic_sales || 0) +
               Number(report?.branded_sales || 0) -
               Number(report?.discount_total || 0) -
@@ -174,63 +220,73 @@ export async function GET(request: Request) {
             20,
             y
           );
-          y += 12;
+          y += 10;
 
           // SUMMARY
+          addPageIfNeeded(50);
           doc.setFontSize(11);
           doc.text('SUMMARY', 20, y);
           y += 7;
           doc.setFontSize(10);
           doc.text(
-            `Daily Sales Cash     : PHP ${Number(
-              report?.daily_sales_cash || 0
-            ).toLocaleString()}`,
+            `Daily Sales Cash   : PHP ${dailyCash.toLocaleString()}`,
             20,
             y
           );
-          y += 5;
+          y += lineHeight;
           doc.text(
-            `Remittances          : PHP ${Number(
-              report?.total_payments || 0
-            ).toLocaleString()}`,
+            `Daily Sales Cheque : PHP ${dailyCheque.toLocaleString()}`,
             20,
             y
           );
-          y += 5;
+          y += lineHeight;
           doc.text(
-            `Expenses             : PHP ${Number(
-              report?.expenses || 0
+            `Remittances        : PHP ${(
+              remCash + remCheque
             ).toLocaleString()}`,
             20,
             y
           );
-          y += 6;
+          y += lineHeight;
+          doc.text(
+            `Total Payments     : PHP ${totalPayments.toLocaleString()}`,
+            20,
+            y
+          );
+          y += lineHeight;
+          doc.text(
+            `Expenses           : PHP ${totalExpenses.toLocaleString()}`,
+            20,
+            y
+          );
+          y += lineHeight + 2;
           doc.setFontSize(12);
           doc.text(
-            `Actual Cash          : PHP ${Number(
-              report?.actual_cash || 0
-            ).toLocaleString()}`,
+            `Actual Cash        : PHP ${actualCash.toLocaleString()}`,
             20,
             y
           );
-          y += 15;
+          y += 12;
 
-          // REMITTANCES
+          // REMITTANCES / PAYMENTS
+          addPageIfNeeded(60);
           doc.setFontSize(11);
           doc.text('REMITTANCES / PAYMENTS', 20, y);
           y += 7;
           doc.setFontSize(9);
 
-          regularPayments.forEach((p: any) => {
-            if (y > 270) {
-              doc.addPage();
-              y = 20;
-            }
+          allRemittances.forEach((p: any) => {
+            addPageIfNeeded();
             const order = p.orders || {};
-            const line = `${order.client_name || p.customer_name || '—'} | ${
-              p.payment_method
-            } | ₱${Number(p.amount).toLocaleString()} | ${p.pr_number || ''}`;
-            doc.text(line, 20, y);
+            const client = order.client_name || p.customer_name || '—';
+            const amount = Number(p.amount || 0).toLocaleString();
+            doc.text(
+              `${client} | ${p.payment_method} | ₱${amount} | PR: ${
+                p.pr_number || ''
+              }`,
+              20,
+              y
+            );
             y += 5;
           });
 
@@ -238,15 +294,13 @@ export async function GET(request: Request) {
 
           // LEGACY PAYMENTS
           if (legacyPayments.length > 0) {
+            addPageIfNeeded(30);
             doc.setFontSize(11);
             doc.text('LEGACY / STANDALONE PAYMENTS (Old POS)', 20, y);
             y += 7;
             doc.setFontSize(9);
             legacyPayments.forEach((p: any) => {
-              if (y > 270) {
-                doc.addPage();
-                y = 20;
-              }
+              addPageIfNeeded();
               doc.text(
                 `${p.customer_name} | ${p.payment_method} | ₱${Number(
                   p.amount
@@ -260,15 +314,13 @@ export async function GET(request: Request) {
           }
 
           // EXPENSES
+          addPageIfNeeded(40);
           doc.setFontSize(11);
           doc.text('EXPENSES', 20, y);
           y += 7;
           doc.setFontSize(9);
-          expenses.forEach((e: any) => {
-            if (y > 270) {
-              doc.addPage();
-              y = 20;
-            }
+          (expensesRaw || []).forEach((e: any) => {
+            addPageIfNeeded();
             doc.text(
               `${e.expense_name} — ₱${Number(e.amount).toLocaleString()}`,
               20,
@@ -277,16 +329,16 @@ export async function GET(request: Request) {
             y += 5;
           });
 
-          // Generate buffer
+          // Generate PDF buffer
           const pdfBuffer = Buffer.from(doc.output('arraybuffer'));
 
-          // Send email with PDF attachment
+          // Send email with attachment
           try {
             await resend.emails.send({
               from: 'Econo Drugstore <stock@alerts.econo-pos.com>',
               to: org.owner_email,
               subject: `📊 Daily Report (End of Day) - ${reportDate} | ${b.branch_name}`,
-              html: `<p>Please find attached the official Daily Report for <strong>${b.branch_name}</strong> on <strong>${reportDate}</strong>.</p>`,
+              html: `<p>Please find attached the Daily Report for <strong>${b.branch_name}</strong> on <strong>${reportDate}</strong>.</p>`,
               attachments: [
                 {
                   filename: `Daily_Report_${reportDate}_${b.branch_name.replace(
@@ -297,17 +349,14 @@ export async function GET(request: Request) {
                 },
               ],
             });
-            console.log(`✅ PDF attached and sent to ${org.owner_email}`);
+            console.log(`✅ PDF sent to ${org.owner_email}`);
           } catch (err: any) {
-            console.error('Failed to send email with PDF:', err);
+            console.error('Email with PDF failed:', err);
           }
         }
       }
 
-      return NextResponse.json({
-        success: true,
-        message: 'PDF Daily Report sent',
-      });
+      return NextResponse.json({ success: true, message: 'PDF report sent' });
     }
     // =====================================================
     // ALL OTHER REPORT TYPES CONTINUE BELOW
