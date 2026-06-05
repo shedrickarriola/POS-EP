@@ -39,7 +39,6 @@ export async function GET(request: Request) {
     // DAILY_EMAIL (8PM) — ONLY OFFICE BRANCHES → EMAIL TO owner_email
     // This is handled FIRST and returns early so it never touches
     // the Telegram/orgGroups path or causes variable conflicts.
-    // =====================================================
     if (type === 'DAILY_EMAIL') {
       console.log(
         '📧 Starting Daily Email Report (8PM) - Office Branches Only'
@@ -59,13 +58,10 @@ export async function GET(request: Request) {
           .eq('org_id', org.id)
           .eq('is_office_use', true);
 
-        if (!officeBranches || officeBranches.length === 0) {
-          console.log(`⏭️ ${org.name} has no office branches`);
-          continue;
-        }
+        if (!officeBranches || officeBranches.length === 0) continue;
 
         for (const b of officeBranches) {
-          // Get daily report summary
+          // === Fetch all data needed for PDF ===
           const { data: report } = await supabaseAdmin
             .from('daily_reports')
             .select('*')
@@ -73,15 +69,13 @@ export async function GET(request: Request) {
             .eq('report_date', yesterdayStr)
             .single();
 
-          // Get detailed remittances (including legacy payments)
-          const { data: payments } = await supabaseAdmin
+          const { data: allPayments } = await supabaseAdmin
             .from('daily_payments')
             .select('*')
             .eq('branch_id', b.id)
             .eq('report_date', yesterdayStr)
             .order('created_at', { ascending: true });
 
-          // Get expenses
           const { data: expenses } = await supabaseAdmin
             .from('daily_expenses')
             .select('*')
@@ -89,181 +83,209 @@ export async function GET(request: Request) {
             .eq('report_date', yesterdayStr)
             .order('created_at', { ascending: true });
 
-          const totalCash = (payments || [])
-            .filter((p: any) => p.payment_method === 'CASH')
-            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-          const totalCheque = (payments || [])
-            .filter((p: any) => p.payment_method === 'CHEQUE')
-            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-          const totalOnline = (payments || [])
-            .filter((p: any) => p.payment_method === 'ONLINE')
-            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-          const totalRemittances = totalCash + totalCheque + totalOnline;
-          const totalExpenses = (expenses || []).reduce(
-            (sum, e) => sum + Number(e.amount || 0),
-            0
+          const legacyPayments = (allPayments || []).filter(
+            (p: any) => !p.order_id
+          );
+          const regularPayments = (allPayments || []).filter(
+            (p: any) => p.order_id
           );
 
-          // Build rich HTML report
-          let emailHtml = `
-            <div style="font-family: Arial, sans-serif; max-width: 900px; margin: 0 auto; padding: 30px; background: #0f172a; color: #e2e8f0;">
-              <h1 style="color: #10b981; text-align: center; margin-bottom: 5px;">📊 DAILY REPORT</h1>
-              <h2 style="color: #64748b; text-align: center; margin-top: 0;">${
-                b.branch_name
-              } — ${yesterdayStr}</h2>
-              <hr style="border: 1px solid #334155; margin: 20px 0;">
-    
-              <!-- SALES SUMMARY -->
-              <h3 style="color: #67e8f9; margin-bottom: 10px;">💰 Sales Summary</h3>
-              <table style="width:100%; border-collapse: collapse; background:#1e2937; border-radius:12px; overflow:hidden; margin-bottom:25px;">
-                <tr style="background:#334155;">
-                  <td style="padding:12px 16px; font-weight:bold;">Generic Sales</td>
-                  <td style="padding:12px 16px; text-align:right; font-weight:bold;">₱${Number(
-                    report?.generic_sales || 0
-                  ).toLocaleString()}</td>
-                </tr>
-                <tr>
-                  <td style="padding:12px 16px; font-weight:bold;">Branded Sales</td>
-                  <td style="padding:12px 16px; text-align:right; font-weight:bold;">₱${Number(
-                    report?.branded_sales || 0
-                  ).toLocaleString()}</td>
-                </tr>
-                <tr style="background:#0f172a;">
-                  <td style="padding:14px 16px; font-weight:bold; font-size:15px;">Total Sales</td>
-                  <td style="padding:14px 16px; text-align:right; font-weight:bold; font-size:15px; color:#10b981;">₱${Number(
-                    report?.total_sales || 0
-                  ).toLocaleString()}</td>
-                </tr>
-              </table>
-    
-              <!-- REMITTANCES -->
-              <h3 style="color: #67e8f9; margin-bottom: 10px;">💵 Remittances (Payments Received)</h3>
-              <table style="width:100%; border-collapse: collapse; background:#1e2937; border-radius:12px; overflow:hidden; margin-bottom:25px; font-size:13px;">
-                <thead>
-                  <tr style="background:#334155; text-align:left;">
-                    <th style="padding:10px 12px;">Customer</th>
-                    <th style="padding:10px 12px;">Method</th>
-                    <th style="padding:10px 12px; text-align:right;">Amount</th>
-                    <th style="padding:10px 12px;">PR# / Notes</th>
-                  </tr>
-                </thead>
-                <tbody>
-          `;
+          // === Generate PDF ===
+          const { jsPDF } = await import('jspdf');
+          const doc = new jsPDF('p', 'mm', 'a4');
 
-          if (payments && payments.length > 0) {
-            payments.forEach((p: any) => {
-              emailHtml += `
-                <tr style="border-top: 1px solid #334155;">
-                  <td style="padding:10px 12px;">${p.customer_name || '—'}</td>
-                  <td style="padding:10px 12px;">${p.payment_method}</td>
-                  <td style="padding:10px 12px; text-align:right; font-weight:bold;">₱${Number(
-                    p.amount
-                  ).toLocaleString()}</td>
-                  <td style="padding:10px 12px; font-size:12px; color:#94a3b8;">${
-                    p.pr_number || p.notes || ''
-                  }</td>
-                </tr>
-              `;
+          let y = 15;
+
+          // Header
+          doc.setFontSize(16);
+          doc.text('DAILY REPORT', 105, y, { align: 'center' });
+          y += 7;
+          doc.setFontSize(12);
+          doc.text(`${b.branch_name} — ${yesterdayStr}`, 105, y, {
+            align: 'center',
+          });
+          y += 10;
+
+          // DAILY SALES
+          doc.setFontSize(11);
+          doc.text('DAILY SALES', 20, y);
+          y += 6;
+          doc.setFontSize(10);
+          doc.text(
+            `Generic   : PHP ${Number(
+              report?.generic_sales || 0
+            ).toLocaleString()}`,
+            20,
+            y
+          );
+          y += 5;
+          doc.text(
+            `Branded   : PHP ${Number(
+              report?.branded_sales || 0
+            ).toLocaleString()}`,
+            20,
+            y
+          );
+          y += 5;
+          doc.text(
+            `Others    : PHP ${Number(
+              report?.others_sales || 0
+            ).toLocaleString()}`,
+            20,
+            y
+          );
+          y += 5;
+          doc.text(
+            `Discount  : PHP ${Number(
+              report?.discount_total || 0
+            ).toLocaleString()}`,
+            20,
+            y
+          );
+          y += 6;
+          doc.setFontSize(11);
+          doc.text(
+            `TOTAL SALES (NET) : PHP ${Number(
+              report?.total_sales || 0
+            ).toLocaleString()}`,
+            20,
+            y
+          );
+          y += 10;
+
+          // SUMMARY
+          doc.setFontSize(11);
+          doc.text('SUMMARY', 20, y);
+          y += 6;
+          doc.setFontSize(10);
+          doc.text(
+            `Daily Sales Cash     : PHP ${Number(
+              report?.daily_sales_cash || 0
+            ).toLocaleString()}`,
+            20,
+            y
+          );
+          y += 5;
+          doc.text(
+            `Remittances          : PHP ${Number(
+              report?.total_payments || 0
+            ).toLocaleString()}`,
+            20,
+            y
+          );
+          y += 5;
+          doc.text(
+            `Expenses             : PHP ${Number(
+              report?.expenses || 0
+            ).toLocaleString()}`,
+            20,
+            y
+          );
+          y += 6;
+          doc.setFontSize(12);
+          doc.text(
+            `Actual Cash          : PHP ${Number(
+              report?.actual_cash || 0
+            ).toLocaleString()}`,
+            20,
+            y
+          );
+          y += 12;
+
+          // REMITTANCES
+          doc.setFontSize(11);
+          doc.text('REMITTANCES / PAYMENTS', 20, y);
+          y += 7;
+
+          doc.setFontSize(9);
+          (regularPayments || []).forEach((p: any) => {
+            if (y > 270) {
+              doc.addPage();
+              y = 15;
+            }
+            const line = `${p.customer_name || '—'} | ${
+              p.payment_method
+            } | ₱${Number(p.amount).toLocaleString()} | ${
+              p.pr_number || p.notes || ''
+            }`;
+            doc.text(line, 20, y);
+            y += 5;
+          });
+
+          // LEGACY PAYMENTS
+          if (legacyPayments.length > 0) {
+            y += 5;
+            doc.setFontSize(11);
+            doc.text('LEGACY / STANDALONE PAYMENTS (Old POS)', 20, y);
+            y += 6;
+            doc.setFontSize(9);
+            legacyPayments.forEach((p: any) => {
+              if (y > 270) {
+                doc.addPage();
+                y = 15;
+              }
+              doc.text(
+                `${p.customer_name} | ${p.payment_method} | ₱${Number(
+                  p.amount
+                ).toLocaleString()} | ${p.pr_number || ''}`,
+                20,
+                y
+              );
+              y += 5;
             });
-          } else {
-            emailHtml += `<tr><td colspan="4" style="padding:12px; text-align:center; color:#64748b;">No payments recorded</td></tr>`;
           }
 
-          emailHtml += `
-                </tbody>
-                <tfoot>
-                  <tr style="background:#0f172a; font-weight:bold;">
-                    <td colspan="2" style="padding:12px 16px;">Total Remittances</td>
-                    <td colspan="2" style="padding:12px 16px; text-align:right; color:#10b981;">₱${totalRemittances.toLocaleString()}</td>
-                  </tr>
-                </tfoot>
-              </table>
-    
-              <!-- EXPENSES -->
-              <h3 style="color: #f87171; margin-bottom: 10px;">🧾 Expenses</h3>
-              <table style="width:100%; border-collapse: collapse; background:#1e2937; border-radius:12px; overflow:hidden; margin-bottom:25px; font-size:13px;">
-                <thead>
-                  <tr style="background:#334155; text-align:left;">
-                    <th style="padding:10px 12px;">Expense</th>
-                    <th style="padding:10px 12px; text-align:right;">Amount</th>
-                  </tr>
-                </thead>
-                <tbody>
-          `;
+          // EXPENSES
+          y += 8;
+          doc.setFontSize(11);
+          doc.text('EXPENSES', 20, y);
+          y += 6;
+          doc.setFontSize(9);
+          (expenses || []).forEach((e: any) => {
+            if (y > 270) {
+              doc.addPage();
+              y = 15;
+            }
+            doc.text(
+              `${e.expense_name} — ₱${Number(e.amount).toLocaleString()}`,
+              20,
+              y
+            );
+            y += 5;
+          });
 
-          if (expenses && expenses.length > 0) {
-            expenses.forEach((e: any) => {
-              emailHtml += `
-                <tr style="border-top: 1px solid #334155;">
-                  <td style="padding:10px 12px;">${e.expense_name}</td>
-                  <td style="padding:10px 12px; text-align:right; color:#f87171;">₱${Number(
-                    e.amount
-                  ).toLocaleString()}</td>
-                </tr>
-              `;
-            });
-          } else {
-            emailHtml += `<tr><td colspan="2" style="padding:12px; text-align:center; color:#64748b;">No expenses recorded</td></tr>`;
-          }
+          // Save PDF to buffer
+          const pdfBuffer = Buffer.from(doc.output('arraybuffer'));
 
-          emailHtml += `
-                </tbody>
-                <tfoot>
-                  <tr style="background:#0f172a; font-weight:bold;">
-                    <td style="padding:12px 16px;">Total Expenses</td>
-                    <td style="padding:12px 16px; text-align:right; color:#f87171;">₱${totalExpenses.toLocaleString()}</td>
-                  </tr>
-                </tfoot>
-              </table>
-    
-              <!-- FINAL SUMMARY -->
-              <div style="background:#1e2937; border-radius:16px; padding:20px; margin-top:10px;">
-                <div style="display:flex; justify-content:space-between; font-size:15px; margin-bottom:8px;">
-                  <span>Total Remittances</span>
-                  <span style="font-weight:bold;">₱${totalRemittances.toLocaleString()}</span>
-                </div>
-                <div style="display:flex; justify-content:space-between; font-size:15px; margin-bottom:8px; color:#f87171;">
-                  <span>Total Expenses</span>
-                  <span style="font-weight:bold;">- ₱${totalExpenses.toLocaleString()}</span>
-                </div>
-                <hr style="border-color:#334155; margin:12px 0;">
-                <div style="display:flex; justify-content:space-between; font-size:18px; font-weight:bold;">
-                  <span>Actual Cash on Hand</span>
-                  <span style="color:#10b981;">₱${Number(
-                    report?.actual_cash || 0
-                  ).toLocaleString()}</span>
-                </div>
-              </div>
-    
-              <p style="text-align:center; color:#64748b; font-size:11px; margin-top:30px;">
-                Generated automatically • ${new Date().toLocaleString('en-PH')}
-              </p>
-            </div>
-          `;
-
-          // Send email
+          // === Send Email with PDF Attachment ===
           try {
             await resend.emails.send({
               from: 'Econo Drugstore <stock@alerts.econo-pos.com>',
               to: org.owner_email,
               subject: `📊 Daily Report - ${yesterdayStr} | ${b.branch_name}`,
-              html: emailHtml,
+              html: `<p>Please find attached the official Daily Report for <strong>${b.branch_name}</strong> on <strong>${yesterdayStr}</strong>.</p>`,
+              attachments: [
+                {
+                  filename: `Daily_Report_${yesterdayStr}_${b.branch_name.replace(
+                    /\s+/g,
+                    '_'
+                  )}.pdf`,
+                  content: pdfBuffer,
+                },
+              ],
             });
             console.log(
-              `✅ Daily email sent to ${org.owner_email} for ${b.branch_name}`
+              `✅ PDF Daily Report sent to ${org.owner_email} for ${b.branch_name}`
             );
-          } catch (emailErr: any) {
-            console.error(`❌ Failed to send daily email:`, emailErr);
+          } catch (err: any) {
+            console.error('Failed to send email with PDF:', err);
           }
         }
       }
 
       return NextResponse.json({
         success: true,
-        message: 'Daily email reports sent (Office branches only)',
+        message: 'Daily PDF reports sent with attachment',
       });
     }
 
