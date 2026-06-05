@@ -37,9 +37,7 @@ export async function GET(request: Request) {
 
     // =====================================================
     if (type === 'DAILY_EMAIL') {
-      console.log(
-        '📧 Starting Daily Email Report (8PM) - Full version with fixed calculations'
-      );
+      console.log('📧 Starting Daily Email Report (8PM) - Full version');
 
       const { data: orgsForEmail } = await supabaseAdmin
         .from('organizations')
@@ -60,7 +58,6 @@ export async function GET(request: Request) {
         for (const b of officeBranches) {
           const reportDate = todayPHT;
 
-          // === Fetch Data ===
           const { data: report } = await supabaseAdmin
             .from('daily_reports')
             .select('*')
@@ -118,13 +115,13 @@ export async function GET(request: Request) {
             }
           }
 
-          // === FIXED CALCULATIONS ===
+          // === DAILY SALES ===
           const gen = Number(report?.generic_sales || 0);
           const brd = Number(report?.branded_sales || 0);
           const disc = Number(report?.discount_total || 0);
           const dailySalesTotal = gen + brd - disc - othersTotal;
 
-          // Daily Sales breakdown (today's collections only)
+          // Daily Sales breakdown by payment method
           const dailyCash = regularPayments
             .filter((p: any) => p.payment_method === 'CASH')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
@@ -137,7 +134,7 @@ export async function GET(request: Request) {
             .filter((p: any) => p.payment_method === 'CHEQUE')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-          // Remittances = ONLY legacyPayments (do NOT include today's regularPayments)
+          // Remittances = ONLY legacyPayments
           const remCash = legacyPayments
             .filter((p: any) => p.payment_method === 'CASH')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
@@ -152,10 +149,14 @@ export async function GET(request: Request) {
 
           const remittancesTotal = remCash + remOnline + remCheque;
 
-          // Total Payments
-          const totalPaymentsCash = dailyCash + remCash;
-          const totalPaymentsOnline = dailyOnline + remOnline;
-          const totalPaymentsCheque = dailyCheque + remCheque;
+          // Total Payments (with Others deducted)
+          let totalPaymentsCash = dailyCash + remCash;
+          let totalPaymentsOnline = dailyOnline + remOnline;
+          let totalPaymentsCheque = dailyCheque + remCheque;
+
+          // Deduct Others from cash totals
+          totalPaymentsCash -= othersTotal;
+
           const totalPayments =
             totalPaymentsCash + totalPaymentsOnline + totalPaymentsCheque;
 
@@ -165,7 +166,7 @@ export async function GET(request: Request) {
           );
           const actualCash = totalPaymentsCash - totalExpenses;
 
-          // === Sort tables by Client Name ===
+          // Sort tables
           const sortedRegular = [...regularPayments].sort((a, b) => {
             const nameA = (
               a.orders?.client_name ||
@@ -204,7 +205,7 @@ export async function GET(request: Request) {
             return nameA.localeCompare(nameB);
           });
 
-          // === FULL HTML EMAIL ===
+          // === FULL HTML ===
           let emailHtml = `
             <div style="font-family: system-ui, Arial, sans-serif; max-width: 950px; margin: 0 auto; padding: 20px; background: #ffffff; color: #111827; border: 1px solid #e5e7eb;">
               
@@ -213,13 +214,21 @@ export async function GET(request: Request) {
                 b.branch_name
               } — ${reportDate}</h2>
     
-              <!-- DAILY SALES -->
+              <!-- DAILY SALES (Full breakdown) -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:0 0 10px 0; font-size:14px;">DAILY SALES</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
+                <tr><td style="padding:6px 12px;">Generic</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${gen.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px;">Branded</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${brd.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px;">Others (Office Accounts)</td><td style="padding:6px 12px; text-align:right; font-weight:600; color:#d97706;">₱${othersTotal.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px; color:#dc2626;">Discount</td><td style="padding:6px 12px; text-align:right; color:#dc2626; font-weight:600;">- ₱${disc.toLocaleString()}</td></tr>
                 <tr style="background:#f3f4f6; font-weight:700;">
-                  <td style="padding:8px 12px;">TOTAL</td>
-                  <td style="padding:8px 12px; text-align:right;">₱${dailySalesTotal.toLocaleString()}</td>
+                  <td style="padding:10px 12px;">TOTAL SALES (NET)</td>
+                  <td style="padding:10px 12px; text-align:right;">₱${dailySalesTotal.toLocaleString()}</td>
                 </tr>
+              </table>
+    
+              <!-- Cash / Online / Cheque breakdown under Daily Sales -->
+              <table style="width:100%; border-collapse:collapse; margin-bottom:20px; font-size:13px;">
                 <tr><td style="padding:6px 12px;">Cash</td><td style="padding:6px 12px; text-align:right;">₱${dailyCash.toLocaleString()}</td></tr>
                 <tr><td style="padding:6px 12px;">Online</td><td style="padding:6px 12px; text-align:right;">₱${dailyOnline.toLocaleString()}</td></tr>
                 <tr><td style="padding:6px 12px;">Cheque</td><td style="padding:6px 12px; text-align:right;">₱${dailyCheque.toLocaleString()}</td></tr>
@@ -237,7 +246,7 @@ export async function GET(request: Request) {
                 <tr><td style="padding:6px 12px;">Cheque</td><td style="padding:6px 12px; text-align:right;">₱${remCheque.toLocaleString()}</td></tr>
               </table>
     
-              <!-- TOTAL PAYMENTS -->
+              <!-- TOTAL PAYMENTS (Others already deducted) -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:15px 0 8px 0; font-size:14px;">TOTAL PAYMENTS</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
                 <tr style="background:#f3f4f6; font-weight:700;">
@@ -321,7 +330,7 @@ export async function GET(request: Request) {
                 </tbody>
               </table>
     
-              <!-- REMITTANCES / PAYMENTS TABLE -->
+              <!-- REMITTANCES TABLE -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:20px 0 10px 0; font-size:14px;">REMITTANCES / PAYMENTS</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:12px;">
                 <thead>
@@ -488,19 +497,14 @@ export async function GET(request: Request) {
               subject: `📊 Daily Report (End of Day) - ${reportDate} | ${b.branch_name}`,
               html: emailHtml,
             });
-            console.log(
-              `✅ Daily Report sent successfully to ${org.owner_email}`
-            );
+            console.log(`✅ Daily Report sent to ${org.owner_email}`);
           } catch (err: any) {
             console.error('Email failed:', err);
           }
         }
       }
 
-      return NextResponse.json({
-        success: true,
-        message: 'Daily email sent with fixed calculations',
-      });
+      return NextResponse.json({ success: true, message: 'Daily email sent' });
     }
     // =====================================================
     // ALL OTHER REPORT TYPES CONTINUE BELOW
