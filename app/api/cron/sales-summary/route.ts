@@ -37,7 +37,6 @@ export async function GET(request: Request) {
 
     // =====================================================
     // DAILY_EMAIL (8PM) — ONLY OFFICE BRANCHES → EMAIL TO owner_email
-    // This is handled FIRST and returns early so it never touches
     if (type === 'DAILY_EMAIL') {
       console.log(
         "📧 Starting Daily Email Report (8PM) - TODAY'S DATA (End of Day)"
@@ -62,7 +61,6 @@ export async function GET(request: Request) {
         for (const b of officeBranches) {
           const reportDate = todayPHT;
 
-          // === Fetch data ===
           const { data: report } = await supabaseAdmin
             .from('daily_reports')
             .select('*')
@@ -95,7 +93,7 @@ export async function GET(request: Request) {
             (p: any) => p.payment_method === 'ONLINE'
           );
 
-          // === Calculate OTHERS (Office Accounts) ===
+          // === Calculate OTHERS ===
           const { data: dayOrdersForOthers } = await supabaseAdmin
             .from('orders')
             .select('total_amount, client_name')
@@ -128,8 +126,8 @@ export async function GET(request: Request) {
               .reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
           }
 
-          // === PROPER SUMMARY CALCULATIONS (matching your PDF logic) ===
-          const allDailyPayments = regularPayments; // payments linked to today's orders
+          // === PROPER SUMMARY CALCULATIONS ===
+          const allDailyPayments = regularPayments;
           const allRemittances = [...regularPayments, ...legacyPayments];
 
           const dailyCash = allDailyPayments
@@ -156,11 +154,16 @@ export async function GET(request: Request) {
             .filter((p: any) => p.payment_method === 'ONLINE')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
+          // === THIS WAS MISSING ===
+          const totalRemittances = allRemittances.reduce(
+            (sum, p) => sum + Number(p.amount || 0),
+            0
+          );
+
           let totalCash = dailyCash + remCash;
           const totalCheque = dailyCheque + remCheque;
           let totalPayments = totalCash + totalCheque;
 
-          // Deduct office account sales (Others)
           totalCash -= othersTotal;
           totalPayments -= othersTotal;
 
@@ -170,7 +173,7 @@ export async function GET(request: Request) {
           );
           const actualCash = totalCash - totalExpenses;
 
-          // === Sort by Client Name ===
+          // === Sort tables by Client Name ===
           const sortedRegular = [...regularPayments].sort((a, b) => {
             const nameA = (
               a.orders?.client_name ||
@@ -205,7 +208,7 @@ export async function GET(request: Request) {
             return nameA.localeCompare(nameB);
           });
 
-          // === Build HTML ===
+          // === Build HTML (same as before) ===
           let emailHtml = `
             <div style="font-family: system-ui, Arial, sans-serif; max-width: 950px; margin: 0 auto; padding: 20px; background: #ffffff; color: #111827; border: 1px solid #e5e7eb;">
               
@@ -238,7 +241,7 @@ export async function GET(request: Request) {
                 </tr>
               </table>
     
-              <!-- IMPROVED SUMMARY -->
+              <!-- SUMMARY -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:0 0 10px 0; font-size:14px;">SUMMARY</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:14px;">
                 <tr><td style="padding:8px 12px;">Daily Sales Cash</td><td style="padding:8px 12px; text-align:right;">₱${dailyCash.toLocaleString()}</td></tr>
@@ -252,7 +255,7 @@ export async function GET(request: Request) {
                 </tr>
               </table>
     
-              <!-- DAILY SALES TABLE (Sorted by Client) -->
+              <!-- DAILY SALES TABLE (Sorted) -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:0 0 10px 0; font-size:14px;">DAILY SALES TABLE</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:12px;">
                 <thead>
@@ -476,7 +479,7 @@ export async function GET(request: Request) {
               subject: `📊 Daily Report (End of Day) - ${reportDate} | ${b.branch_name}`,
               html: emailHtml,
             });
-            console.log(`✅ Full End of Day Report sent to ${org.owner_email}`);
+            console.log(`✅ End of Day Report sent successfully`);
           } catch (err: any) {
             console.error('Email failed:', err);
           }
@@ -485,7 +488,7 @@ export async function GET(request: Request) {
 
       return NextResponse.json({
         success: true,
-        message: 'End of Day email sent with correct Summary',
+        message: 'End of Day email sent',
       });
     }
     // =====================================================
