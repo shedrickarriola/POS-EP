@@ -59,7 +59,7 @@ interface OrderLineItem {
     current_stock: number;
   }>;
   selected_lot_stock?: number;
-  lot_locked?: boolean; // when true, lock lot# and expiry after selecting from dropdown
+  lot_locked?: boolean;
 }
 
 // --- LEVENSHTEIN DISTANCE UTILITY ---
@@ -82,7 +82,7 @@ const getLevenshteinDistance = (a: string, b: string): number => {
   return matrix[a.length][b.length];
 };
 
-// === MONTH/YEAR EXPIRY HELPERS (Office Use) - same pattern as Purchase Order ===
+// === MONTH/YEAR EXPIRY HELPERS (Office Use) ===
 const getCurrentMonthString = (): string => {
   const now = new Date();
   const year = now.getFullYear();
@@ -108,9 +108,70 @@ const getMonthFromDate = (dateStr: string | undefined | null): string => {
   return dateStr.substring(0, 7);
 };
 
+// Format stored date → "06/2026" style (MM/YYYY)
 const formatMonthYear = (dateStr: string | undefined | null): string => {
   if (!dateStr) return '';
-  return dateStr.substring(0, 7);
+  const year = dateStr.substring(0, 4);
+  const month = dateStr.substring(5, 7);
+  return `${month}/${year}`;
+};
+
+// Parse MM/YYYY input with these rules:
+// - No past dates (must be current month or future)
+// - Upper limit = current year + 20 years (moves forward over time)
+const parseMMYYYY = (input: string): { year: number; month: number } | null => {
+  if (!input) return null;
+
+  let cleaned = input.replace(/[^\d/]/g, '');
+  let mm: string, yyyy: string;
+
+  if (cleaned.includes('/')) {
+    const parts = cleaned.split('/');
+    if (parts.length !== 2) return null;
+    mm = parts[0].padStart(2, '0');
+    yyyy = parts[1];
+  } else {
+    if (cleaned.length !== 6) return null;
+    mm = cleaned.substring(0, 2);
+    yyyy = cleaned.substring(2, 6);
+  }
+
+  const monthNum = parseInt(mm, 10);
+  const yearNum = parseInt(yyyy, 10);
+
+  if (isNaN(monthNum) || isNaN(yearNum) || monthNum < 1 || monthNum > 12) {
+    return null;
+  }
+
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth() + 1; // 1-12
+
+  // Block past dates (anything before current month/year)
+  if (
+    yearNum < currentYear ||
+    (yearNum === currentYear && monthNum < currentMonth)
+  ) {
+    return null;
+  }
+
+  // Upper bound: current year + 20 years (dynamic)
+  const maxYear = currentYear + 20;
+  if (yearNum > maxYear) {
+    return null;
+  }
+
+  return { year: yearNum, month: monthNum };
+};
+
+const mmyyyyToFullDate = (input: string): string => {
+  const parsed = parseMMYYYY(input);
+  if (!parsed) return '';
+  const { year, month } = parsed;
+  const lastDay = new Date(year, month, 0).getDate();
+  const mm = month.toString().padStart(2, '0');
+  const dd = lastDay.toString().padStart(2, '0');
+  return `${year}-${mm}-${dd}`;
 };
 
 export default function NewOrderPOS() {
@@ -125,28 +186,28 @@ export default function NewOrderPOS() {
   const [showPriceError, setShowPriceError] = useState(false);
   const [priceErrorMessages, setPriceErrorMessages] = useState<string[]>([]);
   const [user, setUser] = useState<any>(null);
-  const [isAdmin, setIsAdmin] = useState(false); // ← NEW: Admin check from profiles
+  const [isAdmin, setIsAdmin] = useState(false);
   const [products, setProducts] = useState<Product[]>([]);
   const [nextSONumber, setNextSONumber] = useState('SO01');
   const [currentBranchId, setCurrentBranchId] = useState<string | null>(null);
-  const [isOfficeUse, setIsOfficeUse] = useState(false); // ← NEW: Office use mode
-  const [selectedClientTerms, setSelectedClientTerms] = useState<number>(0); // ← NEW
-  const [agents, setAgents] = useState<{ id: string; full_name: string }[]>([]); // ← NEW
+  const [isOfficeUse, setIsOfficeUse] = useState(false);
+  const [selectedClientTerms, setSelectedClientTerms] = useState<number>(0);
+  const [agents, setAgents] = useState<{ id: string; full_name: string }[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<string>('MAIN OFFICE');
-  const [chequeDate, setChequeDate] = useState<string>(''); // ← NEW
-  const [showTermsError, setShowTermsError] = useState(false); // ← NEW
-  const [clientName, setClientName] = useState('WALK-IN'); // ← CHANGED: now defaults to WALK-IN
+  const [chequeDate, setChequeDate] = useState<string>('');
+  const [showTermsError, setShowTermsError] = useState(false);
+  const [clientName, setClientName] = useState('WALK-IN');
   const [showExpiryError, setShowExpiryError] = useState(false);
   const [invalidExpiryItems, setInvalidExpiryItems] = useState<string[]>([]);
 
-  // === NEW: Lot Stock Error Modal (better than alert) ===
+  // === NEW: Lot Stock Error Modal ===
   const [showLotStockError, setShowLotStockError] = useState(false);
   const [lotStockErrorMessage, setLotStockErrorMessage] = useState('');
   const [officeClients, setOfficeClients] = useState<
     {
       id: string;
       client_name: string;
-      allowed_terms: number; // ← NEW
+      allowed_terms: number;
       agent?: string;
     }[]
   >([]);
@@ -161,11 +222,17 @@ export default function NewOrderPOS() {
     null
   );
 
+  // Raw MM/YYYY typing buffer per row (for nice auto-slash + validation)
+  const [rawExpiryInputs, setRawExpiryInputs] = useState<
+    Record<string, string>
+  >({});
+
   const DISCOUNT_OPTIONS = [
     { label: 'No Discount', value: 0 },
     { label: '20% Off', value: 20 },
     { label: '5+1 Promo', value: 16.666667 },
   ];
+
   const [items, setItems] = useState<OrderLineItem[]>([
     {
       id: crypto.randomUUID(),
@@ -179,7 +246,7 @@ export default function NewOrderPOS() {
       discount_percent: 0,
       is_override: false,
       match_status: 'none',
-      lot_number: '', // ← NEW
+      lot_number: '',
       expiry_date: '',
     },
   ]);
@@ -192,7 +259,6 @@ export default function NewOrderPOS() {
         if (item.product_id === productId) {
           let currentDiscount = item.discount_percent;
 
-          // Only apply drugstore promo rules in non-office mode
           if (!isOfficeUse) {
             if (
               currentDiscount === 20 &&
@@ -214,6 +280,7 @@ export default function NewOrderPOS() {
       })
     );
   };
+
   // --- AI PROCESSING ---
   const processAiResults = (extracted: any) => {
     const dataToProcess = Array.isArray(extracted)
@@ -313,8 +380,6 @@ export default function NewOrderPOS() {
   };
 
   // --- FETCH INVENTORY (FILTERED BY BRANCH) ---
-  // Inside NewOrderPOS component
-  // Update this function
   const fetchInventory = async (searchTerm: string = '') => {
     try {
       setRefreshing(true);
@@ -335,7 +400,6 @@ export default function NewOrderPOS() {
       if (searchTerm) {
         query = query.ilike('item_name', `%${searchTerm}%`);
       } else {
-        // Load more items when no search term (for "show all on click")
         query = query.limit(100);
       }
 
@@ -364,7 +428,7 @@ export default function NewOrderPOS() {
         try {
           const { data, error: clientError } = await supabase
             .from('clients')
-            .select('id, client_name, allowed_terms, agent') // ← ONLY CHANGE: added agent
+            .select('id, client_name, allowed_terms, agent')
             .eq('branch_id', branchId)
             .order('client_name', { ascending: true });
 
@@ -374,9 +438,8 @@ export default function NewOrderPOS() {
           console.error('Fetch clients error:', err);
         }
       }
-      // === END CLIENT FETCH ===
 
-      // === NEW: OFFICE AGENTS FETCH ===
+      // === OFFICE AGENTS FETCH ===
       if (parsedBranch.is_office_use && branchId) {
         try {
           const { data, error: agentError } = await supabase
@@ -392,7 +455,6 @@ export default function NewOrderPOS() {
           console.error('Fetch agents error:', err);
         }
       }
-      // === END AGENT FETCH ===
     } catch (err: any) {
       console.error(`Database Error: ${err.message}`);
     } finally {
@@ -400,7 +462,6 @@ export default function NewOrderPOS() {
     }
   };
 
-  // --- FETCH CLIENTS (only for office use) ---
   const fetchClients = async () => {
     if (!isOfficeUse || !currentBranchId) return;
     try {
@@ -417,7 +478,6 @@ export default function NewOrderPOS() {
     }
   };
 
-  // --- FETCH AGENTS (only for office use) ---
   const fetchAgents = async () => {
     if (!isOfficeUse || !currentBranchId) return;
     try {
@@ -434,6 +494,7 @@ export default function NewOrderPOS() {
       console.error('Fetch agents error:', err);
     }
   };
+
   // --- CREATE NEW CLIENT ---
   const handleCreateNewClient = async () => {
     if (!newClientName.trim() || !currentBranchId) return;
@@ -450,7 +511,6 @@ export default function NewOrderPOS() {
 
       if (error) throw error;
 
-      // Refresh client list and select the new client
       await fetchClients();
       setClientName(trimmed);
       setNewClientName('');
@@ -461,7 +521,7 @@ export default function NewOrderPOS() {
     }
   };
 
-  // === OFFICE USE: Fetch available lots from item_details for a specific item ===
+  // === OFFICE USE: Fetch available lots from item_details ===
   const fetchAvailableLots = async (itemName: string, rowIndex: number) => {
     if (!isOfficeUse || !currentBranchId || !itemName) return;
 
@@ -474,12 +534,11 @@ export default function NewOrderPOS() {
         .eq('branch_id', currentBranchId)
         .eq('item_name', itemName)
         .gt('current_stock', 0)
-        .gte('expiry_date', today) // ← Exclude lots with past expiry dates
+        .gte('expiry_date', today)
         .order('expiry_date', { ascending: true });
 
       if (error) throw error;
 
-      // Exclude lots already chosen in other rows of this order
       const usedLots = items
         .filter((_, idx) => idx !== rowIndex)
         .map((i) => i.lot_number)
@@ -489,7 +548,6 @@ export default function NewOrderPOS() {
         (lot) => !usedLots.includes(lot.lot_number)
       );
 
-      // Update the specific row with available lot options
       setItems((prevItems) =>
         prevItems.map((item, idx) =>
           idx === rowIndex
@@ -504,6 +562,7 @@ export default function NewOrderPOS() {
       console.error('Error fetching available lots:', err);
     }
   };
+
   useEffect(() => {
     const initPage = async () => {
       try {
@@ -512,7 +571,6 @@ export default function NewOrderPOS() {
         } = await supabase.auth.getUser();
         setUser(authUser);
 
-        // === NEW: Real admin check from profiles table ===
         if (authUser?.id) {
           const { data: profileData } = await supabase
             .from('profiles')
@@ -529,15 +587,13 @@ export default function NewOrderPOS() {
 
           setIsAdmin(isAdminUser);
         }
-        // === END NEW ===
 
-        // 1. Fetch inventory
         await fetchInventory();
-        // NEW: Fetch clients for office branches
+
         if (isOfficeUse) {
           await fetchClients();
         }
-        // 2. Get next SO number
+
         const { data: lastOrders } = await supabase
           .from('orders')
           .select('order_number')
@@ -590,8 +646,6 @@ export default function NewOrderPOS() {
     const termsAllowed = !(
       paymentMethod === 'TERMS' && selectedClientTerms === 0
     );
-
-    // NEW: Office-use branches require proper client name
     const hasValidClient = !isOfficeUse || !!clientName?.trim();
 
     return {
@@ -631,6 +685,18 @@ export default function NewOrderPOS() {
 
     return true;
   };
+
+  // Helper to show "06/2026" in the input (uses raw buffer while user is typing)
+  const getExpiryDisplayValue = (
+    itemId: string,
+    currentExpiryDate?: string
+  ): string => {
+    if (rawExpiryInputs[itemId] !== undefined) {
+      return rawExpiryInputs[itemId];
+    }
+    return formatMonthYear(currentExpiryDate);
+  };
+
   const handleProductSelect = (idx: number, product: Product) => {
     const newItems = [...items];
     newItems[idx] = {
@@ -652,7 +718,6 @@ export default function NewOrderPOS() {
     setSearchTerms(newSearchTerms);
     setActiveSearchIndex(null);
 
-    // === OFFICE USE: Load available lots from item_details ===
     if (isOfficeUse) {
       fetchAvailableLots(product.item_name, idx);
     }
@@ -663,22 +728,17 @@ export default function NewOrderPOS() {
   const handleSubmit = async () => {
     if (!metrics.isValid || loading) return;
 
-    // === NEW: EXPIRY DATE VALIDATION ===
     if (!validateExpiryDates()) {
       setLoading(false);
       return;
     }
-    // === END EXPIRY VALIDATION ===
 
-    // === TERMS VALIDATION ===
     if (paymentMethod === 'TERMS' && selectedClientTerms === 0) {
       setShowTermsError(true);
       setLoading(false);
       return;
     }
-    // === END TERMS VALIDATION ===
 
-    // === FINAL PRICE VALIDATION FOR OFFICE USE (NON-ADMIN STAFF) ===
     if (isOfficeUse && !isAdmin) {
       const errors: string[] = [];
 
@@ -707,11 +767,7 @@ export default function NewOrderPOS() {
         return;
       }
     }
-    // === END PRICE VALIDATION ===
 
-    // === OFFICE USE: Validate lot stock before submitting ===
-    // Only block if lot# + expiry came from the DROPDOWN (selected_lot_stock is set).
-    // Manually typed lot numbers are allowed without this strict pre-check.
     if (isOfficeUse) {
       for (const item of items) {
         if (
@@ -721,7 +777,6 @@ export default function NewOrderPOS() {
         )
           continue;
 
-        // Re-fetch latest stock for this lot to be safe
         const { data: lotData } = await supabase
           .from('item_details')
           .select('current_stock')
@@ -749,7 +804,6 @@ export default function NewOrderPOS() {
         }
       }
     }
-    // === END LOT STOCK VALIDATION ===
 
     setLoading(true);
 
@@ -765,7 +819,6 @@ export default function NewOrderPOS() {
 
       const todayPHT = new Date().toISOString().split('T')[0];
 
-      // === OFFICE USE - Save to clients table (SKIP WALK-IN) ===
       if (
         isOfficeUse &&
         clientName?.trim() &&
@@ -790,8 +843,6 @@ export default function NewOrderPOS() {
             ]);
             if (insertErr) {
               console.warn('Client save warning (non-critical):', insertErr);
-            } else {
-              console.log(`✅ Client "${trimmedName}" saved to clients table`);
             }
           }
         } catch (clientErr: any) {
@@ -801,15 +852,12 @@ export default function NewOrderPOS() {
           );
         }
       }
-      // === END OFFICE CLIENT SAVE ===
 
-      // 1. Create the Order
       const { data: generatedSO, error: soErr } = await supabase.rpc(
         'get_next_so_number'
       );
       if (soErr) throw soErr;
 
-      // Calculate TRUE GROSS from items
       let grossGeneric = 0;
       let grossBranded = 0;
       let totalDiscount = 0;
@@ -826,7 +874,6 @@ export default function NewOrderPOS() {
         totalDiscount += itemDiscount;
       });
 
-      // === NEW OFFICE LOGIC: status + due_date ===
       const orderStatus = isOfficeUse ? 'PENDING' : 'completed';
 
       let dueDateValue: string | null = null;
@@ -869,7 +916,6 @@ export default function NewOrderPOS() {
 
       setConfirmedSONumber(order.order_number);
 
-      // 2. Create Order Items
       const payload = items.map((i) => {
         const gross = Number(i.qty) * Number(i.price_piece);
         const discountAmount = gross * (Number(i.discount_percent) / 100 || 0);
@@ -896,7 +942,6 @@ export default function NewOrderPOS() {
         .insert(payload);
       if (itemsErr) throw itemsErr;
 
-      // === OFFICE USE: Deduct stock from item_details (lot level) ===
       if (isOfficeUse) {
         for (const item of items) {
           if (!item.lot_number || !item.expiry_date) continue;
@@ -923,13 +968,10 @@ export default function NewOrderPOS() {
             }
           } catch (deductErr) {
             console.error('Failed to deduct from item_details:', deductErr);
-            // Non-critical — main inventory was already updated via RPC
           }
         }
       }
-      // === END item_details DEDUCTION ===
 
-      // 3. Inventory deduction (main inventory table)
       const itemsPayloadForRPC = items.map((i) => ({
         product_id: i.product_id,
         qty: Number(i.qty),
@@ -942,7 +984,6 @@ export default function NewOrderPOS() {
 
       if (rpcErr) throw new Error(`Inventory Sync Error: ${rpcErr.message}`);
 
-      // 4. Update daily_reports
       await supabase.from('daily_reports').upsert(
         {
           branch_id: currentBranchId,
@@ -956,7 +997,6 @@ export default function NewOrderPOS() {
         { onConflict: 'branch_id,report_date' }
       );
 
-      // Optional heal
       try {
         await supabase.rpc('heal_order_pht_date_solo', {
           p_order_id: order.id,
@@ -973,10 +1013,12 @@ export default function NewOrderPOS() {
       setLoading(false);
     }
   };
+
   const resetForm = () => {
     setClientName('WALK-IN');
     setCashReceived(0);
     setSearchTerms(['']);
+    setRawExpiryInputs({});
     setItems([
       {
         id: crypto.randomUUID(),
@@ -990,7 +1032,7 @@ export default function NewOrderPOS() {
         discount_percent: 0,
         is_override: false,
         match_status: 'none',
-        lot_number: '', // ← NEW
+        lot_number: '',
         expiry_date: '',
       },
     ]);
@@ -999,7 +1041,6 @@ export default function NewOrderPOS() {
   };
 
   return (
-    // FIX: Changed h-screen + overflow-hidden to min-h-screen to allow proper scrolling/padding
     <div className="min-h-screen bg-slate-950 text-slate-300 flex flex-col font-sans text-[13px]">
       {/* AI OVERLAY */}
       {isScanning && (
@@ -1044,7 +1085,8 @@ export default function NewOrderPOS() {
           </div>
         </div>
       )}
-      {/* NEW CLIENT MODAL - OFFICE USE ONLY */}
+
+      {/* NEW CLIENT MODAL */}
       {showNewClientModal && (
         <div className="fixed inset-0 z-[2000] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
           <div className="bg-slate-900 border border-white/10 rounded-2xl w-full max-w-md p-6">
@@ -1092,6 +1134,7 @@ export default function NewOrderPOS() {
           </div>
         </div>
       )}
+
       {/* TERMS ERROR MODAL */}
       {showTermsError && (
         <div className="fixed inset-0 z-[2500] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
@@ -1112,7 +1155,7 @@ export default function NewOrderPOS() {
             <button
               onClick={() => {
                 setShowTermsError(false);
-                setPaymentMethod('CASH'); // auto switch to safe option
+                setPaymentMethod('CASH');
               }}
               className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-sm"
             >
@@ -1121,9 +1164,10 @@ export default function NewOrderPOS() {
           </div>
         </div>
       )}
+
       {/* SUCCESS MODAL */}
       {showSuccess && (
-        <div className="fixed inset-0 z- flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-[3000] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
           <div className="bg-slate-900 border border-white/10 rounded-2xl w-full max-w-md p-8 shadow-2xl text-center">
             <div className="w-20 h-20 bg-emerald-500/20 rounded-full flex items-center justify-center mx-auto mb-6 border border-emerald-500/30">
               <CheckCircle2 size={40} className="text-emerald-500" />
@@ -1132,7 +1176,7 @@ export default function NewOrderPOS() {
               Order Recorded
             </h2>
             <p className="text-slate-400 mb-8 text-sm">
-              Reference {/* Swapped nextSONumber for confirmedSONumber */}
+              Reference{' '}
               <span className="text-blue-500 font-bold">
                 {confirmedSONumber}
               </span>{' '}
@@ -1219,7 +1263,7 @@ export default function NewOrderPOS() {
         </div>
       </header>
 
-      {/* MAIN CONTENT - FIX: MASSIVE pb-[500px] added here */}
+      {/* MAIN CONTENT */}
       <main className="flex-1 p-5 pb-[500px] space-y-4">
         <div className="flex justify-between items-end">
           <div className="w-1/4">
@@ -1248,7 +1292,6 @@ export default function NewOrderPOS() {
                   );
                   setSelectedClientTerms(selectedClient?.allowed_terms ?? 0);
 
-                  // Auto-update agent if client has one
                   const clientAgent = selectedClient?.agent?.trim();
                   if (
                     clientAgent &&
@@ -1286,7 +1329,7 @@ export default function NewOrderPOS() {
             )}
           </div>
 
-          {/* AGENT DROPDOWN - OFFICE USE ONLY (shorter UI) */}
+          {/* AGENT DROPDOWN - OFFICE USE ONLY */}
           {isOfficeUse && (
             <div className="w-1/4">
               <label className="text-[10px] font-black text-slate-500 uppercase mb-1 block tracking-wider">
@@ -1317,7 +1360,7 @@ export default function NewOrderPOS() {
           </div>
         </div>
 
-        {/* TABLE SECTION - FIX: overflow-visible applied to allow dropdown to show */}
+        {/* TABLE SECTION */}
         <div className="bg-slate-900/40 border border-white/5 rounded-xl overflow-visible">
           <div className="overflow-visible">
             <table className="w-full text-left overflow-visible">
@@ -1330,7 +1373,13 @@ export default function NewOrderPOS() {
                   {isOfficeUse && (
                     <>
                       <th className="p-3 w-28 text-center">Lot#</th>
-                      <th className="p-3 w-32 text-center">Expiry</th>
+                      <th className="p-3 w-28 text-center">
+                        Expiry
+                        <br />
+                        <span className="text-[8px] font-normal tracking-normal">
+                          MM/YYYY
+                        </span>
+                      </th>
                     </>
                   )}
                   <th className="p-3 w-24 text-center">Qty</th>
@@ -1348,14 +1397,13 @@ export default function NewOrderPOS() {
                     item.qty *
                     (item.price_piece * (1 - item.discount_percent / 100));
 
-                  // Improved filtering: show more results and better matching
                   const filteredProducts = products
                     .filter((p) =>
                       p.item_name
                         .toLowerCase()
                         .includes((searchTerms[idx] || '').toLowerCase())
                     )
-                    .slice(0, 30); // Increased from 5 to 30
+                    .slice(0, 30);
 
                   let inputBorderColor = 'border-white/5';
                   let statusIcon = null;
@@ -1387,7 +1435,7 @@ export default function NewOrderPOS() {
                         {idx + 1}
                       </td>
 
-                      {/* IMPROVED COMPACT PRODUCT SEARCH COLUMN */}
+                      {/* PRODUCT SEARCH COLUMN */}
                       <td className="p-1.5 relative overflow-visible">
                         <div className="relative flex items-center gap-2 overflow-visible">
                           <div className="relative flex-1 overflow-visible">
@@ -1435,7 +1483,7 @@ export default function NewOrderPOS() {
                               }}
                             />
 
-                            {/* COMPACT DROPDOWN */}
+                            {/* DROPDOWN */}
                             {activeSearchIndex === idx && (
                               <div className="absolute left-0 right-0 top-full mt-1 bg-slate-900 border border-white/10 rounded-lg shadow-2xl z-[2000] max-h-[260px] overflow-auto text-sm">
                                 {filteredProducts.length > 0 ? (
@@ -1474,7 +1522,6 @@ export default function NewOrderPOS() {
                         </div>
                       </td>
 
-                      {/* Rest of the columns remain the same */}
                       <td className="p-1.5 text-center">
                         <span
                           className={`text-[9px] font-black px-2 py-0.5 rounded ${
@@ -1490,22 +1537,26 @@ export default function NewOrderPOS() {
                       <td className="p-1.5 text-center font-bold text-slate-500">
                         {item.product_id ? item.stock_on_hand : '-'}
                       </td>
-                      {/* NEW: OFFICE USE ONLY COLUMNS */}
+
+                      {/* OFFICE USE ONLY COLUMNS */}
                       {isOfficeUse && (
                         <>
-                          {/* Lot# Column - OFFICE USE (Single Line + Full Details) */}
+                          {/* Lot# Column */}
                           <td className="p-1 w-[165px]">
                             <div className="flex items-center gap-1">
-                              {/* Dropdown with full details */}
                               {item.lot_options &&
                                 item.lot_options.length > 0 && (
                                   <select
-                                    value={item.lot_number || ''}
+                                    value={
+                                      item.lot_number && item.expiry_date
+                                        ? `${item.lot_number}__${item.expiry_date}`
+                                        : ''
+                                    }
                                     onChange={(e) => {
                                       const value = e.target.value;
 
                                       if (!value) {
-                                        // User selected the placeholder → clear everything and unlock
+                                        // Clear selection
                                         setItems(
                                           items.map((i) =>
                                             i.id === item.id
@@ -1522,9 +1573,18 @@ export default function NewOrderPOS() {
                                         return;
                                       }
 
+                                      // Split composite value (lot_number__expiry_date)
+                                      const [
+                                        selectedLotNumber,
+                                        selectedExpiry,
+                                      ] = value.split('__');
+
                                       const selectedLot =
                                         item.lot_options?.find(
-                                          (l) => l.lot_number === value
+                                          (l) =>
+                                            l.lot_number ===
+                                              selectedLotNumber &&
+                                            l.expiry_date === selectedExpiry
                                         );
 
                                       if (selectedLot) {
@@ -1549,17 +1609,23 @@ export default function NewOrderPOS() {
                                     className="w-[115px] bg-slate-950 border border-white/10 rounded-md px-1.5 py-1 text-[10px] text-center uppercase font-mono outline-none"
                                   >
                                     <option value="">-- Select lot --</option>
-                                    {item.lot_options.map((lot, i) => (
-                                      <option key={i} value={lot.lot_number}>
-                                        {lot.lot_number} |{' '}
-                                        {formatMonthYear(lot.expiry_date)} |{' '}
-                                        {lot.current_stock}pcs
-                                      </option>
-                                    ))}
+                                    {item.lot_options.map((lot) => {
+                                      const compositeValue = `${lot.lot_number}__${lot.expiry_date}`;
+                                      return (
+                                        <option
+                                          key={compositeValue}
+                                          value={compositeValue}
+                                        >
+                                          {lot.lot_number} |{' '}
+                                          {formatMonthYear(lot.expiry_date)} |{' '}
+                                          {lot.current_stock}pcs
+                                        </option>
+                                      );
+                                    })}
                                   </select>
                                 )}
 
-                              {/* Lot# Input (locked when lot selected from dropdown) */}
+                              {/* Manual Lot# Input */}
                               <input
                                 type="text"
                                 value={item.lot_number || ''}
@@ -1587,7 +1653,6 @@ export default function NewOrderPOS() {
                                 placeholder="LOT#"
                               />
 
-                              {/* Refresh button */}
                               {isOfficeUse && item.product_id && (
                                 <button
                                   onClick={() =>
@@ -1602,31 +1667,98 @@ export default function NewOrderPOS() {
                             </div>
                           </td>
 
-                          {/* Expiry Date Column - Restored */}
-                          <td className="p-1 w-[115px]">
+                          {/* Expiry Date Column - MM/YYYY */}
+                          <td className="p-1 w-[92px]">
                             <input
-                              type="month"
-                              min={getCurrentMonthString()}
-                              value={getMonthFromDate(item.expiry_date)}
+                              type="text"
+                              inputMode="numeric"
+                              maxLength={7}
+                              placeholder="MM/YYYY"
+                              value={getExpiryDisplayValue(
+                                item.id,
+                                item.expiry_date
+                              )}
                               disabled={!!item.lot_locked}
                               onChange={(e) => {
-                                const selectedMonth = e.target.value;
-                                const fullDate = selectedMonth
-                                  ? monthToLastDayDate(selectedMonth)
-                                  : '';
-                                setItems(
-                                  items.map((i) =>
-                                    i.id === item.id
-                                      ? {
-                                          ...i,
-                                          expiry_date: fullDate,
-                                          lot_locked: false,
-                                        }
-                                      : i
-                                  )
-                                );
+                                let val = e.target.value.replace(/[^\d/]/g, '');
+
+                                if (val.length === 2 && !val.includes('/')) {
+                                  val = val + '/';
+                                }
+                                const parts = val.split('/');
+                                if (parts.length > 2)
+                                  val =
+                                    parts[0] + '/' + parts.slice(1).join('');
+                                if (val.length > 7) val = val.slice(0, 7);
+
+                                setRawExpiryInputs((prev) => ({
+                                  ...prev,
+                                  [item.id]: val,
+                                }));
+
+                                if (val.length === 7 && val.includes('/')) {
+                                  const fullDate = mmyyyyToFullDate(val);
+                                  if (fullDate) {
+                                    setItems((prevItems) =>
+                                      prevItems.map((i) =>
+                                        i.id === item.id
+                                          ? {
+                                              ...i,
+                                              expiry_date: fullDate,
+                                              lot_locked: false,
+                                            }
+                                          : i
+                                      )
+                                    );
+                                    setRawExpiryInputs((prev) => {
+                                      const copy = { ...prev };
+                                      delete copy[item.id];
+                                      return copy;
+                                    });
+                                  }
+                                }
                               }}
-                              className={`w-full bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[10px] text-center font-mono outline-none ${
+                              onBlur={() => {
+                                const raw = rawExpiryInputs[item.id] || '';
+                                if (raw.length === 7 && raw.includes('/')) {
+                                  const fullDate = mmyyyyToFullDate(raw);
+                                  if (fullDate) {
+                                    setItems((prevItems) =>
+                                      prevItems.map((i) =>
+                                        i.id === item.id
+                                          ? {
+                                              ...i,
+                                              expiry_date: fullDate,
+                                              lot_locked: false,
+                                            }
+                                          : i
+                                      )
+                                    );
+                                  } else {
+                                    setItems((prevItems) =>
+                                      prevItems.map((i) =>
+                                        i.id === item.id
+                                          ? { ...i, expiry_date: '' }
+                                          : i
+                                      )
+                                    );
+                                  }
+                                } else if (raw.length > 0) {
+                                  setItems((prevItems) =>
+                                    prevItems.map((i) =>
+                                      i.id === item.id
+                                        ? { ...i, expiry_date: '' }
+                                        : i
+                                    )
+                                  );
+                                }
+                                setRawExpiryInputs((prev) => {
+                                  const copy = { ...prev };
+                                  delete copy[item.id];
+                                  return copy;
+                                });
+                              }}
+                              className={`w-full bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[10px] text-center font-mono outline-none tracking-[0.5px] ${
                                 item.lot_locked
                                   ? 'opacity-60 cursor-not-allowed'
                                   : ''
@@ -1635,6 +1767,7 @@ export default function NewOrderPOS() {
                           </td>
                         </>
                       )}
+
                       <td className="p-1.5">
                         <input
                           type="number"
@@ -1642,7 +1775,6 @@ export default function NewOrderPOS() {
                           onChange={(e) => {
                             const newQty = Math.max(1, Number(e.target.value));
 
-                            // === OFFICE USE: Validate against selected lot stock ===
                             if (
                               isOfficeUse &&
                               item.lot_number &&
@@ -1659,7 +1791,7 @@ export default function NewOrderPOS() {
                                   } pcs remaining.\n\nYou cannot sell ${newQty} pcs from this specific lot.`
                                 );
                                 setShowLotStockError(true);
-                                return; // prevent invalid qty
+                                return;
                               }
                             }
 
@@ -1698,10 +1830,9 @@ export default function NewOrderPOS() {
                         />
                       </td>
 
-                      {/* UNIT PRICE COLUMN - Modal validation (no inline errors) */}
+                      {/* UNIT PRICE COLUMN */}
                       <td className="p-1.5 text-right">
                         <div className="flex items-center justify-end gap-1.5">
-                          {/* Lock/Unlock - visible to ALL office staff */}
                           {isOfficeUse && (
                             <button
                               onClick={() =>
@@ -1771,10 +1902,9 @@ export default function NewOrderPOS() {
                         </div>
                       </td>
 
-                      {/* === DISCOUNT / ADJUSTMENT COLUMN - Drugstore vs Office === */}
+                      {/* DISCOUNT / ADJUSTMENT COLUMN */}
                       <td className="p-1.5 min-w-[130px]">
                         {isOfficeUse ? (
-                          // OFFICE MODE: Staff + Admin can apply 6% discount or +10% markup
                           <select
                             value={item.discount_percent}
                             onChange={(e) => {
@@ -1794,7 +1924,6 @@ export default function NewOrderPOS() {
                             <option value={-10}>+10% Markup</option>
                           </select>
                         ) : (
-                          // DRUGSTORE MODE: Original discounts (no admin check)
                           <select
                             disabled={item.type.toLowerCase() !== 'generic'}
                             value={item.discount_percent}
@@ -1890,6 +2019,7 @@ export default function NewOrderPOS() {
               </tbody>
             </table>
           </div>
+
           <button
             onClick={() => {
               setItems([
@@ -1952,6 +2082,7 @@ export default function NewOrderPOS() {
           </div>
         </div>
       )}
+
       {/* EXPIRY ERROR MODAL */}
       {showExpiryError && (
         <div className="fixed inset-0 z-[2500] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
@@ -1995,7 +2126,7 @@ export default function NewOrderPOS() {
         </div>
       )}
 
-      {/* === LOT STOCK ERROR MODAL (Office Use) === */}
+      {/* LOT STOCK ERROR MODAL */}
       {showLotStockError && (
         <div className="fixed inset-0 z-[2500] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
           <div className="bg-slate-900 border border-red-500/30 rounded-2xl w-full max-w-md p-6 text-center">
@@ -2020,7 +2151,8 @@ export default function NewOrderPOS() {
           </div>
         </div>
       )}
-      {/* FOOTER - FIXED AT BOTTOM */}
+
+      {/* FOOTER */}
       <footer className="bg-slate-900 border-t border-white/10 p-5 flex items-center justify-between sticky bottom-0 z-[1001]">
         <div className="flex gap-6 items-center">
           <div className="bg-slate-950 px-5 py-3 rounded-xl border border-white/5">
@@ -2067,11 +2199,11 @@ export default function NewOrderPOS() {
             </div>
           )}
         </div>
+
         <div className="flex flex-col gap-3 w-64">
-          {/* PAYMENT METHOD - OFFICE vs DRUGSTORE */}
+          {/* PAYMENT METHOD */}
           <div className="flex bg-slate-950 p-1 rounded-lg border border-white/5">
             {isOfficeUse ? (
-              // OFFICE MODE - full options
               (['CASH', 'CHEQUE', 'TERMS'] as const).map((m) => (
                 <button
                   key={m}
@@ -2086,14 +2218,13 @@ export default function NewOrderPOS() {
                 </button>
               ))
             ) : (
-              // DRUGSTORE MODE - CASH only
               <button className="flex-1 py-2 rounded-md text-[9px] font-black bg-blue-600 text-white shadow-lg cursor-default">
                 CASH
               </button>
             )}
           </div>
 
-          {/* CHEQUE DATE - only for office + CHEQUE */}
+          {/* CHEQUE DATE */}
           {isOfficeUse && paymentMethod === 'CHEQUE' && (
             <div className="w-40 border-l border-white/10 pl-6">
               <p className="text-[9px] font-black text-slate-500 uppercase mb-1">
@@ -2108,7 +2239,7 @@ export default function NewOrderPOS() {
             </div>
           )}
 
-          {/* TERMS INFO + EXPECTED DUE DATE - OFFICE USE ONLY */}
+          {/* TERMS INFO */}
           {isOfficeUse && paymentMethod === 'TERMS' && (
             <div className="w-52 border-l border-white/10 pl-6 text-[10px]">
               <div className="flex justify-between items-baseline">
@@ -2140,7 +2271,7 @@ export default function NewOrderPOS() {
               )}
             </div>
           )}
-          {/* TERMS WARNING (only shows in office mode) */}
+
           {isOfficeUse &&
             paymentMethod === 'TERMS' &&
             selectedClientTerms === 0 && (
@@ -2149,6 +2280,7 @@ export default function NewOrderPOS() {
                 TERMS NOT ALLOWED — Client has 0 days terms (COD only)
               </div>
             )}
+
           <button
             disabled={!metrics.isValid || loading}
             onClick={handleSubmit}

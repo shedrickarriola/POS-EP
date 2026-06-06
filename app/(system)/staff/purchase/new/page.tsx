@@ -16,6 +16,7 @@ import {
   Home,
   FileText,
   AlertCircle,
+  Calendar,
 } from 'lucide-react';
 import { parseInvoiceImage } from '@/app/actions/parseInvoice';
 // Bulletproof Levenshtein distance to handle typos in medicine keywords
@@ -266,6 +267,11 @@ export default function NewPurchaseOrder() {
   const [showLotExpiryError, setShowLotExpiryError] = useState(false);
   const [lotExpiryErrorItems, setLotExpiryErrorItems] = useState<any[]>([]);
 
+  // Raw MM/YYYY buffer for smooth typing in Expiry column (Office Use)
+  const [rawExpiryInputs, setRawExpiryInputs] = useState<
+    Record<string, string>
+  >({});
+
   // === MONTH/YEAR EXPIRY PICKER HELPERS (for Office Use) ===
   // Returns current month in "YYYY-MM" format (for min attribute on <input type="month">)
   const getCurrentMonthString = (): string => {
@@ -298,7 +304,52 @@ export default function NewPurchaseOrder() {
     // Works for both "YYYY-MM-DD" and "YYYY-MM"
     return dateStr.substring(0, 7);
   };
+  // Formats stored date to MM/YYYY for display in the hybrid picker
+  // Formats stored date → MM/YYYY display (e.g. "06/2026")
+  const formatMMYYYY = (dateStr: string | undefined | null): string => {
+    if (!dateStr) return '';
+    const parts = dateStr.split('-');
+    if (parts.length < 2) return '';
+    return `${parts[1]}/${parts[0]}`;
+  };
 
+  // Parses typed MM/YYYY into proper last-day date for storage
+  const parseMMYYYYToLastDay = (input: string): string => {
+    if (!input || typeof input !== 'string') return '';
+    const trimmed = input.trim();
+    if (!trimmed) return '';
+
+    // "06/2026", "6/2026", "06-2026", "6 2026"
+    let match = trimmed.match(/^(\d{1,2})[\/\.\-\s]+(\d{4})$/);
+    if (match) {
+      const monthStr = match[1].padStart(2, '0');
+      const yearStr = match[2];
+      return buildLastDayOfMonth(yearStr, monthStr);
+    }
+
+    // Compact 6-digit like 062026
+    match = trimmed.match(/^(\d{2})(\d{4})$/);
+    if (match) {
+      return buildLastDayOfMonth(match[2], match[1]);
+    }
+    return '';
+  };
+
+  const buildLastDayOfMonth = (yearStr: string, monthStr: string): string => {
+    const year = parseInt(yearStr, 10);
+    const month = parseInt(monthStr, 10);
+    if (
+      isNaN(year) ||
+      isNaN(month) ||
+      month < 1 ||
+      month > 12 ||
+      year < 2024 ||
+      year > 2100
+    )
+      return '';
+    const lastDay = new Date(year, month, 0).getDate();
+    return `${year}-${monthStr}-${lastDay.toString().padStart(2, '0')}`;
+  };
   // Returns a clear, specific reason why the item failed the Lot/Expiry check (for the modal)
   const getLotExpiryIssue = (item: any): string => {
     const hasLot = !!item.lot_number?.trim();
@@ -311,6 +362,17 @@ export default function NewPurchaseOrder() {
     if (!hasExpiry) return 'Missing Expiry';
     if (!isFutureExpiry) return 'Expiry must be a future date';
     return 'Invalid entry';
+  };
+
+  // Helper for Expiry input display (uses raw buffer while typing)
+  const getExpiryDisplayValue = (
+    itemId: string,
+    currentExpiryDate?: string
+  ): string => {
+    if (rawExpiryInputs[itemId] !== undefined) {
+      return rawExpiryInputs[itemId];
+    }
+    return formatMMYYYY(currentExpiryDate);
   };
 
   const getNextPoNumber = useCallback(async () => {
@@ -1296,16 +1358,54 @@ export default function NewPurchaseOrder() {
                         {isOfficeUse && (
                           <td className="px-1">
                             <input
-                              type="month"
-                              min={getCurrentMonthString()}
-                              className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none"
-                              value={getMonthFromDate(item.expiry_date)}
+                              type="text"
+                              inputMode="numeric"
+                              maxLength={7}
+                              placeholder="MM/YYYY"
+                              className="w-full bg-slate-950 border border-white/5 p-3 rounded-lg text-center text-[12px] font-bold outline-none placeholder:text-slate-600"
+                              value={getExpiryDisplayValue(
+                                `row-${idx}`,
+                                item.expiry_date
+                              )}
                               onChange={(e) => {
-                                const selectedMonth = e.target.value; // e.g. "2026-07"
-                                const fullDate = selectedMonth
-                                  ? monthToLastDayDate(selectedMonth)
-                                  : '';
-                                updateItem(idx, 'expiry_date', fullDate);
+                                const raw = e.target.value
+                                  .replace(/[^\d/]/g, '')
+                                  .slice(0, 7);
+
+                                setRawExpiryInputs((prev) => ({
+                                  ...prev,
+                                  [`row-${idx}`]: raw,
+                                }));
+
+                                if (raw.length === 7 && raw.includes('/')) {
+                                  const parsed = parseMMYYYYToLastDay(raw);
+                                  if (parsed) {
+                                    updateItem(idx, 'expiry_date', parsed);
+                                    setRawExpiryInputs((prev) => {
+                                      const copy = { ...prev };
+                                      delete copy[`row-${idx}`];
+                                      return copy;
+                                    });
+                                  }
+                                }
+                              }}
+                              onBlur={() => {
+                                const raw = rawExpiryInputs[`row-${idx}`] || '';
+                                if (raw.length === 7 && raw.includes('/')) {
+                                  const parsed = parseMMYYYYToLastDay(raw);
+                                  if (parsed) {
+                                    updateItem(idx, 'expiry_date', parsed);
+                                  } else {
+                                    updateItem(idx, 'expiry_date', '');
+                                  }
+                                } else if (raw.length > 0) {
+                                  updateItem(idx, 'expiry_date', '');
+                                }
+                                setRawExpiryInputs((prev) => {
+                                  const copy = { ...prev };
+                                  delete copy[`row-${idx}`];
+                                  return copy;
+                                });
                               }}
                             />
                           </td>
