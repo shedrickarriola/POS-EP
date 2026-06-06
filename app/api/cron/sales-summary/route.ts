@@ -37,7 +37,9 @@ export async function GET(request: Request) {
 
     // =====================================================
     if (type === 'DAILY_EMAIL') {
-      console.log('📧 Starting Daily Email Report (8PM) - Full version');
+      console.log(
+        "📧 Starting Daily Email Report (8PM) - TODAY'S DATA (End of Day)"
+      );
 
       const { data: orgsForEmail } = await supabaseAdmin
         .from('organizations')
@@ -45,7 +47,23 @@ export async function GET(request: Request) {
         .not('owner_email', 'is', null);
 
       for (const org of orgsForEmail || []) {
-        if (!org.owner_email) continue;
+        const rawEmail = org.owner_email?.trim();
+
+        if (!rawEmail) {
+          console.log(`⚠️ Skipping org "${org.name}" - no owner_email`);
+          continue;
+        }
+
+        // Support multiple emails separated by comma
+        const emailList: string[] = rawEmail
+          .split(',')
+          .map((e) => e.trim())
+          .filter((e) => e.includes('@'));
+
+        if (emailList.length === 0) {
+          console.log(`⚠️ Skipping org "${org.name}" - no valid emails`);
+          continue;
+        }
 
         const { data: officeBranches } = await supabaseAdmin
           .from('branches')
@@ -58,6 +76,7 @@ export async function GET(request: Request) {
         for (const b of officeBranches) {
           const reportDate = todayPHT;
 
+          // === Fetch Data ===
           const { data: report } = await supabaseAdmin
             .from('daily_reports')
             .select('*')
@@ -71,7 +90,8 @@ export async function GET(request: Request) {
               `*, orders (client_name, order_number, dr_number, delivery_date)`
             )
             .eq('branch_id', b.id)
-            .eq('report_date', reportDate);
+            .eq('report_date', reportDate)
+            .order('created_at', { ascending: true });
 
           const { data: expenses } = await supabaseAdmin
             .from('daily_expenses')
@@ -85,88 +105,75 @@ export async function GET(request: Request) {
           const regularPayments = (allPaymentsRaw || []).filter(
             (p: any) => p.order_id
           );
+          const onlinePayments = (allPaymentsRaw || []).filter(
+            (p: any) => p.payment_method === 'ONLINE'
+          );
 
-          // === Calculate Others (Office Accounts) ===
-          const { data: dayOrders } = await supabaseAdmin
+          // === Calculate OTHERS (Office Accounts) ===
+          const { data: dayOrdersForOthers } = await supabaseAdmin
             .from('orders')
             .select('total_amount, client_name')
             .eq('branch_id', b.id)
             .eq('created_date_pht', reportDate);
 
-          let othersTotal = 0;
-          if (dayOrders && dayOrders.length > 0) {
-            const clientNames = [
-              ...new Set(dayOrders.map((o) => o.client_name).filter(Boolean)),
-            ];
-            if (clientNames.length > 0) {
-              const { data: clientsData } = await supabaseAdmin
-                .from('clients')
-                .select('client_name, is_office_account')
-                .in('client_name', clientNames);
+          const clientNames = [
+            ...new Set(
+              (dayOrdersForOthers || [])
+                .map((o) => o.client_name)
+                .filter(Boolean)
+            ),
+          ];
 
-              const officeSet = new Set(
-                (clientsData || [])
-                  .filter((c) => c.is_office_account)
-                  .map((c) => c.client_name)
-              );
-              othersTotal = dayOrders
-                .filter((o) => officeSet.has(o.client_name))
-                .reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
-            }
+          let othersTotal = 0;
+          if (clientNames.length > 0) {
+            const { data: clientsData } = await supabaseAdmin
+              .from('clients')
+              .select('client_name, is_office_account')
+              .in('client_name', clientNames);
+
+            const officeClientSet = new Set(
+              (clientsData || [])
+                .filter((c) => c.is_office_account === true)
+                .map((c) => c.client_name)
+            );
+
+            othersTotal = (dayOrdersForOthers || [])
+              .filter((o) => officeClientSet.has(o.client_name))
+              .reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
           }
 
-          // === DAILY SALES ===
-          const gen = Number(report?.generic_sales || 0);
-          const brd = Number(report?.branded_sales || 0);
-          const disc = Number(report?.discount_total || 0);
-          const dailySalesTotal = gen + brd - disc - othersTotal;
+          // === SUMMARY Calculations ===
+          const allDailyPayments = regularPayments;
+          const allRemittances = [...regularPayments, ...legacyPayments];
 
-          // Daily Sales breakdown by payment method
-          const dailyCash = regularPayments
+          const dailyCash = allDailyPayments
             .filter((p: any) => p.payment_method === 'CASH')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-          const dailyOnline = regularPayments
-            .filter((p: any) => p.payment_method === 'ONLINE')
-            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-          const dailyCheque = regularPayments
+          const dailyCheque = allDailyPayments
             .filter((p: any) => p.payment_method === 'CHEQUE')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-          // Remittances = ONLY legacyPayments
-          const remCash = legacyPayments
+          const remCash = allRemittances
             .filter((p: any) => p.payment_method === 'CASH')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-          const remOnline = legacyPayments
-            .filter((p: any) => p.payment_method === 'ONLINE')
-            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-          const remCheque = legacyPayments
+          const remCheque = allRemittances
             .filter((p: any) => p.payment_method === 'CHEQUE')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-          const remittancesTotal = remCash + remOnline + remCheque;
+          let totalCash = dailyCash + remCash;
+          const totalCheque = dailyCheque + remCheque;
+          let totalPayments = totalCash + totalCheque;
 
-          // Total Payments (with Others deducted)
-          let totalPaymentsCash = dailyCash + remCash;
-          let totalPaymentsOnline = dailyOnline + remOnline;
-          let totalPaymentsCheque = dailyCheque + remCheque;
-
-          // Deduct Others from cash totals
-          totalPaymentsCash -= othersTotal;
-
-          const totalPayments =
-            totalPaymentsCash + totalPaymentsOnline + totalPaymentsCheque;
+          totalCash -= othersTotal;
+          totalPayments -= othersTotal;
 
           const totalExpenses = (expenses || []).reduce(
             (sum, e) => sum + Number(e.amount || 0),
             0
           );
-          const actualCash = totalPaymentsCash - totalExpenses;
+          const actualCash = totalCash - totalExpenses;
 
-          // Sort tables
+          // === Sort by Client Name ===
           const sortedRegular = [...regularPayments].sort((a, b) => {
             const nameA = (
               a.orders?.client_name ||
@@ -187,11 +194,7 @@ export async function GET(request: Request) {
               .localeCompare((b.customer_name || '').toLowerCase())
           );
 
-          const sortedOnline = [
-            ...(allPaymentsRaw || []).filter(
-              (p: any) => p.payment_method === 'ONLINE'
-            ),
-          ].sort((a, b) => {
+          const sortedOnline = [...onlinePayments].sort((a, b) => {
             const nameA = (
               a.customer_name ||
               a.orders?.client_name ||
@@ -205,7 +208,7 @@ export async function GET(request: Request) {
             return nameA.localeCompare(nameB);
           });
 
-          // === FULL HTML ===
+          // === FULL HTML EMAIL ===
           let emailHtml = `
             <div style="font-family: system-ui, Arial, sans-serif; max-width: 950px; margin: 0 auto; padding: 20px; background: #ffffff; color: #111827; border: 1px solid #e5e7eb;">
               
@@ -214,67 +217,48 @@ export async function GET(request: Request) {
                 b.branch_name
               } — ${reportDate}</h2>
     
-              <!-- DAILY SALES (Full breakdown) -->
+              <!-- DAILY SALES -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:0 0 10px 0; font-size:14px;">DAILY SALES</h3>
-              <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
-                <tr><td style="padding:6px 12px;">Generic</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${gen.toLocaleString()}</td></tr>
-                <tr><td style="padding:6px 12px;">Branded</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${brd.toLocaleString()}</td></tr>
+              <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:14px;">
+                <tr><td style="padding:6px 12px;">Generic</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${Number(
+                  report?.generic_sales || 0
+                ).toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px;">Branded</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${Number(
+                  report?.branded_sales || 0
+                ).toLocaleString()}</td></tr>
                 <tr><td style="padding:6px 12px;">Others (Office Accounts)</td><td style="padding:6px 12px; text-align:right; font-weight:600; color:#d97706;">₱${othersTotal.toLocaleString()}</td></tr>
-                <tr><td style="padding:6px 12px; color:#dc2626;">Discount</td><td style="padding:6px 12px; text-align:right; color:#dc2626; font-weight:600;">- ₱${disc.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px; color:#dc2626;">Discount</td><td style="padding:6px 12px; text-align:right; color:#dc2626; font-weight:600;">- ₱${Number(
+                  report?.discount_total || 0
+                ).toLocaleString()}</td></tr>
                 <tr style="background:#f3f4f6; font-weight:700;">
                   <td style="padding:10px 12px;">TOTAL SALES (NET)</td>
-                  <td style="padding:10px 12px; text-align:right;">₱${dailySalesTotal.toLocaleString()}</td>
+                  <td style="padding:10px 12px; text-align:right;">₱${(
+                    Number(report?.generic_sales || 0) +
+                    Number(report?.branded_sales || 0) -
+                    Number(report?.discount_total || 0) -
+                    othersTotal
+                  ).toLocaleString()}</td>
                 </tr>
               </table>
     
-              <!-- Cash / Online / Cheque breakdown under Daily Sales -->
-              <table style="width:100%; border-collapse:collapse; margin-bottom:20px; font-size:13px;">
-                <tr><td style="padding:6px 12px;">Cash</td><td style="padding:6px 12px; text-align:right;">₱${dailyCash.toLocaleString()}</td></tr>
-                <tr><td style="padding:6px 12px;">Online</td><td style="padding:6px 12px; text-align:right;">₱${dailyOnline.toLocaleString()}</td></tr>
-                <tr><td style="padding:6px 12px;">Cheque</td><td style="padding:6px 12px; text-align:right;">₱${dailyCheque.toLocaleString()}</td></tr>
-              </table>
-    
-              <!-- REMITTANCES -->
-              <h3 style="background:#f3f4f6; padding:8px 12px; margin:15px 0 8px 0; font-size:14px;">REMITTANCES</h3>
-              <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
-                <tr style="background:#f3f4f6; font-weight:700;">
-                  <td style="padding:8px 12px;">TOTAL</td>
-                  <td style="padding:8px 12px; text-align:right;">₱${remittancesTotal.toLocaleString()}</td>
-                </tr>
-                <tr><td style="padding:6px 12px;">Cash</td><td style="padding:6px 12px; text-align:right;">₱${remCash.toLocaleString()}</td></tr>
-                <tr><td style="padding:6px 12px;">Online</td><td style="padding:6px 12px; text-align:right;">₱${remOnline.toLocaleString()}</td></tr>
-                <tr><td style="padding:6px 12px;">Cheque</td><td style="padding:6px 12px; text-align:right;">₱${remCheque.toLocaleString()}</td></tr>
-              </table>
-    
-              <!-- TOTAL PAYMENTS (Others already deducted) -->
-              <h3 style="background:#f3f4f6; padding:8px 12px; margin:15px 0 8px 0; font-size:14px;">TOTAL PAYMENTS</h3>
-              <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
-                <tr style="background:#f3f4f6; font-weight:700;">
-                  <td style="padding:8px 12px;">TOTAL</td>
-                  <td style="padding:8px 12px; text-align:right;">₱${totalPayments.toLocaleString()}</td>
-                </tr>
-                <tr><td style="padding:6px 12px;">Cash</td><td style="padding:6px 12px; text-align:right;">₱${totalPaymentsCash.toLocaleString()}</td></tr>
-                <tr><td style="padding:6px 12px;">Online</td><td style="padding:6px 12px; text-align:right;">₱${totalPaymentsOnline.toLocaleString()}</td></tr>
-                <tr><td style="padding:6px 12px;">Cheque</td><td style="padding:6px 12px; text-align:right;">₱${totalPaymentsCheque.toLocaleString()}</td></tr>
-              </table>
-    
-              <!-- EXPENSES -->
-              <h3 style="background:#f3f4f6; padding:8px 12px; margin:15px 0 8px 0; font-size:14px;">EXPENSES</h3>
-              <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
-                <tr><td style="padding:8px 12px;">Total Expenses</td><td style="padding:8px 12px; text-align:right; color:#dc2626;">₱${totalExpenses.toLocaleString()}</td></tr>
-              </table>
-    
-              <!-- ACTUAL CASH -->
-              <h3 style="background:#ecfdf5; padding:10px 12px; margin:15px 0 0 0; font-size:15px; color:#059669;">ACTUAL CASH</h3>
-              <table style="width:100%; border-collapse:collapse; font-size:16px;">
-                <tr style="background:#ecfdf5; font-weight:700;">
-                  <td style="padding:12px;">Actual Cash</td>
-                  <td style="padding:12px; text-align:right; color:#059669;">₱${actualCash.toLocaleString()}</td>
+              <!-- SUMMARY -->
+              <h3 style="background:#f3f4f6; padding:8px 12px; margin:0 0 10px 0; font-size:14px;">SUMMARY</h3>
+              <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:14px;">
+                <tr><td style="padding:8px 12px;">Daily Sales Cash</td><td style="padding:8px 12px; text-align:right;">₱${dailyCash.toLocaleString()}</td></tr>
+                <tr><td style="padding:8px 12px;">Daily Sales Cheque</td><td style="padding:8px 12px; text-align:right;">₱${dailyCheque.toLocaleString()}</td></tr>
+                <tr><td style="padding:8px 12px;">Remittances</td><td style="padding:8px 12px; text-align:right;">₱${(
+                  dailyCash + remCash
+                ).toLocaleString()}</td></tr>
+                <tr><td style="padding:8px 12px;">Total Payments</td><td style="padding:8px 12px; text-align:right;">₱${totalPayments.toLocaleString()}</td></tr>
+                <tr><td style="padding:8px 12px;">Expenses</td><td style="padding:8px 12px; text-align:right; color:#dc2626;">₱${totalExpenses.toLocaleString()}</td></tr>
+                <tr style="background:#ecfdf5; font-weight:700; font-size:15px;">
+                  <td style="padding:12px 12px;">Actual Cash</td>
+                  <td style="padding:12px 12px; text-align:right; color:#059669;">₱${actualCash.toLocaleString()}</td>
                 </tr>
               </table>
     
               <!-- DAILY SALES TABLE -->
-              <h3 style="background:#f3f4f6; padding:8px 12px; margin:25px 0 10px 0; font-size:14px;">DAILY SALES TABLE</h3>
+              <h3 style="background:#f3f4f6; padding:8px 12px; margin:0 0 10px 0; font-size:14px;">DAILY SALES TABLE</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:12px;">
                 <thead>
                   <tr style="background:#e5e7eb; text-align:left;">
@@ -330,7 +314,7 @@ export async function GET(request: Request) {
                 </tbody>
               </table>
     
-              <!-- REMITTANCES TABLE -->
+              <!-- REMITTANCES / PAYMENTS -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:20px 0 10px 0; font-size:14px;">REMITTANCES / PAYMENTS</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:12px;">
                 <thead>
@@ -461,7 +445,7 @@ export async function GET(request: Request) {
                   : ''
               }
     
-              <!-- EXPENSES DETAIL -->
+              <!-- EXPENSES -->
               <h3 style="background:#fee2e2; padding:8px 12px; margin:20px 0 10px 0; font-size:14px; color:#991b1b;">EXPENSES</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:30px; font-size:13px;">
                 <tbody>
@@ -490,21 +474,28 @@ export async function GET(request: Request) {
             </div>
           `;
 
+          // === SEND EMAIL ===
           try {
             await resend.emails.send({
               from: 'Econo Drugstore <stock@alerts.econo-pos.com>',
-              to: org.owner_email,
+              to: emailList,
               subject: `📊 Daily Report (End of Day) - ${reportDate} | ${b.branch_name}`,
               html: emailHtml,
             });
-            console.log(`✅ Daily Report sent to ${org.owner_email}`);
+            console.log(`✅ Sent to: ${emailList.join(', ')}`);
           } catch (err: any) {
-            console.error('Email failed:', err);
+            console.error(
+              `❌ Failed to send to ${emailList.join(', ')}:`,
+              err.message
+            );
           }
         }
       }
 
-      return NextResponse.json({ success: true, message: 'Daily email sent' });
+      return NextResponse.json({
+        success: true,
+        message: 'End of Day emails sent',
+      });
     }
     // =====================================================
     // ALL OTHER REPORT TYPES CONTINUE BELOW
