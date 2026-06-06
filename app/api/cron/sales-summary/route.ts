@@ -37,228 +37,248 @@ export async function GET(request: Request) {
 
     // =====================================================
     if (type === 'DAILY_EMAIL') {
-      console.log(
-        "📧 Starting Daily Email Report (8PM) - TODAY'S DATA (End of Day)"
-      );
-
+      console.log('📧 Starting Daily Email Report (8PM) - Full version');
+    
       const { data: orgsForEmail } = await supabaseAdmin
         .from('organizations')
         .select('id, name, owner_email')
         .not('owner_email', 'is', null);
-
+    
       for (const org of orgsForEmail || []) {
         const rawEmail = org.owner_email?.trim();
-
+    
         if (!rawEmail) {
           console.log(`⚠️ Skipping org "${org.name}" - no owner_email`);
           continue;
         }
-
-        // Support multiple emails separated by comma
+    
+        // Support multiple emails (comma separated)
         const emailList: string[] = rawEmail
           .split(',')
-          .map((e) => e.trim())
-          .filter((e) => e.includes('@'));
-
+          .map(e => e.trim())
+          .filter(e => e.includes('@'));
+    
         if (emailList.length === 0) {
           console.log(`⚠️ Skipping org "${org.name}" - no valid emails`);
           continue;
         }
-
+    
         const { data: officeBranches } = await supabaseAdmin
           .from('branches')
           .select('*')
           .eq('org_id', org.id)
           .eq('is_office_use', true);
-
+    
         if (!officeBranches || officeBranches.length === 0) continue;
-
+    
         for (const b of officeBranches) {
           const reportDate = todayPHT;
-
-          // === Fetch Data ===
+    
           const { data: report } = await supabaseAdmin
             .from('daily_reports')
             .select('*')
             .eq('branch_id', b.id)
             .eq('report_date', reportDate)
             .single();
-
+    
           const { data: allPaymentsRaw } = await supabaseAdmin
             .from('daily_payments')
             .select(
               `*, orders (client_name, order_number, dr_number, delivery_date)`
             )
             .eq('branch_id', b.id)
-            .eq('report_date', reportDate)
-            .order('created_at', { ascending: true });
-
+            .eq('report_date', reportDate);
+    
           const { data: expenses } = await supabaseAdmin
             .from('daily_expenses')
             .select('*')
             .eq('branch_id', b.id)
             .eq('report_date', reportDate);
-
+    
           const legacyPayments = (allPaymentsRaw || []).filter(
             (p: any) => !p.order_id
           );
           const regularPayments = (allPaymentsRaw || []).filter(
             (p: any) => p.order_id
           );
-          const onlinePayments = (allPaymentsRaw || []).filter(
-            (p: any) => p.payment_method === 'ONLINE'
-          );
-
-          // === Calculate OTHERS (Office Accounts) ===
-          const { data: dayOrdersForOthers } = await supabaseAdmin
+    
+          // === Calculate Others (Office Accounts) ===
+          const { data: dayOrders } = await supabaseAdmin
             .from('orders')
             .select('total_amount, client_name')
             .eq('branch_id', b.id)
             .eq('created_date_pht', reportDate);
-
-          const clientNames = [
-            ...new Set(
-              (dayOrdersForOthers || [])
-                .map((o) => o.client_name)
-                .filter(Boolean)
-            ),
-          ];
-
+    
           let othersTotal = 0;
-          if (clientNames.length > 0) {
-            const { data: clientsData } = await supabaseAdmin
-              .from('clients')
-              .select('client_name, is_office_account')
-              .in('client_name', clientNames);
-
-            const officeClientSet = new Set(
-              (clientsData || [])
-                .filter((c) => c.is_office_account === true)
-                .map((c) => c.client_name)
-            );
-
-            othersTotal = (dayOrdersForOthers || [])
-              .filter((o) => officeClientSet.has(o.client_name))
-              .reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
+          if (dayOrders && dayOrders.length > 0) {
+            const clientNames = [
+              ...new Set(dayOrders.map((o) => o.client_name).filter(Boolean)),
+            ];
+            if (clientNames.length > 0) {
+              const { data: clientsData } = await supabaseAdmin
+                .from('clients')
+                .select('client_name, is_office_account')
+                .in('client_name', clientNames);
+    
+              const officeSet = new Set(
+                (clientsData || [])
+                  .filter((c) => c.is_office_account)
+                  .map((c) => c.client_name)
+              );
+              othersTotal = dayOrders
+                .filter((o) => officeSet.has(o.client_name))
+                .reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
+            }
           }
-
-          // === SUMMARY Calculations ===
-          const allDailyPayments = regularPayments;
-          const allRemittances = [...regularPayments, ...legacyPayments];
-
-          const dailyCash = allDailyPayments
+    
+          // === DAILY SALES ===
+          const gen = Number(report?.generic_sales || 0);
+          const brd = Number(report?.branded_sales || 0);
+          const disc = Number(report?.discount_total || 0);
+          const dailySalesTotal = gen + brd - disc - othersTotal;
+    
+          const dailyCash = regularPayments
             .filter((p: any) => p.payment_method === 'CASH')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-          const dailyCheque = allDailyPayments
+    
+          const dailyOnline = regularPayments
+            .filter((p: any) => p.payment_method === 'ONLINE')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    
+          const dailyCheque = regularPayments
             .filter((p: any) => p.payment_method === 'CHEQUE')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-          const remCash = allRemittances
+    
+          // Remittances = ONLY legacyPayments (as per your version)
+          const remCash = legacyPayments
             .filter((p: any) => p.payment_method === 'CASH')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-          const remCheque = allRemittances
+    
+          const remOnline = legacyPayments
+            .filter((p: any) => p.payment_method === 'ONLINE')
+            .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    
+          const remCheque = legacyPayments
             .filter((p: any) => p.payment_method === 'CHEQUE')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-          let totalCash = dailyCash + remCash;
-          const totalCheque = dailyCheque + remCheque;
-          let totalPayments = totalCash + totalCheque;
-
-          totalCash -= othersTotal;
-          totalPayments -= othersTotal;
-
+    
+          const remittancesTotal = remCash + remOnline + remCheque;
+    
+          // Total Payments (with Others deducted from cash)
+          let totalPaymentsCash = dailyCash + remCash;
+          let totalPaymentsOnline = dailyOnline + remOnline;
+          let totalPaymentsCheque = dailyCheque + remCheque;
+    
+          totalPaymentsCash -= othersTotal;
+    
+          const totalPayments =
+            totalPaymentsCash + totalPaymentsOnline + totalPaymentsCheque;
+    
           const totalExpenses = (expenses || []).reduce(
             (sum, e) => sum + Number(e.amount || 0),
             0
           );
-          const actualCash = totalCash - totalExpenses;
-
-          // === Sort by Client Name ===
+          const actualCash = totalPaymentsCash - totalExpenses;
+    
+          // === Sort tables by Client Name ===
           const sortedRegular = [...regularPayments].sort((a, b) => {
             const nameA = (
-              a.orders?.client_name ||
-              a.customer_name ||
-              ''
+              a.orders?.client_name || a.customer_name || ''
             ).toLowerCase();
             const nameB = (
-              b.orders?.client_name ||
-              b.customer_name ||
-              ''
+              b.orders?.client_name || b.customer_name || ''
             ).toLowerCase();
             return nameA.localeCompare(nameB);
           });
-
+    
           const sortedLegacy = [...legacyPayments].sort((a, b) =>
             (a.customer_name || '')
               .toLowerCase()
               .localeCompare((b.customer_name || '').toLowerCase())
           );
-
-          const sortedOnline = [...onlinePayments].sort((a, b) => {
+    
+          const sortedOnline = [
+            ...(allPaymentsRaw || []).filter(
+              (p: any) => p.payment_method === 'ONLINE'
+            ),
+          ].sort((a, b) => {
             const nameA = (
-              a.customer_name ||
-              a.orders?.client_name ||
-              ''
+              a.customer_name || a.orders?.client_name || ''
             ).toLowerCase();
             const nameB = (
-              b.customer_name ||
-              b.orders?.client_name ||
-              ''
+              b.customer_name || b.orders?.client_name || ''
             ).toLowerCase();
             return nameA.localeCompare(nameB);
           });
-
-          // === FULL HTML EMAIL ===
+    
+          // === FULL HTML (Your original structure) ===
           let emailHtml = `
             <div style="font-family: system-ui, Arial, sans-serif; max-width: 950px; margin: 0 auto; padding: 20px; background: #ffffff; color: #111827; border: 1px solid #e5e7eb;">
               
               <h1 style="text-align:center; margin:0 0 5px 0; font-size:22px;">DAILY REPORT (END OF DAY)</h1>
-              <h2 style="text-align:center; margin:0 0 25px 0; font-size:16px; color:#374151;">${
-                b.branch_name
-              } — ${reportDate}</h2>
+              <h2 style="text-align:center; margin:0 0 25px 0; font-size:16px; color:#374151;">${b.branch_name} — ${reportDate}</h2>
     
               <!-- DAILY SALES -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:0 0 10px 0; font-size:14px;">DAILY SALES</h3>
-              <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:14px;">
-                <tr><td style="padding:6px 12px;">Generic</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${Number(
-                  report?.generic_sales || 0
-                ).toLocaleString()}</td></tr>
-                <tr><td style="padding:6px 12px;">Branded</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${Number(
-                  report?.branded_sales || 0
-                ).toLocaleString()}</td></tr>
+              <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
+                <tr><td style="padding:6px 12px;">Generic</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${gen.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px;">Branded</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${brd.toLocaleString()}</td></tr>
                 <tr><td style="padding:6px 12px;">Others (Office Accounts)</td><td style="padding:6px 12px; text-align:right; font-weight:600; color:#d97706;">₱${othersTotal.toLocaleString()}</td></tr>
-                <tr><td style="padding:6px 12px; color:#dc2626;">Discount</td><td style="padding:6px 12px; text-align:right; color:#dc2626; font-weight:600;">- ₱${Number(
-                  report?.discount_total || 0
-                ).toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px; color:#dc2626;">Discount</td><td style="padding:6px 12px; text-align:right; color:#dc2626; font-weight:600;">- ₱${disc.toLocaleString()}</td></tr>
                 <tr style="background:#f3f4f6; font-weight:700;">
                   <td style="padding:10px 12px;">TOTAL SALES (NET)</td>
-                  <td style="padding:10px 12px; text-align:right;">₱${(
-                    Number(report?.generic_sales || 0) +
-                    Number(report?.branded_sales || 0) -
-                    Number(report?.discount_total || 0) -
-                    othersTotal
-                  ).toLocaleString()}</td>
+                  <td style="padding:10px 12px; text-align:right;">₱${dailySalesTotal.toLocaleString()}</td>
                 </tr>
               </table>
     
-              <!-- SUMMARY -->
-              <h3 style="background:#f3f4f6; padding:8px 12px; margin:0 0 10px 0; font-size:14px;">SUMMARY</h3>
-              <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:14px;">
-                <tr><td style="padding:8px 12px;">Daily Sales Cash</td><td style="padding:8px 12px; text-align:right;">₱${dailyCash.toLocaleString()}</td></tr>
-                <tr><td style="padding:8px 12px;">Daily Sales Cheque</td><td style="padding:8px 12px; text-align:right;">₱${dailyCheque.toLocaleString()}</td></tr>
-                <tr><td style="padding:8px 12px;">Remittances</td><td style="padding:8px 12px; text-align:right;">₱${(
-                  dailyCash + remCash
-                ).toLocaleString()}</td></tr>
-                <tr><td style="padding:8px 12px;">Total Payments</td><td style="padding:8px 12px; text-align:right;">₱${totalPayments.toLocaleString()}</td></tr>
-                <tr><td style="padding:8px 12px;">Expenses</td><td style="padding:8px 12px; text-align:right; color:#dc2626;">₱${totalExpenses.toLocaleString()}</td></tr>
-                <tr style="background:#ecfdf5; font-weight:700; font-size:15px;">
-                  <td style="padding:12px 12px;">Actual Cash</td>
-                  <td style="padding:12px 12px; text-align:right; color:#059669;">₱${actualCash.toLocaleString()}</td>
+              <!-- Cash / Online / Cheque breakdown -->
+              <table style="width:100%; border-collapse:collapse; margin-bottom:20px; font-size:13px;">
+                <tr><td style="padding:6px 12px;">Cash</td><td style="padding:6px 12px; text-align:right;">₱${dailyCash.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px;">Online</td><td style="padding:6px 12px; text-align:right;">₱${dailyOnline.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px;">Cheque</td><td style="padding:6px 12px; text-align:right;">₱${dailyCheque.toLocaleString()}</td></tr>
+              </table>
+    
+              <!-- REMITTANCES -->
+              <h3 style="background:#f3f4f6; padding:8px 12px; margin:15px 0 8px 0; font-size:14px;">REMITTANCES</h3>
+              <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
+                <tr style="background:#f3f4f6; font-weight:700;">
+                  <td style="padding:8px 12px;">TOTAL</td>
+                  <td style="padding:8px 12px; text-align:right;">₱${remittancesTotal.toLocaleString()}</td>
+                </tr>
+                <tr><td style="padding:6px 12px;">Cash</td><td style="padding:6px 12px; text-align:right;">₱${remCash.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px;">Online</td><td style="padding:6px 12px; text-align:right;">₱${remOnline.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px;">Cheque</td><td style="padding:6px 12px; text-align:right;">₱${remCheque.toLocaleString()}</td></tr>
+              </table>
+    
+              <!-- TOTAL PAYMENTS -->
+              <h3 style="background:#f3f4f6; padding:8px 12px; margin:15px 0 8px 0; font-size:14px;">TOTAL PAYMENTS</h3>
+              <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
+                <tr style="background:#f3f4f6; font-weight:700;">
+                  <td style="padding:8px 12px;">TOTAL</td>
+                  <td style="padding:8px 12px; text-align:right;">₱${totalPayments.toLocaleString()}</td>
+                </tr>
+                <tr><td style="padding:6px 12px;">Cash</td><td style="padding:6px 12px; text-align:right;">₱${totalPaymentsCash.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px;">Online</td><td style="padding:6px 12px; text-align:right;">₱${totalPaymentsOnline.toLocaleString()}</td></tr>
+                <tr><td style="padding:6px 12px;">Cheque</td><td style="padding:6px 12px; text-align:right;">₱${totalPaymentsCheque.toLocaleString()}</td></tr>
+              </table>
+    
+              <!-- EXPENSES -->
+              <h3 style="background:#f3f4f6; padding:8px 12px; margin:15px 0 8px 0; font-size:14px;">EXPENSES</h3>
+              <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
+                <tr><td style="padding:8px 12px;">Total Expenses</td><td style="padding:8px 12px; text-align:right; color:#dc2626;">₱${totalExpenses.toLocaleString()}</td></tr>
+              </table>
+    
+              <!-- ACTUAL CASH -->
+              <h3 style="background:#ecfdf5; padding:10px 12px; margin:15px 0 0 0; font-size:15px; color:#059669;">ACTUAL CASH</h3>
+              <table style="width:100%; border-collapse:collapse; font-size:16px;">
+                <tr style="background:#ecfdf5; font-weight:700;">
+                  <td style="padding:12px;">Actual Cash</td>
+                  <td style="padding:12px; text-align:right; color:#059669;">₱${actualCash.toLocaleString()}</td>
                 </tr>
               </table>
     
               <!-- DAILY SALES TABLE -->
-              <h3 style="background:#f3f4f6; padding:8px 12px; margin:0 0 10px 0; font-size:14px;">DAILY SALES TABLE</h3>
+              <h3 style="background:#f3f4f6; padding:8px 12px; margin:25px 0 10px 0; font-size:14px;">DAILY SALES TABLE</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:12px;">
                 <thead>
                   <tr style="background:#e5e7eb; text-align:left;">
@@ -278,43 +298,30 @@ export async function GET(request: Request) {
                     .map((p: any) => {
                       const order = p.orders || {};
                       const cashAmt =
-                        p.payment_method === 'CASH' ||
-                        p.payment_method === 'ONLINE'
+                        p.payment_method === 'CASH' || p.payment_method === 'ONLINE'
                           ? Number(p.amount)
                           : 0;
                       const chequeAmt =
                         p.payment_method === 'CHEQUE' ? Number(p.amount) : 0;
                       return `
-                      <tr style="border-bottom:1px solid #e5e7eb;">
-                        <td style="padding:6px 8px;">${
-                          order.client_name || p.customer_name || '—'
-                        }</td>
-                        <td style="padding:6px 8px;">${
-                          order.order_number || '—'
-                        }</td>
-                        <td style="padding:6px 8px;">${
-                          order.dr_number || '—'
-                        }</td>
-                        <td style="padding:6px 8px;">${p.pr_number || '—'}</td>
-                        <td style="padding:6px 8px; text-align:right;">₱${cashAmt.toLocaleString()}</td>
-                        <td style="padding:6px 8px; text-align:right;">₱${chequeAmt.toLocaleString()}</td>
-                        <td style="padding:6px 8px;">${
-                          p.cheque_date || '—'
-                        }</td>
-                        <td style="padding:6px 8px;">${
-                          order.delivery_date || '—'
-                        }</td>
-                        <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(
-                          order.total_amount || 0
-                        ).toLocaleString()}</td>
-                      </tr>
-                    `;
+                        <tr style="border-bottom:1px solid #e5e7eb;">
+                          <td style="padding:6px 8px;">${order.client_name || p.customer_name || '—'}</td>
+                          <td style="padding:6px 8px;">${order.order_number || '—'}</td>
+                          <td style="padding:6px 8px;">${order.dr_number || '—'}</td>
+                          <td style="padding:6px 8px;">${p.pr_number || '—'}</td>
+                          <td style="padding:6px 8px; text-align:right;">₱${cashAmt.toLocaleString()}</td>
+                          <td style="padding:6px 8px; text-align:right;">₱${chequeAmt.toLocaleString()}</td>
+                          <td style="padding:6px 8px;">${p.cheque_date || '—'}</td>
+                          <td style="padding:6px 8px;">${order.delivery_date || '—'}</td>
+                          <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(order.total_amount || 0).toLocaleString()}</td>
+                        </tr>
+                      `;
                     })
                     .join('')}
                 </tbody>
               </table>
     
-              <!-- REMITTANCES / PAYMENTS -->
+              <!-- REMITTANCES TABLE -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:20px 0 10px 0; font-size:14px;">REMITTANCES / PAYMENTS</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:12px;">
                 <thead>
@@ -335,37 +342,24 @@ export async function GET(request: Request) {
                     .map((p: any) => {
                       const order = p.orders || {};
                       const cashAmt =
-                        p.payment_method === 'CASH' ||
-                        p.payment_method === 'ONLINE'
+                        p.payment_method === 'CASH' || p.payment_method === 'ONLINE'
                           ? Number(p.amount)
                           : 0;
                       const chequeAmt =
                         p.payment_method === 'CHEQUE' ? Number(p.amount) : 0;
                       return `
-                      <tr style="border-bottom:1px solid #e5e7eb;">
-                        <td style="padding:6px 8px;">${
-                          order.client_name || p.customer_name || '—'
-                        }</td>
-                        <td style="padding:6px 8px;">${
-                          order.order_number || '—'
-                        }</td>
-                        <td style="padding:6px 8px;">${
-                          order.dr_number || '—'
-                        }</td>
-                        <td style="padding:6px 8px;">${p.pr_number || '—'}</td>
-                        <td style="padding:6px 8px; text-align:right;">₱${cashAmt.toLocaleString()}</td>
-                        <td style="padding:6px 8px; text-align:right;">₱${chequeAmt.toLocaleString()}</td>
-                        <td style="padding:6px 8px;">${
-                          p.cheque_date || '—'
-                        }</td>
-                        <td style="padding:6px 8px;">${
-                          order.delivery_date || '—'
-                        }</td>
-                        <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(
-                          p.amount
-                        ).toLocaleString()}</td>
-                      </tr>
-                    `;
+                        <tr style="border-bottom:1px solid #e5e7eb;">
+                          <td style="padding:6px 8px;">${order.client_name || p.customer_name || '—'}</td>
+                          <td style="padding:6px 8px;">${order.order_number || '—'}</td>
+                          <td style="padding:6px 8px;">${order.dr_number || '—'}</td>
+                          <td style="padding:6px 8px;">${p.pr_number || '—'}</td>
+                          <td style="padding:6px 8px; text-align:right;">₱${cashAmt.toLocaleString()}</td>
+                          <td style="padding:6px 8px; text-align:right;">₱${chequeAmt.toLocaleString()}</td>
+                          <td style="padding:6px 8px;">${p.cheque_date || '—'}</td>
+                          <td style="padding:6px 8px;">${order.delivery_date || '—'}</td>
+                          <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(p.amount).toLocaleString()}</td>
+                        </tr>
+                      `;
                     })
                     .join('')}
                 </tbody>
@@ -383,9 +377,7 @@ export async function GET(request: Request) {
                       (p: any) => `
                     <tr style="border-bottom:1px solid #fef3c7;">
                       <td style="padding:6px 12px;">${p.customer_name}</td>
-                      <td style="padding:6px 12px; text-align:right; font-weight:600;">₱${Number(
-                        p.amount
-                      ).toLocaleString()}</td>
+                      <td style="padding:6px 12px; text-align:right; font-weight:600;">₱${Number(p.amount).toLocaleString()}</td>
                       <td style="padding:6px 12px;">${p.payment_method}</td>
                       <td style="padding:6px 12px;">${p.pr_number || ''}</td>
                       <td style="padding:6px 12px;">${p.notes || ''}</td>
@@ -421,19 +413,11 @@ export async function GET(request: Request) {
                       const order = p.orders || {};
                       return `
                       <tr style="border-bottom:1px solid #bae6fd;">
-                        <td style="padding:6px 8px;">${
-                          p.customer_name || order.client_name || '—'
-                        }</td>
-                        <td style="padding:6px 8px;">${
-                          order.order_number || '—'
-                        }</td>
-                        <td style="padding:6px 8px;">${
-                          order.dr_number || '—'
-                        }</td>
+                        <td style="padding:6px 8px;">${p.customer_name || order.client_name || '—'}</td>
+                        <td style="padding:6px 8px;">${order.order_number || '—'}</td>
+                        <td style="padding:6px 8px;">${order.dr_number || '—'}</td>
                         <td style="padding:6px 8px;">${p.pr_number || '—'}</td>
-                        <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(
-                          p.amount
-                        ).toLocaleString()}</td>
+                        <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(p.amount).toLocaleString()}</td>
                         <td style="padding:6px 8px;">ONLINE</td>
                         <td style="padding:6px 8px;">${p.notes || '—'}</td>
                       </tr>
@@ -445,7 +429,7 @@ export async function GET(request: Request) {
                   : ''
               }
     
-              <!-- EXPENSES -->
+              <!-- EXPENSES DETAIL -->
               <h3 style="background:#fee2e2; padding:8px 12px; margin:20px 0 10px 0; font-size:14px; color:#991b1b;">EXPENSES</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:30px; font-size:13px;">
                 <tbody>
@@ -454,9 +438,7 @@ export async function GET(request: Request) {
                       (e: any) => `
                     <tr style="border-bottom:1px solid #fee2e2;">
                       <td style="padding:8px 12px;">${e.expense_name}</td>
-                      <td style="padding:8px 12px; text-align:right; color:#dc2626; font-weight:600;">₱${Number(
-                        e.amount
-                      ).toLocaleString()}</td>
+                      <td style="padding:8px 12px; text-align:right; color:#dc2626; font-weight:600;">₱${Number(e.amount).toLocaleString()}</td>
                     </tr>
                   `
                     )
@@ -473,29 +455,22 @@ export async function GET(request: Request) {
               </p>
             </div>
           `;
-
-          // === SEND EMAIL ===
+    
           try {
             await resend.emails.send({
               from: 'Econo Drugstore <stock@alerts.econo-pos.com>',
-              to: emailList,
+              to: emailList,                    // ← Now supports multiple emails
               subject: `📊 Daily Report (End of Day) - ${reportDate} | ${b.branch_name}`,
               html: emailHtml,
             });
-            console.log(`✅ Sent to: ${emailList.join(', ')}`);
+            console.log(`✅ Daily Report sent to: ${emailList.join(', ')}`);
           } catch (err: any) {
-            console.error(
-              `❌ Failed to send to ${emailList.join(', ')}:`,
-              err.message
-            );
+            console.error('Email failed:', err);
           }
         }
       }
-
-      return NextResponse.json({
-        success: true,
-        message: 'End of Day emails sent',
-      });
+    
+      return NextResponse.json({ success: true, message: 'Daily email sent' });
     }
     // =====================================================
     // ALL OTHER REPORT TYPES CONTINUE BELOW
