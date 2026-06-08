@@ -2011,7 +2011,6 @@ export default function StaffDashboard() {
     y += 14;
 
     // ====================== SUMMARY ======================
-    // Legacy payments are now treated as REMITTANCES
     const allDailyPayments = [...(sameDayPayments || [])];
     const allRemittances = [...(dayPayments || []), ...(legacyPayments || [])];
 
@@ -2034,8 +2033,6 @@ export default function StaffDashboard() {
     const totalCheque = dailyCheque + remCheque;
     let totalPayments = totalCash + totalCheque;
 
-    // Deduct "Others" (office accounts) from both Total Payments and Total Cash
-    // so that Actual Cash correctly reflects only external transactions.
     totalCash -= others;
     totalPayments -= others;
 
@@ -2088,15 +2085,16 @@ export default function StaffDashboard() {
     doc.setFontSize(5.8);
     doc.setFont('helvetica', 'normal');
 
-    // Professional balanced columns (no overlap, good margins, TOTAL has space)
-    doc.text('CLIENT', 15, y);
-    doc.text('SO#', 42, y);
-    doc.text('DR#', 62, y);
-    doc.text('PR#', 82, y);
+    // Moved CLIENT much closer to ORDER DATE (X: 30)
+    doc.text('ORDER DATE', 15, y);
+    doc.text('CLIENT', 30, y);
+    doc.text('SO#', 58, y);
+    doc.text('DR#', 75, y);
+    doc.text('PR#', 90, y);
     doc.text('CASH', 115, y, { align: 'right' });
-    doc.text('CHECK', 138, y, { align: 'right' });
-    doc.text('CHECK DATE', 155, y);
-    doc.text('DELIVERY DATE', 172, y);
+    doc.text('CHECK', 135, y, { align: 'right' });
+    doc.text('CHK DATE', 145, y);
+    doc.text('DEL DATE', 165, y);
     doc.text('TOTAL', 195, y, { align: 'right' });
     y += 5;
 
@@ -2105,6 +2103,7 @@ export default function StaffDashboard() {
       if (!acc[clientKey])
         acc[clientKey] = {
           client_name: clientKey,
+          order_dates: [],
           order_numbers: [],
           dr_numbers: [],
           pr_numbers: [],
@@ -2116,6 +2115,7 @@ export default function StaffDashboard() {
         };
       const g = acc[clientKey];
 
+      if (order.created_date_pht) g.order_dates.push(order.created_date_pht);
       g.order_numbers.push(order.order_number || '');
       if (order.dr_number) g.dr_numbers.push(order.dr_number);
       if (order.pr_number) g.pr_numbers.push(order.pr_number);
@@ -2136,87 +2136,99 @@ export default function StaffDashboard() {
       paymentsForOrder
         .filter((p: any) => p.payment_method === 'CHEQUE' && p.cheque_date)
         .forEach((p: any) => g.cheque_dates.push(p.cheque_date));
+
       g.total_amount += Number(order.total_amount || 0);
 
       return acc;
     }, {});
 
-    Object.values(groupedSales).forEach((group: any) => {
-      // Proper wrapping (prevents overlap + professional look)
-      const clientLines = doc.splitTextToSize(
-        group.client_name || 'WALK-IN',
-        26
-      );
-      const soLines = doc.splitTextToSize(
-        group.order_numbers.join(', ') || '—',
-        22
-      );
-      const drLines = doc.splitTextToSize(
-        [...new Set(group.dr_numbers)].join(', ') || '—',
-        20
-      );
-      const prLines = doc.splitTextToSize(
-        [...new Set(group.pr_numbers)].join(', ') || '—',
-        18
-      );
-      const delLines = doc.splitTextToSize(
-        [...new Set(group.delivery_dates.filter(Boolean))].join(', ') || '—',
-        17
-      );
-      const chequeDateLines = doc.splitTextToSize(
-        [...new Set(group.cheque_dates)].join(', ') || '—',
-        14
-      );
+    Object.values(groupedSales)
+      // Sorted by ORDER DATE first, then by CLIENT NAME
+      .sort((a: any, b: any) => {
+        const dateA = (a.order_dates?.filter(Boolean) || [])[0] || '';
+        const dateB = (b.order_dates?.filter(Boolean) || [])[0] || '';
+        if (dateA !== dateB) return dateA.localeCompare(dateB);
+        return (a.client_name || '').localeCompare(b.client_name || '');
+      })
+      .forEach((group: any) => {
+        // Strict text widths to ensure no overlapping into neighboring columns
+        const dateLines = doc.splitTextToSize(
+          [...new Set(group.order_dates.filter(Boolean))].join(', ') || '—',
+          14
+        );
+        const clientLines = doc.splitTextToSize(
+          group.client_name || 'WALK-IN',
+          26
+        );
+        const soLines = doc.splitTextToSize(
+          [...new Set(group.order_numbers)].join(', ') || '—',
+          16
+        );
+        const drLines = doc.splitTextToSize(
+          [...new Set(group.dr_numbers)].join(', ') || '—',
+          14
+        );
+        const prLines = doc.splitTextToSize(
+          [...new Set(group.pr_numbers)].join(', ') || '—',
+          20
+        );
+        const delLines = doc.splitTextToSize(
+          [...new Set(group.delivery_dates.filter(Boolean))].join(', ') || '—',
+          18
+        );
+        const chequeDateLines = doc.splitTextToSize(
+          [...new Set(group.cheque_dates)].join(', ') || '—',
+          18
+        );
 
-      const maxLines = Math.max(
-        clientLines.length,
-        soLines.length,
-        drLines.length,
-        prLines.length,
-        delLines.length,
-        chequeDateLines.length,
-        1
-      );
+        const maxLines = Math.max(
+          clientLines.length,
+          dateLines.length,
+          soLines.length,
+          drLines.length,
+          prLines.length,
+          delLines.length,
+          chequeDateLines.length,
+          1
+        );
 
-      const lineHeight = 5.2;
-      let rowY = y;
+        const lineHeight = 5.2;
+        let rowY = y;
 
-      for (let i = 0; i < maxLines; i++) {
-        if (clientLines[i]) doc.text(clientLines[i], 15, rowY);
-        if (soLines[i]) doc.text(soLines[i], 42, rowY);
-        if (drLines[i]) doc.text(drLines[i], 62, rowY);
-        if (prLines[i]) doc.text(prLines[i], 82, rowY);
-        if (chequeDateLines[i]) doc.text(chequeDateLines[i], 155, rowY);
-        if (delLines[i]) doc.text(delLines[i], 172, rowY);
+        for (let i = 0; i < maxLines; i++) {
+          if (dateLines[i]) doc.text(dateLines[i], 15, rowY);
+          if (clientLines[i]) doc.text(clientLines[i], 30, rowY); // Rendered at X: 30
+          if (soLines[i]) doc.text(soLines[i], 58, rowY);
+          if (drLines[i]) doc.text(drLines[i], 75, rowY);
+          if (prLines[i]) doc.text(prLines[i], 90, rowY);
+          if (chequeDateLines[i]) doc.text(chequeDateLines[i], 145, rowY);
+          if (delLines[i]) doc.text(delLines[i], 165, rowY);
 
-        // Amounts only on first line
-        if (i === 0) {
-          doc.text(`${group.cash.toLocaleString()}`, 115, rowY, {
-            align: 'right',
-          });
-          doc.text(`${group.cheque.toLocaleString()}`, 138, rowY, {
-            align: 'right',
-          });
-          doc.text(`${group.total_amount.toLocaleString()}`, 195, rowY, {
-            align: 'right',
-          });
+          if (i === 0) {
+            doc.text(`${group.cash.toLocaleString()}`, 115, rowY, {
+              align: 'right',
+            });
+            doc.text(`${group.cheque.toLocaleString()}`, 135, rowY, {
+              align: 'right',
+            });
+            doc.text(`${group.total_amount.toLocaleString()}`, 195, rowY, {
+              align: 'right',
+            });
+          }
+
+          rowY += lineHeight;
+          if (rowY > 265) {
+            doc.addPage();
+            rowY = 20;
+          }
         }
 
-        rowY += lineHeight;
-
-        if (rowY > 265) {
+        y = rowY + 2;
+        if (y > 265) {
           doc.addPage();
-          rowY = 20;
+          y = 20;
         }
-      }
-
-      y = rowY + 2;
-
-      if (y > 265) {
-        doc.addPage();
-        y = 20;
-      }
-    });
+      });
 
     y += 15;
 
@@ -2229,16 +2241,17 @@ export default function StaffDashboard() {
     doc.setFontSize(5.8);
     doc.setFont('helvetica', 'normal');
 
-    // Exact same formatting as Daily Sales table
-    doc.text('CLIENT', 15, y);
-    doc.text('SO#', 42, y);
-    doc.text('DR#', 62, y);
-    doc.text('PR#', 82, y);
+    // Matching Table Headers
+    doc.text('ORDER DATE', 15, y);
+    doc.text('CLIENT', 30, y);
+    doc.text('SO#', 58, y);
+    doc.text('DR#', 75, y);
+    doc.text('PR#', 90, y);
     doc.text('CASH', 115, y, { align: 'right' });
-    doc.text('CHECK', 138, y, { align: 'right' });
-    doc.text('CHECK DATE', 155, y);
-    doc.text('DELIVERY DATE', 172, y);
-    doc.text('TOTAL', 198, y, { align: 'right' });
+    doc.text('CHECK', 135, y, { align: 'right' });
+    doc.text('CHK DATE', 145, y);
+    doc.text('DEL DATE', 165, y);
+    doc.text('TOTAL', 195, y, { align: 'right' });
     y += 5;
 
     const groupedRem = dayPayments.reduce((acc: any, p: any) => {
@@ -2246,6 +2259,7 @@ export default function StaffDashboard() {
       if (!acc[clientKey])
         acc[clientKey] = {
           client_name: clientKey,
+          order_dates: [],
           order_numbers: [],
           dr_numbers: [],
           pr_numbers: [],
@@ -2257,6 +2271,8 @@ export default function StaffDashboard() {
         };
       const g = acc[clientKey];
 
+      if (p.orders?.created_date_pht)
+        g.order_dates.push(p.orders.created_date_pht);
       if (p.orders?.order_number) g.order_numbers.push(p.orders.order_number);
       if (p.orders?.dr_number) g.dr_numbers.push(p.orders.dr_number);
       if (p.pr_number) g.pr_numbers.push(p.pr_number);
@@ -2272,77 +2288,93 @@ export default function StaffDashboard() {
       return acc;
     }, {});
 
-    Object.values(groupedRem).forEach((group: any) => {
-      // Exact same clean formatting + wrapping as Daily Sales table
-      const clientLines = doc.splitTextToSize(
-        group.client_name || 'WALK-IN',
-        26
-      );
-      const soLines = doc.splitTextToSize(
-        [...new Set(group.order_numbers)].join(', ') || '—',
-        22
-      );
-      const drLines = doc.splitTextToSize(
-        [...new Set(group.dr_numbers)].join(', ') || '—',
-        20
-      );
-      const prLines = doc.splitTextToSize(
-        [...new Set(group.pr_numbers)].join(', ') || '—',
-        18
-      );
-      const delLines = doc.splitTextToSize(
-        [...new Set(group.delivery_dates.filter(Boolean))].join(', ') || '—',
-        17
-      );
-      const chequeDateLines = doc.splitTextToSize(
-        [...new Set(group.cheque_dates)].join(', ') || '—',
-        14
-      );
+    Object.values(groupedRem)
+      // Sorted by ORDER DATE first, then by CLIENT NAME
+      .sort((a: any, b: any) => {
+        const dateA = (a.order_dates?.filter(Boolean) || [])[0] || '';
+        const dateB = (b.order_dates?.filter(Boolean) || [])[0] || '';
+        if (dateA !== dateB) return dateA.localeCompare(dateB);
+        return (a.client_name || '').localeCompare(b.client_name || '');
+      })
+      .forEach((group: any) => {
+        // Strict text widths to match Daily Sales mapping
+        const dateLines = doc.splitTextToSize(
+          [...new Set(group.order_dates.filter(Boolean))].join(', ') || '—',
+          14
+        );
+        const clientLines = doc.splitTextToSize(
+          group.client_name || 'WALK-IN',
+          26
+        );
+        const soLines = doc.splitTextToSize(
+          [...new Set(group.order_numbers)].join(', ') || '—',
+          16
+        );
+        const drLines = doc.splitTextToSize(
+          [...new Set(group.dr_numbers)].join(', ') || '—',
+          14
+        );
+        const prLines = doc.splitTextToSize(
+          [...new Set(group.pr_numbers)].join(', ') || '—',
+          20
+        );
+        const delLines = doc.splitTextToSize(
+          [...new Set(group.delivery_dates.filter(Boolean))].join(', ') || '—',
+          18
+        );
+        const chequeDateLines = doc.splitTextToSize(
+          [...new Set(group.cheque_dates)].join(', ') || '—',
+          18
+        );
 
-      const maxLines = Math.max(
-        clientLines.length,
-        soLines.length,
-        drLines.length,
-        prLines.length,
-        delLines.length,
-        chequeDateLines.length,
-        1
-      );
+        const maxLines = Math.max(
+          clientLines.length,
+          dateLines.length,
+          soLines.length,
+          drLines.length,
+          prLines.length,
+          delLines.length,
+          chequeDateLines.length,
+          1
+        );
 
-      const lineHeight = 5.2;
-      let rowY = y;
+        const lineHeight = 5.2;
+        let rowY = y;
 
-      for (let i = 0; i < maxLines; i++) {
-        if (clientLines[i]) doc.text(clientLines[i], 15, rowY);
-        if (soLines[i]) doc.text(soLines[i], 42, rowY);
-        if (drLines[i]) doc.text(drLines[i], 62, rowY);
-        if (prLines[i]) doc.text(prLines[i], 82, rowY);
-        if (chequeDateLines[i]) doc.text(chequeDateLines[i], 155, rowY);
-        if (delLines[i]) doc.text(delLines[i], 172, rowY);
+        for (let i = 0; i < maxLines; i++) {
+          if (dateLines[i]) doc.text(dateLines[i], 15, rowY);
+          if (clientLines[i]) doc.text(clientLines[i], 30, rowY); // Rendered at X: 30
+          if (soLines[i]) doc.text(soLines[i], 58, rowY);
+          if (drLines[i]) doc.text(drLines[i], 75, rowY);
+          if (prLines[i]) doc.text(prLines[i], 90, rowY);
+          if (chequeDateLines[i]) doc.text(chequeDateLines[i], 145, rowY);
+          if (delLines[i]) doc.text(delLines[i], 165, rowY);
 
-        if (i === 0) {
-          doc.text(group.cash.toLocaleString(), 115, rowY, { align: 'right' });
-          doc.text(group.cheque.toLocaleString(), 138, rowY, {
-            align: 'right',
-          });
-          doc.text(group.total.toLocaleString(), 198, rowY, { align: 'right' });
+          if (i === 0) {
+            doc.text(group.cash.toLocaleString(), 115, rowY, {
+              align: 'right',
+            });
+            doc.text(group.cheque.toLocaleString(), 135, rowY, {
+              align: 'right',
+            });
+            doc.text(group.total.toLocaleString(), 195, rowY, {
+              align: 'right',
+            });
+          }
+
+          rowY += lineHeight;
+          if (rowY > 265) {
+            doc.addPage();
+            rowY = 20;
+          }
         }
 
-        rowY += lineHeight;
-
-        if (rowY > 265) {
+        y = rowY + 2;
+        if (y > 265) {
           doc.addPage();
-          rowY = 20;
+          y = 20;
         }
-      }
-
-      y = rowY + 2;
-
-      if (y > 265) {
-        doc.addPage();
-        y = 20;
-      }
-    });
+      });
 
     y += 15;
 
@@ -2361,21 +2393,28 @@ export default function StaffDashboard() {
       doc.text('NOTES', 170, y);
       y += 7;
 
-      legacyPayments.forEach((p: any) => {
-        if (y > 275) {
-          doc.addPage();
-          y = 20;
-        }
-        doc.setFont('helvetica', 'normal');
-        doc.text((p.customer_name || '—').substring(0, 35), 20, y);
-        doc.text(`PHP ${Number(p.amount).toLocaleString()}`, 95, y, {
-          align: 'right',
+      [...legacyPayments]
+        .sort((a: any, b: any) => {
+          const dateA = a.payment_date || a.created_at || '';
+          const dateB = b.payment_date || b.created_at || '';
+          if (dateA !== dateB) return dateA.localeCompare(dateB);
+          return (a.customer_name || '').localeCompare(b.customer_name || '');
+        })
+        .forEach((p: any) => {
+          if (y > 275) {
+            doc.addPage();
+            y = 20;
+          }
+          doc.setFont('helvetica', 'normal');
+          doc.text((p.customer_name || '—').substring(0, 35), 20, y);
+          doc.text(`PHP ${Number(p.amount).toLocaleString()}`, 95, y, {
+            align: 'right',
+          });
+          doc.text(p.payment_method, 125, y);
+          doc.text(p.pr_number || '—', 150, y);
+          doc.text((p.notes || '—').substring(0, 40), 170, y);
+          y += 7;
         });
-        doc.text(p.payment_method, 125, y);
-        doc.text(p.pr_number || '—', 150, y);
-        doc.text((p.notes || '—').substring(0, 40), 170, y);
-        y += 7;
-      });
       y += 15;
     }
 
@@ -2401,31 +2440,43 @@ export default function StaffDashboard() {
       doc.text('REFERENCE / NOTES', 160, y);
       y += 7;
 
-      allOnline.forEach((payment: any) => {
-        if (y > 275) {
-          doc.addPage();
-          y = 20;
-        }
-        const order = payment.orders || {};
-        doc.setFont('helvetica', 'normal');
-        doc.text(
-          (payment.customer_name || order.client_name || '—').substring(0, 28),
-          20,
-          y
-        );
-        doc.text(order.order_number || '—', 68, y);
-        doc.text(order.dr_number || '—', 88, y);
-        doc.text(payment.pr_number || order.pr_number || '—', 108, y);
-        doc.text(
-          `PHP ${Number(payment.amount || 0).toLocaleString()}`,
-          135,
-          y,
-          { align: 'right' }
-        );
-        doc.text('ONLINE', 140, y);
-        doc.text((payment.notes || '—').substring(0, 35), 160, y);
-        y += 7;
-      });
+      allOnline
+        .sort((a: any, b: any) => {
+          const dateA = a.orders?.created_date_pht || '';
+          const dateB = b.orders?.created_date_pht || '';
+          if (dateA !== dateB) return dateA.localeCompare(dateB);
+          const nameA = a.customer_name || a.orders?.client_name || '';
+          const nameB = b.customer_name || b.orders?.client_name || '';
+          return nameA.localeCompare(nameB);
+        })
+        .forEach((payment: any) => {
+          if (y > 275) {
+            doc.addPage();
+            y = 20;
+          }
+          const order = payment.orders || {};
+          doc.setFont('helvetica', 'normal');
+          doc.text(
+            (payment.customer_name || order.client_name || '—').substring(
+              0,
+              28
+            ),
+            20,
+            y
+          );
+          doc.text(order.order_number || '—', 68, y);
+          doc.text(order.dr_number || '—', 88, y);
+          doc.text(payment.pr_number || order.pr_number || '—', 108, y);
+          doc.text(
+            `PHP ${Number(payment.amount || 0).toLocaleString()}`,
+            135,
+            y,
+            { align: 'right' }
+          );
+          doc.text('ONLINE', 140, y);
+          doc.text((payment.notes || '—').substring(0, 35), 160, y);
+          y += 7;
+        });
       y += 15;
     }
 
@@ -4593,90 +4644,151 @@ export default function StaffDashboard() {
                           </thead>
                           <tbody className="divide-y divide-white/10 text-slate-300">
                             {dayOrders.length > 0 ? (
-                              dayOrders.map((order: any) => {
-                                const paymentsForOrder = sameDayPayments.filter(
-                                  (p: any) => p.order_id === order.id
-                                );
-                                const cashAmount = paymentsForOrder
-                                  .filter(
-                                    (p: any) => p.payment_method === 'CASH'
+                              (() => {
+                                const clientMap: any = {};
+                                for (const order of dayOrders) {
+                                  const key = order.client_name || 'WALK-IN';
+                                  if (!clientMap[key]) {
+                                    clientMap[key] = {
+                                      client_name: key,
+                                      orders: [],
+                                      isOfficeAccount:
+                                        order.clients?.is_office_account ===
+                                        true,
+                                    };
+                                  }
+                                  clientMap[key].orders.push(order);
+                                }
+                                return Object.values(clientMap)
+                                  .sort((a: any, b: any) =>
+                                    a.client_name.localeCompare(b.client_name)
                                   )
-                                  .reduce(
-                                    (sum, p) => sum + Number(p.amount || 0),
-                                    0
-                                  );
-                                const chequeAmount = paymentsForOrder
-                                  .filter(
-                                    (p: any) => p.payment_method === 'CHEQUE'
-                                  )
-                                  .reduce(
-                                    (sum, p) => sum + Number(p.amount || 0),
-                                    0
-                                  );
-                                const displayPrNumber =
-                                  paymentsForOrder
-                                    .map((p: any) => p.pr_number?.trim())
-                                    .filter(Boolean)
-                                    .join(', ') ||
-                                  order.pr_number ||
-                                  '—';
-                                const displayChequeDate =
-                                  paymentsForOrder
-                                    .filter(
-                                      (p: any) =>
-                                        p.payment_method === 'CHEQUE' &&
-                                        p.cheque_date
-                                    )
-                                    .map((p: any) => p.cheque_date)
-                                    .join(', ') || '—';
-
-                                const isOfficeAccount =
-                                  order.clients?.is_office_account === true;
-                                const orderTotal = Number(
-                                  order.total_amount || 0
-                                );
-
-                                return (
-                                  <tr key={order.id}>
-                                    <td className="p-4">
-                                      {order.client_name || 'WALK-IN'}
-                                    </td>
-                                    <td className="p-4 text-center font-mono">
-                                      {order.order_number}
-                                    </td>
-                                    <td className="p-4 text-center">
-                                      {order.dr_number || '—'}
-                                    </td>
-                                    <td className="p-4 text-center font-mono text-amber-300">
-                                      {displayPrNumber}
-                                    </td>
-                                    <td className="p-4 text-right">
-                                      ₱{cashAmount.toLocaleString()}
-                                    </td>
-                                    <td className="p-4 text-right">
-                                      ₱{chequeAmount.toLocaleString()}
-                                    </td>
-                                    <td className="p-4 text-center font-mono text-purple-300">
-                                      {displayChequeDate}
-                                    </td>
-                                    <td className="p-4 text-center">
-                                      {order.delivery_date || '—'}
-                                    </td>
-                                    <td className="p-4 text-right font-medium text-amber-400">
-                                      ₱
-                                      {isOfficeAccount
-                                        ? orderTotal.toLocaleString()
-                                        : '0'}
-                                    </td>
-                                    <td className="p-4 text-right font-bold">
-                                      ₱
-                                      {isOfficeAccount
-                                        ? '0'
-                                        : orderTotal.toLocaleString()}
-                                    </td>
-                                  </tr>
-                                );
-                              })
+                                  .map((group: any) => {
+                                    const allPaymentsForGroup =
+                                      group.orders.flatMap((o: any) =>
+                                        sameDayPayments.filter(
+                                          (p: any) => p.order_id === o.id
+                                        )
+                                      );
+                                    const cashAmount = allPaymentsForGroup
+                                      .filter(
+                                        (p: any) => p.payment_method === 'CASH'
+                                      )
+                                      .reduce(
+                                        (sum: number, p: any) =>
+                                          sum + Number(p.amount || 0),
+                                        0
+                                      );
+                                    const chequeAmount = allPaymentsForGroup
+                                      .filter(
+                                        (p: any) =>
+                                          p.payment_method === 'CHEQUE'
+                                      )
+                                      .reduce(
+                                        (sum: number, p: any) =>
+                                          sum + Number(p.amount || 0),
+                                        0
+                                      );
+                                    const soNumbers =
+                                      [
+                                        ...new Set(
+                                          group.orders
+                                            .map((o: any) => o.order_number)
+                                            .filter(Boolean)
+                                        ),
+                                      ].join(', ') || '—';
+                                    const drNumbers =
+                                      [
+                                        ...new Set(
+                                          group.orders
+                                            .map((o: any) => o.dr_number)
+                                            .filter(Boolean)
+                                        ),
+                                      ].join(', ') || '—';
+                                    const prNumbers =
+                                      [
+                                        ...new Set([
+                                          ...allPaymentsForGroup
+                                            .map((p: any) =>
+                                              p.pr_number?.trim()
+                                            )
+                                            .filter(Boolean),
+                                          ...group.orders
+                                            .map((o: any) =>
+                                              o.pr_number?.trim()
+                                            )
+                                            .filter(Boolean),
+                                        ]),
+                                      ].join(', ') || '—';
+                                    const chequeDates =
+                                      [
+                                        ...new Set(
+                                          allPaymentsForGroup
+                                            .filter(
+                                              (p: any) =>
+                                                p.payment_method === 'CHEQUE' &&
+                                                p.cheque_date
+                                            )
+                                            .map((p: any) => p.cheque_date)
+                                        ),
+                                      ].join(', ') || '—';
+                                    const deliveryDates =
+                                      [
+                                        ...new Set(
+                                          group.orders
+                                            .map((o: any) => o.delivery_date)
+                                            .filter(Boolean)
+                                        ),
+                                      ].join(', ') || '—';
+                                    const orderTotal = group.orders.reduce(
+                                      (sum: number, o: any) =>
+                                        sum + Number(o.total_amount || 0),
+                                      0
+                                    );
+                                    const isOfficeAccount =
+                                      group.isOfficeAccount;
+                                    return (
+                                      <tr key={group.client_name}>
+                                        <td className="p-4">
+                                          {group.client_name}
+                                        </td>
+                                        <td className="p-4 text-center font-mono">
+                                          {soNumbers}
+                                        </td>
+                                        <td className="p-4 text-center">
+                                          {drNumbers}
+                                        </td>
+                                        <td className="p-4 text-center font-mono text-amber-300">
+                                          {prNumbers}
+                                        </td>
+                                        <td className="p-4 text-right">
+                                          ₱{cashAmount.toLocaleString()}
+                                        </td>
+                                        <td className="p-4 text-right">
+                                          ₱{chequeAmount.toLocaleString()}
+                                        </td>
+                                        <td className="p-4 text-center font-mono text-purple-300">
+                                          {chequeDates}
+                                        </td>
+                                        <td className="p-4 text-center">
+                                          {deliveryDates}
+                                        </td>
+                                        <td className="p-4 text-right font-medium text-amber-400">
+                                          ₱
+                                          {isOfficeAccount
+                                            ? orderTotal.toLocaleString()
+                                            : '0'}
+                                        </td>
+                                        <td className="p-4 text-right font-bold">
+                                          ₱
+                                          {isOfficeAccount
+                                            ? '0'
+                                            : orderTotal.toLocaleString()}
+                                        </td>
+                                      </tr>
+                                    );
+                                  });
+                              })()
                             ) : (
                               <tr className="text-slate-400">
                                 <td className="p-4" colSpan={10}>
@@ -4737,25 +4849,33 @@ export default function StaffDashboard() {
 
                               const grouped = allPayments.reduce(
                                 (acc: any, p: any) => {
-                                  // For standalone payments (no order), use a unique key
-                                  let key =
-                                    'standalone-' + (p.id || Math.random());
+                                  // Group by customer name so the same client's multiple orders merge
+                                  const clientKey =
+                                    p.customer_name?.trim() ||
+                                    p.orders?.client_name?.trim() ||
+                                    (p.order_id
+                                      ? 'order-' + p.order_id
+                                      : 'standalone-' + p.id);
 
-                                  if (p.order_id) {
-                                    key =
-                                      p.order_id ||
-                                      (p.orders && p.orders.id) ||
-                                      Math.random();
-                                  }
-
-                                  if (!acc[key]) {
-                                    acc[key] = {
-                                      order: p.orders || {},
+                                  if (!acc[clientKey]) {
+                                    acc[clientKey] = {
+                                      clientName: clientKey,
+                                      orders: [],
                                       payments: [],
-                                      isStandalone: !p.order_id,
+                                      isOfficeAccount:
+                                        p.orders?.clients?.is_office_account ===
+                                        true,
                                     };
                                   }
-                                  acc[key].payments.push(p);
+                                  acc[clientKey].payments.push(p);
+                                  if (
+                                    p.orders &&
+                                    !acc[clientKey].orders.find(
+                                      (o: any) => o.id === p.orders.id
+                                    )
+                                  ) {
+                                    acc[clientKey].orders.push(p.orders);
+                                  }
                                   return acc;
                                 },
                                 {}
@@ -4764,7 +4884,6 @@ export default function StaffDashboard() {
                               const rows = Object.values(grouped).map(
                                 (group: any) => {
                                   const payments = group.payments;
-                                  const order = group.order || {};
 
                                   const cashAmount = payments
                                     .filter(
@@ -4788,88 +4907,125 @@ export default function StaffDashboard() {
                                       0
                                     );
 
+                                  const soNumbers =
+                                    [
+                                      ...new Set(
+                                        group.orders
+                                          .map((o: any) => o.order_number)
+                                          .filter(Boolean)
+                                      ),
+                                    ].join(', ') || '—';
+
+                                  const drNumbers =
+                                    [
+                                      ...new Set(
+                                        group.orders
+                                          .map((o: any) => o.dr_number)
+                                          .filter(Boolean)
+                                      ),
+                                    ].join(', ') || '—';
+
                                   const displayPrNumber =
-                                    payments
-                                      .map((p: any) => p.pr_number?.trim())
-                                      .filter(Boolean)
-                                      .join(', ') ||
-                                    order.pr_number ||
-                                    '—';
+                                    [
+                                      ...new Set([
+                                        ...payments
+                                          .map((p: any) => p.pr_number?.trim())
+                                          .filter(Boolean),
+                                        ...group.orders
+                                          .map((o: any) => o.pr_number?.trim())
+                                          .filter(Boolean),
+                                      ]),
+                                    ].join(', ') || '—';
 
                                   const displayChequeDate =
-                                    payments
-                                      .filter(
-                                        (p: any) =>
-                                          p.payment_method === 'CHEQUE' &&
-                                          p.cheque_date
-                                      )
-                                      .map((p: any) => p.cheque_date)
-                                      .join(', ') || '—';
+                                    [
+                                      ...new Set(
+                                        payments
+                                          .filter(
+                                            (p: any) =>
+                                              p.payment_method === 'CHEQUE' &&
+                                              p.cheque_date
+                                          )
+                                          .map((p: any) => p.cheque_date)
+                                      ),
+                                    ].join(', ') || '—';
+
+                                  const deliveryDates =
+                                    [
+                                      ...new Set(
+                                        group.orders
+                                          .map((o: any) => o.delivery_date)
+                                          .filter(Boolean)
+                                      ),
+                                    ].join(', ') || '—';
 
                                   return {
-                                    ...order,
+                                    customer_name: group.clientName,
                                     cashAmount,
                                     chequeAmount,
                                     displayPrNumber,
                                     displayChequeDate,
-                                    isStandalone: group.isStandalone,
-                                    customer_name:
-                                      payments[0]?.customer_name ||
-                                      order.client_name ||
-                                      'LEGACY PAYMENT',
+                                    delivery_date: deliveryDates,
+                                    order_number: soNumbers,
+                                    dr_number: drNumbers,
+                                    isOfficeAccount: group.isOfficeAccount,
                                   };
                                 }
                               );
 
                               return rows.length > 0 ? (
-                                rows.map((row: any, i: number) => {
-                                  const isOfficeAccount =
-                                    row.clients?.is_office_account === true;
-                                  const rowTotal =
-                                    row.cashAmount + row.chequeAmount;
+                                [...rows]
+                                  .sort((a: any, b: any) =>
+                                    (a.customer_name || '').localeCompare(
+                                      b.customer_name || ''
+                                    )
+                                  )
+                                  .map((row: any, i: number) => {
+                                    const isOfficeAccount = row.isOfficeAccount;
+                                    const rowTotal =
+                                      row.cashAmount + row.chequeAmount;
 
-                                  return (
-                                    <tr key={i}>
-                                      <td className="p-4">
-                                        {row.customer_name}
-                                      </td>
-                                      <td className="p-4 text-center font-mono">
-                                        {row.order_number ||
-                                          (row.isStandalone ? '—' : '—')}
-                                      </td>
-                                      <td className="p-4 text-center">
-                                        {row.dr_number || '—'}
-                                      </td>
-                                      <td className="p-4 text-center font-mono text-amber-300">
-                                        {row.displayPrNumber}
-                                      </td>
-                                      <td className="p-4 text-right">
-                                        ₱{row.cashAmount.toLocaleString()}
-                                      </td>
-                                      <td className="p-4 text-right">
-                                        ₱{row.chequeAmount.toLocaleString()}
-                                      </td>
-                                      <td className="p-4 text-center font-mono text-purple-300">
-                                        {row.displayChequeDate}
-                                      </td>
-                                      <td className="p-4 text-center">
-                                        {row.delivery_date || '—'}
-                                      </td>
-                                      <td className="p-4 text-right font-medium text-amber-400">
-                                        ₱
-                                        {isOfficeAccount
-                                          ? rowTotal.toLocaleString()
-                                          : '0'}
-                                      </td>
-                                      <td className="p-4 text-right font-bold">
-                                        ₱
-                                        {isOfficeAccount
-                                          ? '0'
-                                          : rowTotal.toLocaleString()}
-                                      </td>
-                                    </tr>
-                                  );
-                                })
+                                    return (
+                                      <tr key={i}>
+                                        <td className="p-4">
+                                          {row.customer_name}
+                                        </td>
+                                        <td className="p-4 text-center font-mono">
+                                          {row.order_number || '—'}
+                                        </td>
+                                        <td className="p-4 text-center">
+                                          {row.dr_number || '—'}
+                                        </td>
+                                        <td className="p-4 text-center font-mono text-amber-300">
+                                          {row.displayPrNumber}
+                                        </td>
+                                        <td className="p-4 text-right">
+                                          ₱{row.cashAmount.toLocaleString()}
+                                        </td>
+                                        <td className="p-4 text-right">
+                                          ₱{row.chequeAmount.toLocaleString()}
+                                        </td>
+                                        <td className="p-4 text-center font-mono text-purple-300">
+                                          {row.displayChequeDate}
+                                        </td>
+                                        <td className="p-4 text-center">
+                                          {row.delivery_date || '—'}
+                                        </td>
+                                        <td className="p-4 text-right font-medium text-amber-400">
+                                          ₱
+                                          {isOfficeAccount
+                                            ? rowTotal.toLocaleString()
+                                            : '0'}
+                                        </td>
+                                        <td className="p-4 text-right font-bold">
+                                          ₱
+                                          {isOfficeAccount
+                                            ? '0'
+                                            : rowTotal.toLocaleString()}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })
                               ) : (
                                 <tr className="text-slate-400">
                                   <td className="p-4" colSpan={10}>
@@ -4935,8 +5091,19 @@ export default function StaffDashboard() {
                                 );
                               }
 
-                              return allOnline.map(
-                                (payment: any, index: number) => {
+                              return allOnline
+                                .sort((a: any, b: any) => {
+                                  const nameA =
+                                    a.customer_name ||
+                                    a.orders?.client_name ||
+                                    '';
+                                  const nameB =
+                                    b.customer_name ||
+                                    b.orders?.client_name ||
+                                    '';
+                                  return nameA.localeCompare(nameB);
+                                })
+                                .map((payment: any, index: number) => {
                                   const order = payment.orders || {};
                                   return (
                                     <tr key={payment.id || index}>
@@ -4972,8 +5139,7 @@ export default function StaffDashboard() {
                                       </td>
                                     </tr>
                                   );
-                                }
-                              );
+                                });
                             })()}
                           </tbody>
                         </table>
@@ -5159,30 +5325,357 @@ export default function StaffDashboard() {
                         value,
                       }));
 
+                      // ── SALES: group by agent → client ──
+                      // Map<agent, Map<client, total_amount>>
+                      const salesGrouped = new Map<
+                        string,
+                        Map<string, number>
+                      >();
+                      dayOrders
+                        .filter(
+                          (order: any) => !order.clients?.is_office_account
+                        )
+                        .forEach((order: any) => {
+                          const agent = order.agent || 'Unknown Agent';
+                          const client = order.client_name || '—';
+                          const amount = Number(order.total_amount || 0);
+                          if (!salesGrouped.has(agent))
+                            salesGrouped.set(agent, new Map());
+                          const clientMap = salesGrouped.get(agent)!;
+                          clientMap.set(
+                            client,
+                            (clientMap.get(client) || 0) + amount
+                          );
+                        });
+
+                      // ── COLLECTIONS: group by agent → client, also track methods ──
+                      // Map<agent, Map<client, { amount, methods: Set<string> }>>
+                      const collGrouped = new Map<
+                        string,
+                        Map<string, { amount: number; methods: Set<string> }>
+                      >();
+                      dayPayments
+                        .filter(
+                          (p: any) => !p.orders?.clients?.is_office_account
+                        )
+                        .forEach((p: any) => {
+                          const agent = p.orders?.agent || 'Unknown Agent';
+                          const client =
+                            p.orders?.client_name ||
+                            p.customer_name ||
+                            'LEGACY';
+                          const amount = Number(p.amount || 0);
+                          const method = p.payment_method || '—';
+                          if (!collGrouped.has(agent))
+                            collGrouped.set(agent, new Map());
+                          const clientMap = collGrouped.get(agent)!;
+                          if (!clientMap.has(client))
+                            clientMap.set(client, {
+                              amount: 0,
+                              methods: new Set(),
+                            });
+                          const entry = clientMap.get(client)!;
+                          entry.amount += amount;
+                          entry.methods.add(method);
+                        });
+
+                      const grandSalesTotal = Array.from(
+                        salesGrouped.values()
+                      ).reduce(
+                        (sum, clientMap) =>
+                          sum +
+                          Array.from(clientMap.values()).reduce(
+                            (s, v) => s + v,
+                            0
+                          ),
+                        0
+                      );
+                      const grandCollTotal = Array.from(
+                        collGrouped.values()
+                      ).reduce(
+                        (sum, clientMap) =>
+                          sum +
+                          Array.from(clientMap.values()).reduce(
+                            (s, e) => s + e.amount,
+                            0
+                          ),
+                        0
+                      );
+
                       return (
-                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
-                          {/* SALES BY AGENT PIE */}
-                          <div>
-                            <h3 className="text-xs font-black uppercase tracking-widest text-emerald-400 mb-6 flex items-center gap-2">
-                              📦 SALES BY AGENT
-                            </h3>
-                            <PieChart
-                              data={salesByAgentData}
-                              title="Sales"
-                              color="emerald"
-                            />
+                        <div className="space-y-12">
+                          {/* ── PIE CHARTS ── */}
+                          <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
+                            {/* SALES BY AGENT PIE */}
+                            <div>
+                              <h3 className="text-xs font-black uppercase tracking-widest text-emerald-400 mb-6 flex items-center gap-2">
+                                📦 SALES BY AGENT
+                              </h3>
+                              <PieChart
+                                data={salesByAgentData}
+                                title="Sales"
+                                color="emerald"
+                              />
+                            </div>
+
+                            {/* COLLECTIONS BY AGENT PIE */}
+                            <div>
+                              <h3 className="text-xs font-black uppercase tracking-widest text-purple-400 mb-6 flex items-center gap-2">
+                                💰 COLLECTIONS BY AGENT
+                              </h3>
+                              <PieChart
+                                data={collectionsByAgentData}
+                                title="Collections"
+                                color="purple"
+                              />
+                            </div>
                           </div>
 
-                          {/* COLLECTIONS BY AGENT PIE */}
+                          {/* ── SALES TABLE ── */}
                           <div>
-                            <h3 className="text-xs font-black uppercase tracking-widest text-purple-400 mb-6 flex items-center gap-2">
-                              💰 COLLECTIONS BY AGENT
+                            <h3 className="text-xs font-black uppercase tracking-widest text-emerald-400 mb-4 flex items-center gap-2">
+                              📦 SALES BREAKDOWN BY AGENT
                             </h3>
-                            <PieChart
-                              data={collectionsByAgentData}
-                              title="Collections"
-                              color="purple"
-                            />
+                            {salesGrouped.size === 0 ? (
+                              <div className="text-center py-8 text-slate-500 text-sm bg-slate-900 rounded-2xl border border-white/5">
+                                No sales recorded for this day.
+                              </div>
+                            ) : (
+                              <div className="overflow-x-auto rounded-2xl border border-white/10">
+                                <table className="w-full text-sm">
+                                  <thead>
+                                    <tr className="bg-slate-800 text-left">
+                                      <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-emerald-400">
+                                        Agent
+                                      </th>
+                                      <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                                        Client
+                                      </th>
+                                      <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400 text-right">
+                                        Amount
+                                      </th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {Array.from(salesGrouped.entries())
+                                      .sort(([a], [b]) => a.localeCompare(b))
+                                      .map(([agent, clientMap]) => {
+                                        const agentTotal = Array.from(
+                                          clientMap.values()
+                                        ).reduce((s, v) => s + v, 0);
+                                        const clients = Array.from(
+                                          clientMap.entries()
+                                        ).sort(([a], [b]) =>
+                                          a.localeCompare(b)
+                                        );
+                                        return (
+                                          <>
+                                            {clients.map(
+                                              ([client, amount], ci) => (
+                                                <tr
+                                                  key={`s-${agent}-${client}`}
+                                                  className="border-t border-white/5 hover:bg-slate-800/50 transition-colors"
+                                                >
+                                                  <td className="px-4 py-3 font-bold text-white">
+                                                    {ci === 0 ? agent : ''}
+                                                  </td>
+                                                  <td className="px-4 py-3 text-slate-300">
+                                                    {client}
+                                                  </td>
+                                                  <td className="px-4 py-3 text-right font-mono text-emerald-400 font-bold">
+                                                    ₱
+                                                    {amount.toLocaleString(
+                                                      undefined,
+                                                      {
+                                                        minimumFractionDigits: 2,
+                                                        maximumFractionDigits: 2,
+                                                      }
+                                                    )}
+                                                  </td>
+                                                </tr>
+                                              )
+                                            )}
+                                            <tr
+                                              key={`s-sub-${agent}`}
+                                              className="border-t border-emerald-500/20 bg-emerald-500/5"
+                                            >
+                                              <td
+                                                colSpan={2}
+                                                className="px-4 py-2 text-[10px] font-black uppercase tracking-widest text-emerald-500"
+                                              >
+                                                {agent} — Subtotal
+                                              </td>
+                                              <td className="px-4 py-2 text-right font-mono font-black text-emerald-400">
+                                                ₱
+                                                {agentTotal.toLocaleString(
+                                                  undefined,
+                                                  {
+                                                    minimumFractionDigits: 2,
+                                                    maximumFractionDigits: 2,
+                                                  }
+                                                )}
+                                              </td>
+                                            </tr>
+                                          </>
+                                        );
+                                      })}
+                                    <tr className="border-t-2 border-emerald-500/40 bg-emerald-900/20">
+                                      <td
+                                        colSpan={2}
+                                        className="px-4 py-3 text-xs font-black uppercase tracking-widest text-emerald-300"
+                                      >
+                                        TOTAL SALES
+                                      </td>
+                                      <td className="px-4 py-3 text-right font-mono font-black text-emerald-300 text-base">
+                                        ₱
+                                        {grandSalesTotal.toLocaleString(
+                                          undefined,
+                                          {
+                                            minimumFractionDigits: 2,
+                                            maximumFractionDigits: 2,
+                                          }
+                                        )}
+                                      </td>
+                                    </tr>
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* ── COLLECTIONS TABLE ── */}
+                          <div>
+                            <h3 className="text-xs font-black uppercase tracking-widest text-purple-400 mb-4 flex items-center gap-2">
+                              💰 COLLECTIONS BREAKDOWN BY AGENT
+                            </h3>
+                            {collGrouped.size === 0 ? (
+                              <div className="text-center py-8 text-slate-500 text-sm bg-slate-900 rounded-2xl border border-white/5">
+                                No collections recorded for this day.
+                              </div>
+                            ) : (
+                              <div className="overflow-x-auto rounded-2xl border border-white/10">
+                                <table className="w-full text-sm">
+                                  <thead>
+                                    <tr className="bg-slate-800 text-left">
+                                      <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-purple-400">
+                                        Agent
+                                      </th>
+                                      <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                                        Client
+                                      </th>
+                                      <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                                        Method(s)
+                                      </th>
+                                      <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400 text-right">
+                                        Amount
+                                      </th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {Array.from(collGrouped.entries())
+                                      .sort(([a], [b]) => a.localeCompare(b))
+                                      .map(([agent, clientMap]) => {
+                                        const agentTotal = Array.from(
+                                          clientMap.values()
+                                        ).reduce((s, e) => s + e.amount, 0);
+                                        const clients = Array.from(
+                                          clientMap.entries()
+                                        ).sort(([a], [b]) =>
+                                          a.localeCompare(b)
+                                        );
+                                        return (
+                                          <>
+                                            {clients.map(
+                                              ([client, entry], ci) => (
+                                                <tr
+                                                  key={`c-${agent}-${client}`}
+                                                  className="border-t border-white/5 hover:bg-slate-800/50 transition-colors"
+                                                >
+                                                  <td className="px-4 py-3 font-bold text-white">
+                                                    {ci === 0 ? agent : ''}
+                                                  </td>
+                                                  <td className="px-4 py-3 text-slate-300">
+                                                    {client}
+                                                  </td>
+                                                  <td className="px-4 py-3">
+                                                    <div className="flex flex-wrap gap-1">
+                                                      {Array.from(
+                                                        entry.methods
+                                                      ).map((m) => (
+                                                        <span
+                                                          key={m}
+                                                          className={`text-[10px] font-black px-2 py-0.5 rounded-lg uppercase ${
+                                                            m === 'CASH'
+                                                              ? 'bg-emerald-500/20 text-emerald-400'
+                                                              : m === 'CHEQUE'
+                                                              ? 'bg-amber-500/20 text-amber-400'
+                                                              : 'bg-blue-500/20 text-blue-400'
+                                                          }`}
+                                                        >
+                                                          {m}
+                                                        </span>
+                                                      ))}
+                                                    </div>
+                                                  </td>
+                                                  <td className="px-4 py-3 text-right font-mono text-purple-400 font-bold">
+                                                    ₱
+                                                    {entry.amount.toLocaleString(
+                                                      undefined,
+                                                      {
+                                                        minimumFractionDigits: 2,
+                                                        maximumFractionDigits: 2,
+                                                      }
+                                                    )}
+                                                  </td>
+                                                </tr>
+                                              )
+                                            )}
+                                            <tr
+                                              key={`c-sub-${agent}`}
+                                              className="border-t border-purple-500/20 bg-purple-500/5"
+                                            >
+                                              <td
+                                                colSpan={3}
+                                                className="px-4 py-2 text-[10px] font-black uppercase tracking-widest text-purple-500"
+                                              >
+                                                {agent} — Subtotal
+                                              </td>
+                                              <td className="px-4 py-2 text-right font-mono font-black text-purple-400">
+                                                ₱
+                                                {agentTotal.toLocaleString(
+                                                  undefined,
+                                                  {
+                                                    minimumFractionDigits: 2,
+                                                    maximumFractionDigits: 2,
+                                                  }
+                                                )}
+                                              </td>
+                                            </tr>
+                                          </>
+                                        );
+                                      })}
+                                    <tr className="border-t-2 border-purple-500/40 bg-purple-900/20">
+                                      <td
+                                        colSpan={3}
+                                        className="px-4 py-3 text-xs font-black uppercase tracking-widest text-purple-300"
+                                      >
+                                        TOTAL COLLECTIONS
+                                      </td>
+                                      <td className="px-4 py-3 text-right font-mono font-black text-purple-300 text-base">
+                                        ₱
+                                        {grandCollTotal.toLocaleString(
+                                          undefined,
+                                          {
+                                            minimumFractionDigits: 2,
+                                            maximumFractionDigits: 2,
+                                          }
+                                        )}
+                                      </td>
+                                    </tr>
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
                           </div>
                         </div>
                       );
