@@ -38,77 +38,77 @@ export async function GET(request: Request) {
     // =====================================================
     if (type === 'DAILY_EMAIL') {
       console.log('📧 Starting Daily Email Report (8PM) - Full version');
-    
+
       const { data: orgsForEmail } = await supabaseAdmin
         .from('organizations')
         .select('id, name, owner_email')
         .not('owner_email', 'is', null);
-    
+
       for (const org of orgsForEmail || []) {
         const rawEmail = org.owner_email?.trim();
-    
+
         if (!rawEmail) {
           console.log(`⚠️ Skipping org "${org.name}" - no owner_email`);
           continue;
         }
-    
+
         // Support multiple emails (comma separated)
         const emailList: string[] = rawEmail
           .split(',')
-          .map(e => e.trim())
-          .filter(e => e.includes('@'));
-    
+          .map((e) => e.trim())
+          .filter((e) => e.includes('@'));
+
         if (emailList.length === 0) {
           console.log(`⚠️ Skipping org "${org.name}" - no valid emails`);
           continue;
         }
-    
+
         const { data: officeBranches } = await supabaseAdmin
           .from('branches')
           .select('*')
           .eq('org_id', org.id)
           .eq('is_office_use', true);
-    
+
         if (!officeBranches || officeBranches.length === 0) continue;
-    
+
         for (const b of officeBranches) {
           const reportDate = todayPHT;
-    
+
           const { data: report } = await supabaseAdmin
             .from('daily_reports')
             .select('*')
             .eq('branch_id', b.id)
             .eq('report_date', reportDate)
             .single();
-    
+
           const { data: allPaymentsRaw } = await supabaseAdmin
             .from('daily_payments')
             .select(
-              `*, orders (client_name, order_number, dr_number, delivery_date)`
+              `*, orders (client_name, order_number, dr_number, delivery_date, created_date_pht)`
             )
             .eq('branch_id', b.id)
             .eq('report_date', reportDate);
-    
+
           const { data: expenses } = await supabaseAdmin
             .from('daily_expenses')
             .select('*')
             .eq('branch_id', b.id)
             .eq('report_date', reportDate);
-    
+
           const legacyPayments = (allPaymentsRaw || []).filter(
             (p: any) => !p.order_id
           );
           const regularPayments = (allPaymentsRaw || []).filter(
             (p: any) => p.order_id
           );
-    
+
           // === Calculate Others (Office Accounts) ===
           const { data: dayOrders } = await supabaseAdmin
             .from('orders')
             .select('total_amount, client_name')
             .eq('branch_id', b.id)
             .eq('created_date_pht', reportDate);
-    
+
           let othersTotal = 0;
           if (dayOrders && dayOrders.length > 0) {
             const clientNames = [
@@ -119,7 +119,7 @@ export async function GET(request: Request) {
                 .from('clients')
                 .select('client_name, is_office_account')
                 .in('client_name', clientNames);
-    
+
               const officeSet = new Set(
                 (clientsData || [])
                   .filter((c) => c.is_office_account)
@@ -130,95 +130,114 @@ export async function GET(request: Request) {
                 .reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
             }
           }
-    
+
           // === DAILY SALES ===
           const gen = Number(report?.generic_sales || 0);
           const brd = Number(report?.branded_sales || 0);
           const disc = Number(report?.discount_total || 0);
           const dailySalesTotal = gen + brd - disc - othersTotal;
-    
+
           const dailyCash = regularPayments
             .filter((p: any) => p.payment_method === 'CASH')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-    
+
           const dailyOnline = regularPayments
             .filter((p: any) => p.payment_method === 'ONLINE')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-    
+
           const dailyCheque = regularPayments
             .filter((p: any) => p.payment_method === 'CHEQUE')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-    
+
           // Remittances = ONLY legacyPayments (as per your version)
           const remCash = legacyPayments
             .filter((p: any) => p.payment_method === 'CASH')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-    
+
           const remOnline = legacyPayments
             .filter((p: any) => p.payment_method === 'ONLINE')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-    
+
           const remCheque = legacyPayments
             .filter((p: any) => p.payment_method === 'CHEQUE')
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-    
+
           const remittancesTotal = remCash + remOnline + remCheque;
-    
+
           // Total Payments (with Others deducted from cash)
           let totalPaymentsCash = dailyCash + remCash;
           let totalPaymentsOnline = dailyOnline + remOnline;
           let totalPaymentsCheque = dailyCheque + remCheque;
-    
+
           totalPaymentsCash -= othersTotal;
-    
+
           const totalPayments =
             totalPaymentsCash + totalPaymentsOnline + totalPaymentsCheque;
-    
+
           const totalExpenses = (expenses || []).reduce(
             (sum, e) => sum + Number(e.amount || 0),
             0
           );
           const actualCash = totalPaymentsCash - totalExpenses;
-    
+
           // === Sort tables by Client Name ===
           const sortedRegular = [...regularPayments].sort((a, b) => {
+            const dateA = a.orders?.created_date_pht || '';
+            const dateB = b.orders?.created_date_pht || '';
+
+            // Sort by Order Date first
+            if (dateA !== dateB) {
+              const timeA = dateA ? new Date(dateA).getTime() : 0;
+              const timeB = dateB ? new Date(dateB).getTime() : 0;
+              return timeA - timeB;
+            }
+
+            // Fallback to sorting by Client Name
             const nameA = (
-              a.orders?.client_name || a.customer_name || ''
+              a.orders?.client_name ||
+              a.customer_name ||
+              ''
             ).toLowerCase();
             const nameB = (
-              b.orders?.client_name || b.customer_name || ''
+              b.orders?.client_name ||
+              b.customer_name ||
+              ''
             ).toLowerCase();
             return nameA.localeCompare(nameB);
           });
-    
           const sortedLegacy = [...legacyPayments].sort((a, b) =>
             (a.customer_name || '')
               .toLowerCase()
               .localeCompare((b.customer_name || '').toLowerCase())
           );
-    
+
           const sortedOnline = [
             ...(allPaymentsRaw || []).filter(
               (p: any) => p.payment_method === 'ONLINE'
             ),
           ].sort((a, b) => {
             const nameA = (
-              a.customer_name || a.orders?.client_name || ''
+              a.customer_name ||
+              a.orders?.client_name ||
+              ''
             ).toLowerCase();
             const nameB = (
-              b.customer_name || b.orders?.client_name || ''
+              b.customer_name ||
+              b.orders?.client_name ||
+              ''
             ).toLowerCase();
             return nameA.localeCompare(nameB);
           });
-    
-          // === FULL HTML (Your original structure) ===
+
+          // === FULL HTML ===
           let emailHtml = `
             <div style="font-family: system-ui, Arial, sans-serif; max-width: 950px; margin: 0 auto; padding: 20px; background: #ffffff; color: #111827; border: 1px solid #e5e7eb;">
               
               <h1 style="text-align:center; margin:0 0 5px 0; font-size:22px;">DAILY REPORT (END OF DAY)</h1>
-              <h2 style="text-align:center; margin:0 0 25px 0; font-size:16px; color:#374151;">${b.branch_name} — ${reportDate}</h2>
+              <h2 style="text-align:center; margin:0 0 25px 0; font-size:16px; color:#374151;">${
+                b.branch_name
+              } — ${reportDate}</h2>
     
-              <!-- DAILY SALES -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:0 0 10px 0; font-size:14px;">DAILY SALES</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
                 <tr><td style="padding:6px 12px;">Generic</td><td style="padding:6px 12px; text-align:right; font-weight:600;">₱${gen.toLocaleString()}</td></tr>
@@ -231,14 +250,12 @@ export async function GET(request: Request) {
                 </tr>
               </table>
     
-              <!-- Cash / Online / Cheque breakdown -->
               <table style="width:100%; border-collapse:collapse; margin-bottom:20px; font-size:13px;">
                 <tr><td style="padding:6px 12px;">Cash</td><td style="padding:6px 12px; text-align:right;">₱${dailyCash.toLocaleString()}</td></tr>
                 <tr><td style="padding:6px 12px;">Online</td><td style="padding:6px 12px; text-align:right;">₱${dailyOnline.toLocaleString()}</td></tr>
                 <tr><td style="padding:6px 12px;">Cheque</td><td style="padding:6px 12px; text-align:right;">₱${dailyCheque.toLocaleString()}</td></tr>
               </table>
     
-              <!-- REMITTANCES -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:15px 0 8px 0; font-size:14px;">REMITTANCES</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
                 <tr style="background:#f3f4f6; font-weight:700;">
@@ -250,7 +267,6 @@ export async function GET(request: Request) {
                 <tr><td style="padding:6px 12px;">Cheque</td><td style="padding:6px 12px; text-align:right;">₱${remCheque.toLocaleString()}</td></tr>
               </table>
     
-              <!-- TOTAL PAYMENTS -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:15px 0 8px 0; font-size:14px;">TOTAL PAYMENTS</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
                 <tr style="background:#f3f4f6; font-weight:700;">
@@ -262,13 +278,11 @@ export async function GET(request: Request) {
                 <tr><td style="padding:6px 12px;">Cheque</td><td style="padding:6px 12px; text-align:right;">₱${totalPaymentsCheque.toLocaleString()}</td></tr>
               </table>
     
-              <!-- EXPENSES -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:15px 0 8px 0; font-size:14px;">EXPENSES</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:14px;">
                 <tr><td style="padding:8px 12px;">Total Expenses</td><td style="padding:8px 12px; text-align:right; color:#dc2626;">₱${totalExpenses.toLocaleString()}</td></tr>
               </table>
     
-              <!-- ACTUAL CASH -->
               <h3 style="background:#ecfdf5; padding:10px 12px; margin:15px 0 0 0; font-size:15px; color:#059669;">ACTUAL CASH</h3>
               <table style="width:100%; border-collapse:collapse; font-size:16px;">
                 <tr style="background:#ecfdf5; font-weight:700;">
@@ -277,11 +291,11 @@ export async function GET(request: Request) {
                 </tr>
               </table>
     
-              <!-- DAILY SALES TABLE -->
               <h3 style="background:#f3f4f6; padding:8px 12px; margin:25px 0 10px 0; font-size:14px;">DAILY SALES TABLE</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:12px;">
                 <thead>
                   <tr style="background:#e5e7eb; text-align:left;">
+                    <th style="padding:6px 8px;">ORDER DATE</th>
                     <th style="padding:6px 8px;">CLIENT</th>
                     <th style="padding:6px 8px;">SO#</th>
                     <th style="padding:6px 8px;">DR#</th>
@@ -298,22 +312,40 @@ export async function GET(request: Request) {
                     .map((p: any) => {
                       const order = p.orders || {};
                       const cashAmt =
-                        p.payment_method === 'CASH' || p.payment_method === 'ONLINE'
+                        p.payment_method === 'CASH' ||
+                        p.payment_method === 'ONLINE'
                           ? Number(p.amount)
                           : 0;
                       const chequeAmt =
                         p.payment_method === 'CHEQUE' ? Number(p.amount) : 0;
                       return `
                         <tr style="border-bottom:1px solid #e5e7eb;">
-                          <td style="padding:6px 8px;">${order.client_name || p.customer_name || '—'}</td>
-                          <td style="padding:6px 8px;">${order.order_number || '—'}</td>
-                          <td style="padding:6px 8px;">${order.dr_number || '—'}</td>
-                          <td style="padding:6px 8px;">${p.pr_number || '—'}</td>
+                          <td style="padding:6px 8px;">${
+                            order.created_date_pht || '—'
+                          }</td>
+                          <td style="padding:6px 8px;">${
+                            order.client_name || p.customer_name || '—'
+                          }</td>
+                          <td style="padding:6px 8px;">${
+                            order.order_number || '—'
+                          }</td>
+                          <td style="padding:6px 8px;">${
+                            order.dr_number || '—'
+                          }</td>
+                          <td style="padding:6px 8px;">${
+                            p.pr_number || '—'
+                          }</td>
                           <td style="padding:6px 8px; text-align:right;">₱${cashAmt.toLocaleString()}</td>
                           <td style="padding:6px 8px; text-align:right;">₱${chequeAmt.toLocaleString()}</td>
-                          <td style="padding:6px 8px;">${p.cheque_date || '—'}</td>
-                          <td style="padding:6px 8px;">${order.delivery_date || '—'}</td>
-                          <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(order.total_amount || 0).toLocaleString()}</td>
+                          <td style="padding:6px 8px;">${
+                            p.cheque_date || '—'
+                          }</td>
+                          <td style="padding:6px 8px;">${
+                            order.delivery_date || '—'
+                          }</td>
+                          <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(
+                            order.total_amount || 0
+                          ).toLocaleString()}</td>
                         </tr>
                       `;
                     })
@@ -321,51 +353,6 @@ export async function GET(request: Request) {
                 </tbody>
               </table>
     
-              <!-- REMITTANCES TABLE -->
-              <h3 style="background:#f3f4f6; padding:8px 12px; margin:20px 0 10px 0; font-size:14px;">REMITTANCES / PAYMENTS</h3>
-              <table style="width:100%; border-collapse:collapse; margin-bottom:25px; font-size:12px;">
-                <thead>
-                  <tr style="background:#e5e7eb; text-align:left;">
-                    <th style="padding:6px 8px;">CLIENT</th>
-                    <th style="padding:6px 8px;">SO#</th>
-                    <th style="padding:6px 8px;">DR#</th>
-                    <th style="padding:6px 8px;">PR#</th>
-                    <th style="padding:6px 8px; text-align:right;">CASH</th>
-                    <th style="padding:6px 8px; text-align:right;">CHECK</th>
-                    <th style="padding:6px 8px;">CHECK DATE</th>
-                    <th style="padding:6px 8px;">DELIVERY DATE</th>
-                    <th style="padding:6px 8px; text-align:right;">TOTAL</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${sortedRegular
-                    .map((p: any) => {
-                      const order = p.orders || {};
-                      const cashAmt =
-                        p.payment_method === 'CASH' || p.payment_method === 'ONLINE'
-                          ? Number(p.amount)
-                          : 0;
-                      const chequeAmt =
-                        p.payment_method === 'CHEQUE' ? Number(p.amount) : 0;
-                      return `
-                        <tr style="border-bottom:1px solid #e5e7eb;">
-                          <td style="padding:6px 8px;">${order.client_name || p.customer_name || '—'}</td>
-                          <td style="padding:6px 8px;">${order.order_number || '—'}</td>
-                          <td style="padding:6px 8px;">${order.dr_number || '—'}</td>
-                          <td style="padding:6px 8px;">${p.pr_number || '—'}</td>
-                          <td style="padding:6px 8px; text-align:right;">₱${cashAmt.toLocaleString()}</td>
-                          <td style="padding:6px 8px; text-align:right;">₱${chequeAmt.toLocaleString()}</td>
-                          <td style="padding:6px 8px;">${p.cheque_date || '—'}</td>
-                          <td style="padding:6px 8px;">${order.delivery_date || '—'}</td>
-                          <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(p.amount).toLocaleString()}</td>
-                        </tr>
-                      `;
-                    })
-                    .join('')}
-                </tbody>
-              </table>
-    
-              <!-- LEGACY PAYMENTS -->
               ${
                 sortedLegacy.length > 0
                   ? `
@@ -377,7 +364,9 @@ export async function GET(request: Request) {
                       (p: any) => `
                     <tr style="border-bottom:1px solid #fef3c7;">
                       <td style="padding:6px 12px;">${p.customer_name}</td>
-                      <td style="padding:6px 12px; text-align:right; font-weight:600;">₱${Number(p.amount).toLocaleString()}</td>
+                      <td style="padding:6px 12px; text-align:right; font-weight:600;">₱${Number(
+                        p.amount
+                      ).toLocaleString()}</td>
                       <td style="padding:6px 12px;">${p.payment_method}</td>
                       <td style="padding:6px 12px;">${p.pr_number || ''}</td>
                       <td style="padding:6px 12px;">${p.notes || ''}</td>
@@ -390,7 +379,6 @@ export async function GET(request: Request) {
                   : ''
               }
     
-              <!-- ONLINE PAYMENTS -->
               ${
                 sortedOnline.length > 0
                   ? `
@@ -413,11 +401,19 @@ export async function GET(request: Request) {
                       const order = p.orders || {};
                       return `
                       <tr style="border-bottom:1px solid #bae6fd;">
-                        <td style="padding:6px 8px;">${p.customer_name || order.client_name || '—'}</td>
-                        <td style="padding:6px 8px;">${order.order_number || '—'}</td>
-                        <td style="padding:6px 8px;">${order.dr_number || '—'}</td>
+                        <td style="padding:6px 8px;">${
+                          p.customer_name || order.client_name || '—'
+                        }</td>
+                        <td style="padding:6px 8px;">${
+                          order.order_number || '—'
+                        }</td>
+                        <td style="padding:6px 8px;">${
+                          order.dr_number || '—'
+                        }</td>
                         <td style="padding:6px 8px;">${p.pr_number || '—'}</td>
-                        <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(p.amount).toLocaleString()}</td>
+                        <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(
+                          p.amount
+                        ).toLocaleString()}</td>
                         <td style="padding:6px 8px;">ONLINE</td>
                         <td style="padding:6px 8px;">${p.notes || '—'}</td>
                       </tr>
@@ -429,7 +425,6 @@ export async function GET(request: Request) {
                   : ''
               }
     
-              <!-- EXPENSES DETAIL -->
               <h3 style="background:#fee2e2; padding:8px 12px; margin:20px 0 10px 0; font-size:14px; color:#991b1b;">EXPENSES</h3>
               <table style="width:100%; border-collapse:collapse; margin-bottom:30px; font-size:13px;">
                 <tbody>
@@ -438,7 +433,9 @@ export async function GET(request: Request) {
                       (e: any) => `
                     <tr style="border-bottom:1px solid #fee2e2;">
                       <td style="padding:8px 12px;">${e.expense_name}</td>
-                      <td style="padding:8px 12px; text-align:right; color:#dc2626; font-weight:600;">₱${Number(e.amount).toLocaleString()}</td>
+                      <td style="padding:8px 12px; text-align:right; color:#dc2626; font-weight:600;">₱${Number(
+                        e.amount
+                      ).toLocaleString()}</td>
                     </tr>
                   `
                     )
@@ -455,11 +452,11 @@ export async function GET(request: Request) {
               </p>
             </div>
           `;
-    
+
           try {
             await resend.emails.send({
               from: 'Econo Drugstore <stock@alerts.econo-pos.com>',
-              to: emailList,                    // ← Now supports multiple emails
+              to: emailList, // ← Now supports multiple emails
               subject: `📊 Daily Report (End of Day) - ${reportDate} | ${b.branch_name}`,
               html: emailHtml,
             });
@@ -469,7 +466,7 @@ export async function GET(request: Request) {
           }
         }
       }
-    
+
       return NextResponse.json({ success: true, message: 'Daily email sent' });
     }
     // =====================================================
