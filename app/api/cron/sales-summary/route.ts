@@ -81,13 +81,21 @@ export async function GET(request: Request) {
             .eq('report_date', reportDate)
             .single();
 
-          const { data: allPaymentsRaw } = await supabaseAdmin
-            .from('daily_payments')
-            .select(
-              `*, orders (client_name, order_number, dr_number, delivery_date, created_date_pht)`
-            )
-            .eq('branch_id', b.id)
-            .eq('report_date', reportDate);
+          const { data: allPaymentsRaw, error: paymentsError } =
+            await supabaseAdmin
+              .from('daily_payments')
+              .select(
+                `*, orders (client_name, order_number, dr_number, delivery_date, created_date_pht, total_amount)`
+              )
+              .eq('branch_id', b.id)
+              .eq('report_date', reportDate);
+
+          if (paymentsError) {
+            console.error(
+              `⚠️ Payments Query Error for ${b.branch_name}:`,
+              paymentsError
+            );
+          }
 
           const { data: expenses } = await supabaseAdmin
             .from('daily_expenses')
@@ -185,11 +193,15 @@ export async function GET(request: Request) {
             const dateA = a.orders?.created_date_pht || '';
             const dateB = b.orders?.created_date_pht || '';
 
-            // Sort by Order Date first
             if (dateA !== dateB) {
               const timeA = dateA ? new Date(dateA).getTime() : 0;
               const timeB = dateB ? new Date(dateB).getTime() : 0;
-              return timeA - timeB;
+
+              // Prevent NaN from breaking the array sort
+              const validTimeA = isNaN(timeA) ? 0 : timeA;
+              const validTimeB = isNaN(timeB) ? 0 : timeB;
+
+              return validTimeA - validTimeB;
             }
 
             // Fallback to sorting by Client Name
@@ -205,6 +217,7 @@ export async function GET(request: Request) {
             ).toLowerCase();
             return nameA.localeCompare(nameB);
           });
+
           const sortedLegacy = [...legacyPayments].sort((a, b) =>
             (a.customer_name || '')
               .toLowerCase()
@@ -344,7 +357,7 @@ export async function GET(request: Request) {
                             order.delivery_date || '—'
                           }</td>
                           <td style="padding:6px 8px; text-align:right; font-weight:600;">₱${Number(
-                            order.total_amount || 0
+                            p.amount || 0
                           ).toLocaleString()}</td>
                         </tr>
                       `;
