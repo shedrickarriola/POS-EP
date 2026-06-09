@@ -133,6 +133,13 @@ export default function StaffDashboard() {
   const [selectedDayPayment, setSelectedDayPayment] = useState<any>(null);
 
   const [isSubmittingPayment, setIsSubmittingPayment] = useState(false);
+  // === UPDATE CLIENTS MODAL ===
+  const [showUpdateClientsModal, setShowUpdateClientsModal] = useState(false);
+  const [clientsList, setClientsList] = useState<any[]>([]);
+  const [editingClient, setEditingClient] = useState<any>(null);
+  const [clientForm, setClientForm] = useState<any>({});
+  const [isSavingClient, setIsSavingClient] = useState(false);
+  const [clientsLoading, setClientsLoading] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState<number>(0);
   const [paymentMethodModal, setPaymentMethodModal] = useState<
     'CASH' | 'CHEQUE' | 'ONLINE'
@@ -1384,6 +1391,59 @@ export default function StaffDashboard() {
   // === COLLECT PAYMENT MODAL HANDLER (saves to orders + daily_payments) ===
   // === COLLECT PAYMENT MODAL HANDLER - Saves PR# to both orders and daily_payments ===
   // === COLLECT PAYMENT MODAL HANDLER - ROBUST PR# APPENDING ===
+  // === UPDATE CLIENTS HANDLERS ===
+  const fetchClients = async () => {
+    if (!selectedBranch?.id) return;
+    setClientsLoading(true);
+    const { data, error } = await supabase
+      .from('clients')
+      .select(
+        'id, client_name, owner, birthday, allowed_terms, average_order, monthly_order, agent, phone, address, email, notes, is_office_account, pending_collection, total_orders'
+      )
+      .eq('branch_id', selectedBranch.id)
+      .order('client_name', { ascending: true });
+    if (!error) setClientsList(data || []);
+    setClientsLoading(false);
+  };
+
+  const handleSaveClient = async () => {
+    if (!editingClient) return;
+    setIsSavingClient(true);
+    try {
+      const { error } = await supabase
+        .from('clients')
+        .update({
+          client_name:
+            clientForm.client_name?.trim() || editingClient.client_name,
+          owner: clientForm.owner?.trim() || null,
+          birthday: clientForm.birthday || null,
+          allowed_terms: clientForm.allowed_terms?.trim() || null,
+          average_order: Number(clientForm.average_order) || 0,
+          monthly_order: Number(clientForm.monthly_order) || 0,
+          agent: clientForm.agent?.trim() || null,
+          phone: clientForm.phone?.trim() || null,
+          address: clientForm.address?.trim() || null,
+          email: clientForm.email?.trim() || null,
+          notes: clientForm.notes?.trim() || null,
+          is_office_account: clientForm.is_office_account === true,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', editingClient.id);
+      if (error) throw error;
+      triggerToast(
+        `✅ ${clientForm.client_name} updated successfully`,
+        'success'
+      );
+      setEditingClient(null);
+      setClientForm({});
+      await fetchClients();
+    } catch (err: any) {
+      triggerToast(`Failed to update client: ${err.message}`, 'error');
+    } finally {
+      setIsSavingClient(false);
+    }
+  };
+
   // === COLLECT PAYMENT MODAL HANDLER - NOW USING TOAST ===
   const handleCollectPayment = async () => {
     const remainingBalance = Number(
@@ -6004,6 +6064,29 @@ export default function StaffDashboard() {
                       className="text-slate-700 group-hover:text-purple-500"
                     />
                   </button>
+                  <button
+                    onClick={() => {
+                      setShowUpdateClientsModal(true);
+                      fetchClients();
+                    }}
+                    className="flex items-center justify-between p-6 bg-slate-900 border border-amber-500/30 rounded-2xl hover:border-amber-500 transition-all group"
+                  >
+                    <div className="flex items-center gap-4 text-left">
+                      <UserIcon size={20} className="text-amber-500" />
+                      <div>
+                        <span className="block text-sm font-black uppercase italic text-white leading-none">
+                          Update Clients
+                        </span>
+                        <span className="text-[9px] text-slate-500 uppercase mt-1 block tracking-widest font-bold">
+                          Client Directory
+                        </span>
+                      </div>
+                    </div>
+                    <ArrowRight
+                      size={18}
+                      className="text-slate-700 group-hover:text-amber-500"
+                    />
+                  </button>
                 </div>
               </div>
 
@@ -7214,6 +7297,403 @@ export default function StaffDashboard() {
                 >
                   {isSubmittingPayment ? 'RECORDING...' : 'RECORD PAYMENT'}
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ==================== UPDATE CLIENTS MODAL ==================== */}
+        {showUpdateClientsModal && (
+          <div className="fixed inset-0 z-[3200] flex items-center justify-center bg-slate-950/90 backdrop-blur-sm p-4">
+            <div className="bg-slate-900 border border-amber-500/20 rounded-3xl w-full max-w-4xl max-h-[90vh] flex flex-col">
+              {/* Header */}
+              <div className="flex justify-between items-center px-6 py-5 border-b border-white/10">
+                <div>
+                  <h2 className="text-xl font-black text-amber-400 uppercase tracking-tight">
+                    Update Clients
+                  </h2>
+                  <p className="text-[10px] text-slate-500 uppercase tracking-widest mt-0.5">
+                    {selectedBranch?.branch_name} — {clientsList.length} client
+                    {clientsList.length !== 1 ? 's' : ''}
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    setShowUpdateClientsModal(false);
+                    setEditingClient(null);
+                    setClientForm({});
+                  }}
+                  className="text-slate-400 hover:text-white"
+                >
+                  <X size={22} />
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="flex-1 overflow-auto p-6">
+                {clientsLoading ? (
+                  <div className="text-center py-16 text-slate-500 text-sm">
+                    Loading clients...
+                  </div>
+                ) : clientsList.length === 0 ? (
+                  <div className="text-center py-16 text-slate-500 text-sm">
+                    No clients found for this branch.
+                  </div>
+                ) : editingClient ? (
+                  /* ── EDIT FORM ── */
+                  <div className="space-y-6 max-w-2xl mx-auto">
+                    <div className="flex items-center gap-3 mb-2">
+                      <button
+                        onClick={() => {
+                          setEditingClient(null);
+                          setClientForm({});
+                        }}
+                        className="text-slate-400 hover:text-white text-xs font-black uppercase tracking-widest"
+                      >
+                        ← Back
+                      </button>
+                      <span className="text-slate-600">|</span>
+                      <span className="text-sm font-black text-white uppercase">
+                        {editingClient.client_name}
+                      </span>
+                    </div>
+
+                    {/* Read-only info strip */}
+                    <div className="grid grid-cols-2 gap-3 p-4 bg-slate-950 rounded-2xl border border-white/5">
+                      <div>
+                        <p className="text-[9px] font-black text-slate-600 uppercase tracking-widest">
+                          Pending Collection
+                        </p>
+                        <p className="text-sm font-mono text-amber-400 mt-0.5">
+                          ₱
+                          {Number(
+                            editingClient.pending_collection || 0
+                          ).toLocaleString()}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[9px] font-black text-slate-600 uppercase tracking-widest">
+                          Total Orders
+                        </p>
+                        <p className="text-sm font-mono text-slate-300 mt-0.5">
+                          {editingClient.total_orders || 0}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Office Account Toggle */}
+                    <div className="flex items-center justify-between p-4 bg-slate-950 rounded-2xl border border-white/10">
+                      <div>
+                        <p className="text-sm font-black text-white uppercase tracking-wide">
+                          Office Account
+                        </p>
+                        <p className="text-[10px] text-slate-500 mt-0.5">
+                          Orders from this client are tagged as OTHERS in
+                          reports
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setClientForm({
+                            ...clientForm,
+                            is_office_account: !clientForm.is_office_account,
+                          })
+                        }
+                        className={`relative w-14 h-7 rounded-full transition-all duration-200 ${
+                          clientForm.is_office_account
+                            ? 'bg-amber-500'
+                            : 'bg-slate-700'
+                        }`}
+                      >
+                        <span
+                          className={`absolute top-1 w-5 h-5 bg-white rounded-full shadow transition-all duration-200 ${
+                            clientForm.is_office_account ? 'left-8' : 'left-1'
+                          }`}
+                        />
+                      </button>
+                    </div>
+
+                    {/* Editable fields */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="md:col-span-2">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1.5">
+                          Client Name *
+                        </label>
+                        <input
+                          type="text"
+                          value={clientForm.client_name ?? ''}
+                          onChange={(e) =>
+                            setClientForm({
+                              ...clientForm,
+                              client_name: e.target.value,
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-white/10 focus:border-amber-500 rounded-xl px-4 py-3 text-sm outline-none transition-colors"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1.5">
+                          Owner / Contact Person
+                        </label>
+                        <input
+                          type="text"
+                          value={clientForm.owner ?? ''}
+                          onChange={(e) =>
+                            setClientForm({
+                              ...clientForm,
+                              owner: e.target.value,
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-white/10 focus:border-amber-500 rounded-xl px-4 py-3 text-sm outline-none transition-colors"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1.5">
+                          Birthday
+                        </label>
+                        <input
+                          type="date"
+                          value={clientForm.birthday ?? ''}
+                          onChange={(e) =>
+                            setClientForm({
+                              ...clientForm,
+                              birthday: e.target.value,
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-white/10 focus:border-amber-500 rounded-xl px-4 py-3 text-sm outline-none transition-colors"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1.5">
+                          Phone
+                        </label>
+                        <input
+                          type="text"
+                          value={clientForm.phone ?? ''}
+                          onChange={(e) =>
+                            setClientForm({
+                              ...clientForm,
+                              phone: e.target.value,
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-white/10 focus:border-amber-500 rounded-xl px-4 py-3 text-sm outline-none transition-colors"
+                          placeholder="+63..."
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1.5">
+                          Email
+                        </label>
+                        <input
+                          type="email"
+                          value={clientForm.email ?? ''}
+                          onChange={(e) =>
+                            setClientForm({
+                              ...clientForm,
+                              email: e.target.value,
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-white/10 focus:border-amber-500 rounded-xl px-4 py-3 text-sm outline-none transition-colors"
+                          placeholder="email@example.com"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1.5">
+                          Allowed Terms
+                        </label>
+                        <input
+                          type="text"
+                          value={clientForm.allowed_terms ?? ''}
+                          onChange={(e) =>
+                            setClientForm({
+                              ...clientForm,
+                              allowed_terms: e.target.value,
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-white/10 focus:border-amber-500 rounded-xl px-4 py-3 text-sm outline-none transition-colors"
+                          placeholder="e.g. 30 days, COD"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1.5">
+                          Assigned Agent
+                        </label>
+                        <input
+                          type="text"
+                          value={clientForm.agent ?? ''}
+                          onChange={(e) =>
+                            setClientForm({
+                              ...clientForm,
+                              agent: e.target.value,
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-white/10 focus:border-amber-500 rounded-xl px-4 py-3 text-sm outline-none transition-colors"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1.5">
+                          Average Order (₱)
+                        </label>
+                        <input
+                          type="number"
+                          value={clientForm.average_order ?? 0}
+                          onChange={(e) =>
+                            setClientForm({
+                              ...clientForm,
+                              average_order: e.target.value,
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-white/10 focus:border-amber-500 rounded-xl px-4 py-3 text-sm outline-none transition-colors font-mono"
+                          min="0"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1.5">
+                          Monthly Order (₱)
+                        </label>
+                        <input
+                          type="number"
+                          value={clientForm.monthly_order ?? 0}
+                          onChange={(e) =>
+                            setClientForm({
+                              ...clientForm,
+                              monthly_order: e.target.value,
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-white/10 focus:border-amber-500 rounded-xl px-4 py-3 text-sm outline-none transition-colors font-mono"
+                          min="0"
+                        />
+                      </div>
+
+                      <div className="md:col-span-2">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1.5">
+                          Address
+                        </label>
+                        <input
+                          type="text"
+                          value={clientForm.address ?? ''}
+                          onChange={(e) =>
+                            setClientForm({
+                              ...clientForm,
+                              address: e.target.value,
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-white/10 focus:border-amber-500 rounded-xl px-4 py-3 text-sm outline-none transition-colors"
+                        />
+                      </div>
+
+                      <div className="md:col-span-2">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1.5">
+                          Notes
+                        </label>
+                        <textarea
+                          value={clientForm.notes ?? ''}
+                          onChange={(e) =>
+                            setClientForm({
+                              ...clientForm,
+                              notes: e.target.value,
+                            })
+                          }
+                          rows={3}
+                          className="w-full bg-slate-950 border border-white/10 focus:border-amber-500 rounded-xl px-4 py-3 text-sm outline-none transition-colors resize-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex gap-3 pt-2">
+                      <button
+                        onClick={() => {
+                          setEditingClient(null);
+                          setClientForm({});
+                        }}
+                        className="flex-1 py-4 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-2xl text-sm"
+                      >
+                        CANCEL
+                      </button>
+                      <button
+                        onClick={handleSaveClient}
+                        disabled={
+                          isSavingClient || !clientForm.client_name?.trim()
+                        }
+                        className="flex-1 py-4 bg-amber-500 hover:bg-amber-400 disabled:bg-slate-700 text-black font-black rounded-2xl text-sm uppercase tracking-widest transition-all"
+                      >
+                        {isSavingClient ? 'SAVING...' : 'SAVE CHANGES'}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  /* ── CLIENT LIST ── */
+                  <div className="space-y-2">
+                    {clientsList.map((client: any) => (
+                      <button
+                        key={client.id}
+                        onClick={() => {
+                          setEditingClient(client);
+                          setClientForm({
+                            client_name: client.client_name || '',
+                            owner: client.owner || '',
+                            birthday: client.birthday || '',
+                            allowed_terms: client.allowed_terms || '',
+                            average_order: client.average_order || 0,
+                            monthly_order: client.monthly_order || 0,
+                            agent: client.agent || '',
+                            phone: client.phone || '',
+                            address: client.address || '',
+                            email: client.email || '',
+                            notes: client.notes || '',
+                            is_office_account:
+                              client.is_office_account || false,
+                          });
+                        }}
+                        className="w-full flex items-center justify-between p-4 bg-slate-950 border border-white/5 hover:border-amber-500/40 rounded-2xl transition-all text-left group"
+                      >
+                        <div className="flex items-center gap-4">
+                          <div className="w-9 h-9 rounded-xl bg-amber-500/10 flex items-center justify-center text-amber-400 font-black text-sm">
+                            {(client.client_name || '?')[0].toUpperCase()}
+                          </div>
+                          <div>
+                            <p className="text-sm font-black text-white">
+                              {client.client_name}
+                            </p>
+                            <p className="text-[10px] text-slate-500 mt-0.5">
+                              {[client.owner, client.phone]
+                                .filter(Boolean)
+                                .join(' · ') || 'No contact info'}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          {client.is_office_account && (
+                            <span className="text-[9px] font-black px-2 py-0.5 bg-amber-500/10 text-amber-400 rounded-full uppercase">
+                              Office
+                            </span>
+                          )}
+                          {client.pending_collection > 0 && (
+                            <span className="text-[9px] font-mono text-red-400">
+                              ₱
+                              {Number(
+                                client.pending_collection
+                              ).toLocaleString()}
+                            </span>
+                          )}
+                          <ArrowRight
+                            size={14}
+                            className="text-slate-700 group-hover:text-amber-400 transition-colors"
+                          />
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           </div>
