@@ -2106,12 +2106,9 @@ export default function StaffDashboard() {
       .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
     const remTotal = remCash + remCheque;
 
-    let totalCash = dailyCash + remCash;
+    const totalCash = dailyCash + remCash;
     const totalCheque = dailyCheque + remCheque;
-    let totalPayments = totalCash + totalCheque;
-
-    totalCash -= others;
-    totalPayments -= others;
+    const totalPayments = totalCash + totalCheque;
 
     const totalExpenses = (dayExpenses || []).reduce(
       (sum: number, exp: any) => sum + Number(exp.amount || 0),

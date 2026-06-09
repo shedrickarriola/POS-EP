@@ -172,12 +172,10 @@ export async function GET(request: Request) {
 
           const remittancesTotal = remCash + remOnline + remCheque;
 
-          // Total Payments (with Others deducted from cash)
-          let totalPaymentsCash = dailyCash + remCash;
-          let totalPaymentsOnline = dailyOnline + remOnline;
-          let totalPaymentsCheque = dailyCheque + remCheque;
-
-          totalPaymentsCash -= othersTotal;
+          // Total Payments
+          const totalPaymentsCash = dailyCash + remCash;
+          const totalPaymentsOnline = dailyOnline + remOnline;
+          const totalPaymentsCheque = dailyCheque + remCheque;
 
           const totalPayments =
             totalPaymentsCash + totalPaymentsOnline + totalPaymentsCheque;
