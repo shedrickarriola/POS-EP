@@ -58,6 +58,7 @@ export default function StaffDashboard() {
     pr_number: '',
   });
   const [last7DaysOrders, setLast7DaysOrders] = useState<any[]>([]); // ← NEW for calendar
+  const [calendarWeekOffset, setCalendarWeekOffset] = useState(0); // 0 = current week, -1 = last week, etc.
   // === NEW: Print Options Modal ===
   const [showPrintOptionsModal, setShowPrintOptionsModal] = useState(false);
   const [pendingPrintOrder, setPendingPrintOrder] = useState<any>(null);
@@ -131,6 +132,7 @@ export default function StaffDashboard() {
   const [dayPaymentsList, setDayPaymentsList] = useState<any[]>([]);
   const [selectedDayPayment, setSelectedDayPayment] = useState<any>(null);
 
+  const [isSubmittingPayment, setIsSubmittingPayment] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState<number>(0);
   const [paymentMethodModal, setPaymentMethodModal] = useState<
     'CASH' | 'CHEQUE' | 'ONLINE'
@@ -810,9 +812,13 @@ export default function StaffDashboard() {
     if (!selectedBranch?.is_office_use || !selectedBranch?.id) return;
 
     const preloadCalendarData = async () => {
+      const now = new Date();
+      const sunday = new Date(now);
+      sunday.setDate(now.getDate() - now.getDay() + calendarWeekOffset * 7);
+
       const dates = Array.from({ length: 7 }, (_, i) => {
-        const d = new Date();
-        d.setDate(d.getDate() - i);
+        const d = new Date(sunday);
+        d.setDate(sunday.getDate() + i);
         return d.toISOString().split('T')[0];
       });
 
@@ -861,7 +867,7 @@ export default function StaffDashboard() {
     };
 
     preloadCalendarData();
-  }, [selectedBranch?.id]);
+  }, [selectedBranch?.id, calendarWeekOffset]);
   // ============================================================================
   // ============================================================================
   // ============================================================================
@@ -1380,7 +1386,14 @@ export default function StaffDashboard() {
   // === COLLECT PAYMENT MODAL HANDLER - ROBUST PR# APPENDING ===
   // === COLLECT PAYMENT MODAL HANDLER - NOW USING TOAST ===
   const handleCollectPayment = async () => {
-    if (!selectedCollectionOrder || paymentAmount <= 0) return;
+    const remainingBalance = Number(
+      selectedCollectionOrder?.remaining_balance || 0
+    );
+    if (!selectedCollectionOrder) return;
+    if (paymentAmount <= 0 && remainingBalance > 0) return;
+
+    // ←←← Guard: prevent double-submission if button is tapped twice
+    if (isSubmittingPayment) return;
 
     // ←←← NEW: Require reference/notes for ONLINE payments
     if (
@@ -1393,6 +1406,8 @@ export default function StaffDashboard() {
       );
       return;
     }
+
+    setIsSubmittingPayment(true);
 
     try {
       const currentRemaining = Number(
@@ -1492,6 +1507,8 @@ export default function StaffDashboard() {
       await fetchOfficeOrders(selectedBranch.id);
     } catch (err: any) {
       triggerToast(`❌ Failed to record payment: ${err.message}`, 'error');
+    } finally {
+      setIsSubmittingPayment(false);
     }
   };
 
@@ -2145,8 +2162,8 @@ export default function StaffDashboard() {
     Object.values(groupedSales)
       // Sorted by ORDER DATE first, then by CLIENT NAME
       .sort((a: any, b: any) => {
-        const dateA = (a.order_dates?.filter(Boolean) || [])[0] || '';
-        const dateB = (b.order_dates?.filter(Boolean) || [])[0] || '';
+        const dateA = (a.order_dates?.filter(Boolean) || []).join(',');
+        const dateB = (b.order_dates?.filter(Boolean) || []).join(',');
         if (dateA !== dateB) return dateA.localeCompare(dateB);
         return (a.client_name || '').localeCompare(b.client_name || '');
       })
@@ -2291,8 +2308,8 @@ export default function StaffDashboard() {
     Object.values(groupedRem)
       // Sorted by ORDER DATE first, then by CLIENT NAME
       .sort((a: any, b: any) => {
-        const dateA = (a.order_dates?.filter(Boolean) || [])[0] || '';
-        const dateB = (b.order_dates?.filter(Boolean) || [])[0] || '';
+        const dateA = (a.order_dates?.filter(Boolean) || []).join(',');
+        const dateB = (b.order_dates?.filter(Boolean) || []).join(',');
         if (dateA !== dateB) return dateA.localeCompare(dateB);
         return (a.client_name || '').localeCompare(b.client_name || '');
       })
@@ -4005,15 +4022,44 @@ export default function StaffDashboard() {
         {/* ==================== OFFICE CALENDAR (Sun - Sat) - TODAY HIGHLIGHTED + OTHERS PRELOADED ==================== */}
         {selectedBranch?.is_office_use && (
           <div className="mt-8">
-            <h3 className="text-[10px] font-black text-amber-400 uppercase tracking-[0.3em] px-1 italic mb-5 flex items-center gap-2">
-              📅 OFFICE CALENDAR (Sun - Sat)
-            </h3>
+            <div className="flex items-center justify-between px-1 mb-5">
+              <h3 className="text-[10px] font-black text-amber-400 uppercase tracking-[0.3em] italic flex items-center gap-2">
+                📅 OFFICE CALENDAR (Sun - Sat)
+              </h3>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setCalendarWeekOffset((o) => o - 1)}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-black rounded-xl transition-all"
+                >
+                  ← PREV
+                </button>
+                {calendarWeekOffset !== 0 && (
+                  <button
+                    onClick={() => setCalendarWeekOffset(0)}
+                    className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 text-xs font-black rounded-xl transition-all"
+                  >
+                    THIS WEEK
+                  </button>
+                )}
+                <button
+                  onClick={() =>
+                    setCalendarWeekOffset((o) => Math.min(0, o + 1))
+                  }
+                  disabled={calendarWeekOffset >= 0}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed text-white text-xs font-black rounded-xl transition-all"
+                >
+                  NEXT →
+                </button>
+              </div>
+            </div>
 
             <div className="grid grid-cols-7 gap-3">
               {(() => {
                 const now = new Date();
                 const sunday = new Date(now);
-                sunday.setDate(now.getDate() - now.getDay());
+                sunday.setDate(
+                  now.getDate() - now.getDay() + calendarWeekOffset * 7
+                );
 
                 return Array.from({ length: 7 }).map((_, i) => {
                   const date = new Date(sunday);
@@ -5283,6 +5329,13 @@ export default function StaffDashboard() {
                   <>
                     {/* === COMPUTE PIE CHART DATA - EXCLUDE OFFICE ACCOUNTS ("OTHERS") === */}
                     {(() => {
+                      // ALL payments today = same-day orders + previous-day orders + legacy
+                      const allTodayPayments = [
+                        ...sameDayPayments,
+                        ...dayPayments,
+                        ...legacyPayments,
+                      ];
+
                       // SALES BY AGENT - exclude office accounts
                       const salesMap = new Map();
                       dayOrders
@@ -5304,14 +5357,16 @@ export default function StaffDashboard() {
                         value,
                       }));
 
-                      // COLLECTIONS BY AGENT - exclude office accounts
+                      // COLLECTIONS BY AGENT - all payments today, exclude office accounts
                       const collMap = new Map();
-                      dayPayments
+                      allTodayPayments
                         .filter(
                           (p: any) => !p.orders?.clients?.is_office_account
                         )
                         .forEach((p: any) => {
-                          const agent = p.orders?.agent || 'Unknown Agent';
+                          const agent =
+                            p.orders?.agent?.trim() ||
+                            (p.order_id ? 'Unknown Agent' : 'MAIN OFFICE');
                           const amount = Number(p.amount || 0);
                           collMap.set(
                             agent,
@@ -5348,35 +5403,44 @@ export default function StaffDashboard() {
                           );
                         });
 
-                      // ── COLLECTIONS: group by agent → client, also track methods ──
-                      // Map<agent, Map<client, { amount, methods: Set<string> }>>
+                      // ── COLLECTIONS: group by agent → client, track per-method totals ──
+                      // Map<agent, Map<client, { cash, cheque, online }>>
                       const collGrouped = new Map<
                         string,
-                        Map<string, { amount: number; methods: Set<string> }>
+                        Map<
+                          string,
+                          { cash: number; cheque: number; online: number }
+                        >
                       >();
-                      dayPayments
+                      allTodayPayments
                         .filter(
                           (p: any) => !p.orders?.clients?.is_office_account
                         )
                         .forEach((p: any) => {
-                          const agent = p.orders?.agent || 'Unknown Agent';
+                          const agent =
+                            p.orders?.agent?.trim() ||
+                            (p.order_id ? 'Unknown Agent' : 'MAIN OFFICE');
                           const client =
                             p.orders?.client_name ||
                             p.customer_name ||
                             'LEGACY';
                           const amount = Number(p.amount || 0);
-                          const method = p.payment_method || '—';
+                          const method = (
+                            p.payment_method || 'CASH'
+                          ).toUpperCase();
                           if (!collGrouped.has(agent))
                             collGrouped.set(agent, new Map());
                           const clientMap = collGrouped.get(agent)!;
                           if (!clientMap.has(client))
                             clientMap.set(client, {
-                              amount: 0,
-                              methods: new Set(),
+                              cash: 0,
+                              cheque: 0,
+                              online: 0,
                             });
                           const entry = clientMap.get(client)!;
-                          entry.amount += amount;
-                          entry.methods.add(method);
+                          if (method === 'CASH') entry.cash += amount;
+                          else if (method === 'CHEQUE') entry.cheque += amount;
+                          else entry.online += amount;
                         });
 
                       const grandSalesTotal = Array.from(
@@ -5396,7 +5460,7 @@ export default function StaffDashboard() {
                         (sum, clientMap) =>
                           sum +
                           Array.from(clientMap.values()).reduce(
-                            (s, e) => s + e.amount,
+                            (s, e) => s + e.cash + e.cheque + e.online,
                             0
                           ),
                         0
@@ -5563,11 +5627,17 @@ export default function StaffDashboard() {
                                       <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">
                                         Client
                                       </th>
-                                      <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400">
-                                        Method(s)
+                                      <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-emerald-400 text-right">
+                                        Cash
+                                      </th>
+                                      <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-amber-400 text-right">
+                                        Cheque
+                                      </th>
+                                      <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-blue-400 text-right">
+                                        Online
                                       </th>
                                       <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400 text-right">
-                                        Amount
+                                        Total
                                       </th>
                                     </tr>
                                   </thead>
@@ -5577,12 +5647,36 @@ export default function StaffDashboard() {
                                       .map(([agent, clientMap]) => {
                                         const agentTotal = Array.from(
                                           clientMap.values()
-                                        ).reduce((s, e) => s + e.amount, 0);
+                                        ).reduce(
+                                          (s, e) =>
+                                            s + e.cash + e.cheque + e.online,
+                                          0
+                                        );
+                                        const agentCash = Array.from(
+                                          clientMap.values()
+                                        ).reduce((s, e) => s + e.cash, 0);
+                                        const agentCheque = Array.from(
+                                          clientMap.values()
+                                        ).reduce((s, e) => s + e.cheque, 0);
+                                        const agentOnline = Array.from(
+                                          clientMap.values()
+                                        ).reduce((s, e) => s + e.online, 0);
                                         const clients = Array.from(
                                           clientMap.entries()
                                         ).sort(([a], [b]) =>
                                           a.localeCompare(b)
                                         );
+                                        const fmt = (n: number) =>
+                                          n > 0 ? (
+                                            `₱${n.toLocaleString(undefined, {
+                                              minimumFractionDigits: 2,
+                                              maximumFractionDigits: 2,
+                                            })}`
+                                          ) : (
+                                            <span className="text-slate-700">
+                                              —
+                                            </span>
+                                          );
                                         return (
                                           <>
                                             {clients.map(
@@ -5597,29 +5691,22 @@ export default function StaffDashboard() {
                                                   <td className="px-4 py-3 text-slate-300">
                                                     {client}
                                                   </td>
-                                                  <td className="px-4 py-3">
-                                                    <div className="flex flex-wrap gap-1">
-                                                      {Array.from(
-                                                        entry.methods
-                                                      ).map((m) => (
-                                                        <span
-                                                          key={m}
-                                                          className={`text-[10px] font-black px-2 py-0.5 rounded-lg uppercase ${
-                                                            m === 'CASH'
-                                                              ? 'bg-emerald-500/20 text-emerald-400'
-                                                              : m === 'CHEQUE'
-                                                              ? 'bg-amber-500/20 text-amber-400'
-                                                              : 'bg-blue-500/20 text-blue-400'
-                                                          }`}
-                                                        >
-                                                          {m}
-                                                        </span>
-                                                      ))}
-                                                    </div>
+                                                  <td className="px-4 py-3 text-right font-mono text-emerald-400">
+                                                    {fmt(entry.cash)}
+                                                  </td>
+                                                  <td className="px-4 py-3 text-right font-mono text-amber-400">
+                                                    {fmt(entry.cheque)}
+                                                  </td>
+                                                  <td className="px-4 py-3 text-right font-mono text-blue-400">
+                                                    {fmt(entry.online)}
                                                   </td>
                                                   <td className="px-4 py-3 text-right font-mono text-purple-400 font-bold">
                                                     ₱
-                                                    {entry.amount.toLocaleString(
+                                                    {(
+                                                      entry.cash +
+                                                      entry.cheque +
+                                                      entry.online
+                                                    ).toLocaleString(
                                                       undefined,
                                                       {
                                                         minimumFractionDigits: 2,
@@ -5635,10 +5722,43 @@ export default function StaffDashboard() {
                                               className="border-t border-purple-500/20 bg-purple-500/5"
                                             >
                                               <td
-                                                colSpan={3}
+                                                colSpan={2}
                                                 className="px-4 py-2 text-[10px] font-black uppercase tracking-widest text-purple-500"
                                               >
                                                 {agent} — Subtotal
+                                              </td>
+                                              <td className="px-4 py-2 text-right font-mono font-black text-emerald-400 text-[11px]">
+                                                {agentCash > 0
+                                                  ? `₱${agentCash.toLocaleString(
+                                                      undefined,
+                                                      {
+                                                        minimumFractionDigits: 2,
+                                                        maximumFractionDigits: 2,
+                                                      }
+                                                    )}`
+                                                  : '—'}
+                                              </td>
+                                              <td className="px-4 py-2 text-right font-mono font-black text-amber-400 text-[11px]">
+                                                {agentCheque > 0
+                                                  ? `₱${agentCheque.toLocaleString(
+                                                      undefined,
+                                                      {
+                                                        minimumFractionDigits: 2,
+                                                        maximumFractionDigits: 2,
+                                                      }
+                                                    )}`
+                                                  : '—'}
+                                              </td>
+                                              <td className="px-4 py-2 text-right font-mono font-black text-blue-400 text-[11px]">
+                                                {agentOnline > 0
+                                                  ? `₱${agentOnline.toLocaleString(
+                                                      undefined,
+                                                      {
+                                                        minimumFractionDigits: 2,
+                                                        maximumFractionDigits: 2,
+                                                      }
+                                                    )}`
+                                                  : '—'}
                                               </td>
                                               <td className="px-4 py-2 text-right font-mono font-black text-purple-400">
                                                 ₱
@@ -5656,7 +5776,7 @@ export default function StaffDashboard() {
                                       })}
                                     <tr className="border-t-2 border-purple-500/40 bg-purple-900/20">
                                       <td
-                                        colSpan={3}
+                                        colSpan={5}
                                         className="px-4 py-3 text-xs font-black uppercase tracking-widest text-purple-300"
                                       >
                                         TOTAL COLLECTIONS
@@ -6937,7 +7057,10 @@ export default function StaffDashboard() {
                   COLLECT PAYMENT
                 </h2>
                 <button
-                  onClick={() => setShowCollectionModal(false)}
+                  onClick={() => {
+                    setShowCollectionModal(false);
+                    setIsSubmittingPayment(false);
+                  }}
                   className="text-slate-500 hover:text-white"
                 >
                   <X size={20} />
@@ -7081,10 +7204,15 @@ export default function StaffDashboard() {
 
                 <button
                   onClick={handleCollectPayment}
-                  disabled={paymentAmount <= 0}
+                  disabled={
+                    (paymentAmount <= 0 &&
+                      Number(selectedCollectionOrder?.remaining_balance || 0) >
+                        0) ||
+                    isSubmittingPayment
+                  }
                   className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 text-white font-black text-sm uppercase tracking-widest rounded-xl"
                 >
-                  RECORD PAYMENT
+                  {isSubmittingPayment ? 'RECORDING...' : 'RECORD PAYMENT'}
                 </button>
               </div>
             </div>
