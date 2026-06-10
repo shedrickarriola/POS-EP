@@ -418,12 +418,20 @@ export async function GET(request: Request) {
                   </div>
                   <table style="width:100%;border-collapse:collapse;margin-bottom:12px;font-size:13px;">
                     <tbody>
-                      ${(expenses || []).map((e: any) => `
+                      ${(expenses || [])
+                        .map(
+                          (e: any) => `
                         <tr style="border-bottom:1px solid #fee2e2;">
-                          <td style="padding:9px 12px;color:#374151;">${e.expense_name}</td>
-                          <td style="padding:9px 12px;text-align:right;color:#dc2626;font-weight:700;">₱${Number(e.amount).toLocaleString()}</td>
+                          <td style="padding:9px 12px;color:#374151;">${
+                            e.expense_name
+                          }</td>
+                          <td style="padding:9px 12px;text-align:right;color:#dc2626;font-weight:700;">₱${Number(
+                            e.amount
+                          ).toLocaleString()}</td>
                         </tr>
-                      `).join('')}
+                      `
+                        )
+                        .join('')}
                       <tr style="background:#fef2f2;">
                         <td style="padding:11px 12px;font-weight:800;color:#991b1b;font-size:13px;">Total Expenses</td>
                         <td style="padding:11px 12px;text-align:right;font-weight:800;color:#dc2626;font-size:14px;">₱${totalExpenses.toLocaleString()}</td>
@@ -444,7 +452,9 @@ export async function GET(request: Request) {
                 </div>
 
                 <!-- ===== NOTES / DISCREPANCIES (directly below actual cash) ===== -->
-                ${reportNotes ? `
+                ${
+                  reportNotes
+                    ? `
                 <div style="padding:16px 32px 0 32px;">
                   <div style="background:#fefce8;border:1px solid #fde047;border-left:4px solid #eab308;border-radius:10px;padding:18px 20px;">
                     <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
@@ -454,7 +464,9 @@ export async function GET(request: Request) {
                     <p style="margin:0;color:#713f12;font-size:13px;line-height:1.7;white-space:pre-wrap;">${reportNotes}</p>
                   </div>
                 </div>
-                ` : ''}
+                `
+                    : ''
+                }
 
                 <!-- ===== DAILY SALES TABLE ===== -->
                 <div style="padding:28px 32px 0 32px;">
@@ -479,33 +491,60 @@ export async function GET(request: Request) {
                         </tr>
                       </thead>
                       <tbody>
-                        ${sortedRegular.map((p: any, idx: number) => {
-                          const order = p.orders || {};
-                          const cashAmt = p.payment_method === 'CASH' || p.payment_method === 'ONLINE' ? Number(p.amount) : 0;
-                          const chequeAmt = p.payment_method === 'CHEQUE' ? Number(p.amount) : 0;
-                          const rowBg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
-                          return `
+                        ${sortedRegular
+                          .map((p: any, idx: number) => {
+                            const order = p.orders || {};
+                            const cashAmt =
+                              p.payment_method === 'CASH' ||
+                              p.payment_method === 'ONLINE'
+                                ? Number(p.amount)
+                                : 0;
+                            const chequeAmt =
+                              p.payment_method === 'CHEQUE'
+                                ? Number(p.amount)
+                                : 0;
+                            const rowBg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
+                            return `
                             <tr style="background:${rowBg};border-bottom:1px solid #f1f5f9;">
-                              <td style="padding:9px 10px;color:#6b7280;">${order.created_date_pht || '—'}</td>
-                              <td style="padding:9px 10px;font-weight:600;color:#111827;">${order.client_name || p.customer_name || '—'}</td>
-                              <td style="padding:9px 10px;font-family:monospace;color:#6366f1;">${order.order_number || '—'}</td>
-                              <td style="padding:9px 10px;font-family:monospace;color:#6b7280;">${order.dr_number || '—'}</td>
-                              <td style="padding:9px 10px;font-family:monospace;color:#d97706;">${p.pr_number || '—'}</td>
+                              <td style="padding:9px 10px;color:#6b7280;">${
+                                order.created_date_pht || '—'
+                              }</td>
+                              <td style="padding:9px 10px;font-weight:600;color:#111827;">${
+                                order.client_name || p.customer_name || '—'
+                              }</td>
+                              <td style="padding:9px 10px;font-family:monospace;color:#6366f1;">${
+                                order.order_number || '—'
+                              }</td>
+                              <td style="padding:9px 10px;font-family:monospace;color:#6b7280;">${
+                                order.dr_number || '—'
+                              }</td>
+                              <td style="padding:9px 10px;font-family:monospace;color:#d97706;">${
+                                p.pr_number || '—'
+                              }</td>
                               <td style="padding:9px 10px;text-align:right;color:#059669;font-weight:600;">₱${cashAmt.toLocaleString()}</td>
                               <td style="padding:9px 10px;text-align:right;color:#7c3aed;font-weight:600;">₱${chequeAmt.toLocaleString()}</td>
-                              <td style="padding:9px 10px;color:#6b7280;">${p.cheque_date || '—'}</td>
-                              <td style="padding:9px 10px;color:#6b7280;">${order.delivery_date || '—'}</td>
-                              <td style="padding:9px 10px;text-align:right;font-weight:700;color:#111827;">₱${Number(p.amount || 0).toLocaleString()}</td>
+                              <td style="padding:9px 10px;color:#6b7280;">${
+                                p.cheque_date || '—'
+                              }</td>
+                              <td style="padding:9px 10px;color:#6b7280;">${
+                                order.delivery_date || '—'
+                              }</td>
+                              <td style="padding:9px 10px;text-align:right;font-weight:700;color:#111827;">₱${Number(
+                                p.amount || 0
+                              ).toLocaleString()}</td>
                             </tr>
                           `;
-                        }).join('')}
+                          })
+                          .join('')}
                       </tbody>
                     </table>
                   </div>
                 </div>
 
                 <!-- ===== LEGACY / STANDALONE PAYMENTS ===== -->
-                ${sortedLegacy.length > 0 ? `
+                ${
+                  sortedLegacy.length > 0
+                    ? `
                 <div style="padding:24px 32px 0 32px;">
                   <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
                     <div style="width:4px;height:20px;background:#f59e0b;border-radius:2px;"></div>
@@ -523,23 +562,43 @@ export async function GET(request: Request) {
                         </tr>
                       </thead>
                       <tbody>
-                        ${sortedLegacy.map((p: any, idx: number) => `
-                          <tr style="background:${idx % 2 === 0 ? '#fffbeb' : '#ffffff'};border-bottom:1px solid #fde68a;">
-                            <td style="padding:9px 10px;font-weight:600;color:#111827;">${p.customer_name}</td>
-                            <td style="padding:9px 10px;text-align:right;font-weight:700;color:#d97706;">₱${Number(p.amount).toLocaleString()}</td>
-                            <td style="padding:9px 10px;color:#374151;">${p.payment_method}</td>
-                            <td style="padding:9px 10px;font-family:monospace;color:#d97706;">${p.pr_number || '—'}</td>
-                            <td style="padding:9px 10px;color:#6b7280;">${p.notes || '—'}</td>
+                        ${sortedLegacy
+                          .map(
+                            (p: any, idx: number) => `
+                          <tr style="background:${
+                            idx % 2 === 0 ? '#fffbeb' : '#ffffff'
+                          };border-bottom:1px solid #fde68a;">
+                            <td style="padding:9px 10px;font-weight:600;color:#111827;">${
+                              p.customer_name
+                            }</td>
+                            <td style="padding:9px 10px;text-align:right;font-weight:700;color:#d97706;">₱${Number(
+                              p.amount
+                            ).toLocaleString()}</td>
+                            <td style="padding:9px 10px;color:#374151;">${
+                              p.payment_method
+                            }</td>
+                            <td style="padding:9px 10px;font-family:monospace;color:#d97706;">${
+                              p.pr_number || '—'
+                            }</td>
+                            <td style="padding:9px 10px;color:#6b7280;">${
+                              p.notes || '—'
+                            }</td>
                           </tr>
-                        `).join('')}
+                        `
+                          )
+                          .join('')}
                       </tbody>
                     </table>
                   </div>
                 </div>
-                ` : ''}
+                `
+                    : ''
+                }
 
                 <!-- ===== ONLINE PAYMENTS ===== -->
-                ${sortedOnline.length > 0 ? `
+                ${
+                  sortedOnline.length > 0
+                    ? `
                 <div style="padding:24px 32px 0 32px;">
                   <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
                     <div style="width:4px;height:20px;background:#38bdf8;border-radius:2px;"></div>
@@ -559,36 +618,56 @@ export async function GET(request: Request) {
                         </tr>
                       </thead>
                       <tbody>
-                        ${sortedOnline.map((p: any, idx: number) => {
-                          const order = p.orders || {};
-                          return `
-                            <tr style="background:${idx % 2 === 0 ? '#f0f9ff' : '#ffffff'};border-bottom:1px solid #bae6fd;">
-                              <td style="padding:9px 10px;font-weight:600;color:#111827;">${p.customer_name || order.client_name || '—'}</td>
-                              <td style="padding:9px 10px;font-family:monospace;color:#6366f1;">${order.order_number || '—'}</td>
-                              <td style="padding:9px 10px;font-family:monospace;color:#6b7280;">${order.dr_number || '—'}</td>
-                              <td style="padding:9px 10px;font-family:monospace;color:#d97706;">${p.pr_number || '—'}</td>
-                              <td style="padding:9px 10px;text-align:right;font-weight:700;color:#0369a1;">₱${Number(p.amount).toLocaleString()}</td>
+                        ${sortedOnline
+                          .map((p: any, idx: number) => {
+                            const order = p.orders || {};
+                            return `
+                            <tr style="background:${
+                              idx % 2 === 0 ? '#f0f9ff' : '#ffffff'
+                            };border-bottom:1px solid #bae6fd;">
+                              <td style="padding:9px 10px;font-weight:600;color:#111827;">${
+                                p.customer_name || order.client_name || '—'
+                              }</td>
+                              <td style="padding:9px 10px;font-family:monospace;color:#6366f1;">${
+                                order.order_number || '—'
+                              }</td>
+                              <td style="padding:9px 10px;font-family:monospace;color:#6b7280;">${
+                                order.dr_number || '—'
+                              }</td>
+                              <td style="padding:9px 10px;font-family:monospace;color:#d97706;">${
+                                p.pr_number || '—'
+                              }</td>
+                              <td style="padding:9px 10px;text-align:right;font-weight:700;color:#0369a1;">₱${Number(
+                                p.amount
+                              ).toLocaleString()}</td>
                               <td style="padding:9px 10px;color:#0284c7;font-weight:600;">ONLINE</td>
-                              <td style="padding:9px 10px;color:#475569;">${p.notes || '—'}</td>
+                              <td style="padding:9px 10px;color:#475569;">${
+                                p.notes || '—'
+                              }</td>
                             </tr>
                           `;
-                        }).join('')}
+                          })
+                          .join('')}
                       </tbody>
                     </table>
                   </div>
                 </div>
-                ` : ''}
+                `
+                    : ''
+                }
 
                 <!-- ===== FOOTER ===== -->
                 <div style="padding:28px 32px 32px 32px;margin-top:24px;text-align:center;border-top:1px solid #e2e8f0;">
                   <p style="margin:0 0 4px 0;color:#94a3b8;font-size:11px;font-weight:600;letter-spacing:1px;">ECONO PHARMA TRADING</p>
-                  <p style="margin:0;color:#cbd5e1;font-size:10px;">Generated automatically • ${new Date().toLocaleString('en-PH', { timeZone: 'Asia/Manila' })}</p>
+                  <p style="margin:0;color:#cbd5e1;font-size:10px;">Generated automatically • ${new Date().toLocaleString(
+                    'en-PH',
+                    { timeZone: 'Asia/Manila' }
+                  )}</p>
                 </div>
 
               </div>
             </body>
             </html>
-          `;
 
         `;
 
