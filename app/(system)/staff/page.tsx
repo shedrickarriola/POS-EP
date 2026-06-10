@@ -151,6 +151,9 @@ export default function StaffDashboard() {
   const [showAddExpenseModal, setShowAddExpenseModal] = useState(false);
   const [newExpenseName, setNewExpenseName] = useState('');
   const [newExpenseAmount, setNewExpenseAmount] = useState(0);
+  // === CALENDAR DAY NOTES (admin-only, saved to daily_reports.notes) ===
+  const [calendarNotes, setCalendarNotes] = useState<string>('');
+  const [isSavingCalendarNotes, setIsSavingCalendarNotes] = useState(false);
   const [toast, setToast] = useState<{
     show: boolean;
     msg: string;
@@ -1087,6 +1090,14 @@ export default function StaffDashboard() {
         disc += Number(oi.discount || 0);
       });
 
+      // Fetch existing row first so we NEVER overwrite the notes field
+      const { data: existingRow } = await supabase
+        .from('daily_reports')
+        .select('notes')
+        .eq('branch_id', branchId)
+        .eq('report_date', dateStr)
+        .single();
+
       await supabase.from('daily_reports').upsert(
         {
           branch_id: branchId,
@@ -1096,6 +1107,8 @@ export default function StaffDashboard() {
           total_sales: ttl,
           discount_total: disc,
           branch_name: selectedBranch?.branch_name,
+          // Preserve whatever notes were already saved — never overwrite with null
+          notes: existingRow?.notes ?? null,
         },
         { onConflict: 'branch_id,report_date' }
       );
@@ -1752,6 +1765,63 @@ export default function StaffDashboard() {
       alert('Failed to delete expense: ' + err.message);
     }
   };
+
+  // === SAVE CALENDAR NOTES (admin only) ===
+  const handleSaveCalendarNotes = async () => {
+    if (!selectedDay?.dateStr || !selectedBranch?.id) return;
+    setIsSavingCalendarNotes(true);
+    try {
+      const { error } = await supabase.from('daily_reports').upsert(
+        {
+          branch_id: selectedBranch.id,
+          report_date: selectedDay.dateStr,
+          branch_name: selectedBranch.branch_name,
+          notes: calendarNotes.trim(),
+        },
+        { onConflict: 'branch_id,report_date' }
+      );
+      if (error) throw error;
+
+      // Re-fetch ONLY this row so we get saved notes back without
+      // triggering fetchDailyReports (which would overwrite notes with null)
+      const { data: freshRow } = await supabase
+        .from('daily_reports')
+        .select('*')
+        .eq('branch_id', selectedBranch.id)
+        .eq('report_date', selectedDay.dateStr)
+        .single();
+
+      // Sync selectedDay so textarea and PDF both see the saved notes
+      setSelectedDay((prev: any) => ({
+        ...prev,
+        report: freshRow ?? {
+          ...(prev?.report || {}),
+          notes: calendarNotes.trim(),
+        },
+      }));
+
+      // Also patch the dailyReports list so calendar cards stay current
+      setDailyReports((prev: any[]) => {
+        const idx = prev.findIndex(
+          (r: any) =>
+            r.report_date === selectedDay.dateStr &&
+            r.branch_id === selectedBranch.id
+        );
+        if (!freshRow) return prev;
+        if (idx === -1) return [...prev, freshRow];
+        const updated = [...prev];
+        updated[idx] = freshRow;
+        return updated;
+      });
+
+      triggerToast('Notes saved successfully', 'success');
+    } catch (err: any) {
+      triggerToast('Failed to save notes: ' + err.message, 'error');
+    } finally {
+      setIsSavingCalendarNotes(false);
+    }
+  };
+
   const handlePrintOrder = async (
     orderId: string,
     orderNumber: string,
@@ -2035,6 +2105,15 @@ export default function StaffDashboard() {
 
   const handleDownloadDayPDF = async () => {
     if (!selectedDay || !selectedBranch) return;
+
+    // Always fetch the latest notes from DB so the PDF is never stale
+    const { data: freshReportForPDF } = await supabase
+      .from('daily_reports')
+      .select('*')
+      .eq('branch_id', selectedBranch.id)
+      .eq('report_date', selectedDay.dateStr)
+      .single();
+    const latestNotes = freshReportForPDF?.notes?.trim() || '';
 
     const { jsPDF } = await import('jspdf');
     const doc = new jsPDF('p', 'mm', 'a4');
@@ -2585,6 +2664,35 @@ export default function StaffDashboard() {
       y += 6;
     });
 
+    // ====================== NOTES / DISCREPANCIES ======================
+    const reportNotes = latestNotes;
+    if (reportNotes) {
+      y += 10;
+      if (y > 260) {
+        doc.addPage();
+        y = 20;
+      }
+
+      doc.setFontSize(11);
+      doc.setFont('helvetica', 'bold');
+      doc.text('NOTES / DISCREPANCIES', 20, y);
+      y += 7;
+
+      doc.setFontSize(8);
+      doc.setFont('helvetica', 'normal');
+
+      // Word-wrap the notes to fit within the page width (170mm usable)
+      const noteLines = doc.splitTextToSize(reportNotes, 170);
+      noteLines.forEach((line: string) => {
+        if (y > 275) {
+          doc.addPage();
+          y = 20;
+        }
+        doc.text(line, 20, y);
+        y += 5.5;
+      });
+    }
+
     // Save
     const fileName = `Daily_Report_${selectedDay.dateStr}_${
       selectedBranch.branch_name || 'Office'
@@ -2596,6 +2704,7 @@ export default function StaffDashboard() {
 
   const handleBranchSelect = async (branch: any) => {
     setSelectedBranch(branch);
+
     localStorage.setItem('active_branch', JSON.stringify(branch));
     if (branch.is_office_use) {
       await loadBranchClientsAndAgents(branch.id);
@@ -4366,7 +4475,10 @@ export default function StaffDashboard() {
                   </button>
 
                   <button
-                    onClick={() => setSelectedDay(null)}
+                    onClick={() => {
+                      setSelectedDay(null);
+                      setCalendarNotes('');
+                    }}
                     className="text-4xl leading-none text-slate-400 hover:text-white"
                   >
                     ✕
@@ -5390,6 +5502,62 @@ export default function StaffDashboard() {
                         </table>
                       </div>
                     </div>
+
+                    {/* 7. NOTES SECTION (admin-only write, everyone can read) */}
+                    <div>
+                      <h3 className="text-xs font-black uppercase tracking-widest text-yellow-400 mb-4 flex items-center gap-2">
+                        📝 NOTES / DISCREPANCIES
+                      </h3>
+                      <div className="bg-slate-950 rounded-3xl p-6 border border-yellow-400/20">
+                        {isAdmin ? (
+                          <>
+                            <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest mb-3">
+                              Admin — update notes for this day (saved to daily
+                              report)
+                            </p>
+                            <textarea
+                              value={
+                                calendarNotes !== ''
+                                  ? calendarNotes
+                                  : selectedDay.report?.notes || ''
+                              }
+                              onChange={(e) => setCalendarNotes(e.target.value)}
+                              onFocus={() => {
+                                // Pre-fill with existing notes on first focus
+                                if (calendarNotes === '') {
+                                  setCalendarNotes(
+                                    selectedDay.report?.notes || ''
+                                  );
+                                }
+                              }}
+                              rows={5}
+                              className="w-full bg-slate-900 border border-white/10 rounded-2xl px-5 py-4 text-sm text-white outline-none focus:border-yellow-400/50 resize-none placeholder:text-slate-600"
+                              placeholder="Enter discrepancies, remarks, or any notes for this day..."
+                            />
+                            <button
+                              onClick={handleSaveCalendarNotes}
+                              disabled={isSavingCalendarNotes}
+                              className="mt-4 px-6 py-3 bg-yellow-500 hover:bg-yellow-400 disabled:bg-slate-700 disabled:text-slate-500 text-slate-900 font-black uppercase text-xs tracking-widest rounded-xl transition-all"
+                            >
+                              {isSavingCalendarNotes
+                                ? 'SAVING...'
+                                : 'SAVE NOTES'}
+                            </button>
+                          </>
+                        ) : (
+                          // Non-admin: read-only view
+                          <div className="text-sm text-slate-300 whitespace-pre-wrap min-h-[60px]">
+                            {selectedDay.report?.notes?.trim() ? (
+                              selectedDay.report.notes
+                            ) : (
+                              <span className="text-slate-600 italic">
+                                No notes recorded for this day.
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </>
                 )}
 
@@ -5397,6 +5565,7 @@ export default function StaffDashboard() {
                 {dayTab === 'sales-collection' && (
                   <>
                     {/* === COMPUTE PIE CHART DATA - EXCLUDE OFFICE ACCOUNTS ("OTHERS") === */}
+
                     {(() => {
                       // ALL payments today = same-day orders + previous-day orders + legacy
                       const allTodayPayments = [
