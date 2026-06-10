@@ -119,25 +119,33 @@ export async function GET(request: Request) {
 
           let othersTotal = 0;
           let officeSet = new Set<string>();
-          if (dayOrders && dayOrders.length > 0) {
-            const clientNames = [
-              ...new Set(dayOrders.map((o) => o.client_name).filter(Boolean)),
-            ];
-            if (clientNames.length > 0) {
-              const { data: clientsData } = await supabaseAdmin
-                .from('clients')
-                .select('client_name, is_office_account')
-                .in('client_name', clientNames);
 
-              officeSet = new Set(
-                (clientsData || [])
-                  .filter((c) => c.is_office_account)
-                  .map((c) => c.client_name)
-              );
-              othersTotal = dayOrders
-                .filter((o) => officeSet.has(o.client_name))
-                .reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
-            }
+          // Build officeSet from ALL client names: today's orders + all payment order links
+          // This ensures previous-day order payments (e.g. remittances) are also filtered correctly
+          const allClientNames = new Set<string>([
+            ...(dayOrders || []).map((o: any) => o.client_name).filter(Boolean),
+            ...(allPaymentsRaw || [])
+              .map((p: any) => p.orders?.client_name)
+              .filter(Boolean),
+          ]);
+
+          if (allClientNames.size > 0) {
+            const { data: clientsData } = await supabaseAdmin
+              .from('clients')
+              .select('client_name, is_office_account')
+              .in('client_name', [...allClientNames]);
+
+            officeSet = new Set(
+              (clientsData || [])
+                .filter((c) => c.is_office_account)
+                .map((c) => c.client_name)
+            );
+          }
+
+          if (dayOrders && dayOrders.length > 0) {
+            othersTotal = dayOrders
+              .filter((o: any) => officeSet.has(o.client_name))
+              .reduce((sum, o: any) => sum + Number(o.total_amount || 0), 0);
           }
 
           // Helper: check if a payment belongs to an office account
