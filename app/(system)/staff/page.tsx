@@ -2092,17 +2092,29 @@ export default function StaffDashboard() {
     const allRemittances = [...(dayPayments || []), ...(legacyPayments || [])];
 
     const dailyCash = allDailyPayments
-      .filter((p: any) => p.payment_method === 'CASH')
+      .filter(
+        (p: any) =>
+          p.payment_method === 'CASH' && !p.orders?.clients?.is_office_account
+      )
       .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
     const dailyCheque = allDailyPayments
-      .filter((p: any) => p.payment_method === 'CHEQUE')
+      .filter(
+        (p: any) =>
+          p.payment_method === 'CHEQUE' && !p.orders?.clients?.is_office_account
+      )
       .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
 
     const remCash = allRemittances
-      .filter((p: any) => p.payment_method === 'CASH')
+      .filter(
+        (p: any) =>
+          p.payment_method === 'CASH' && !p.orders?.clients?.is_office_account
+      )
       .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
     const remCheque = allRemittances
-      .filter((p: any) => p.payment_method === 'CHEQUE')
+      .filter(
+        (p: any) =>
+          p.payment_method === 'CHEQUE' && !p.orders?.clients?.is_office_account
+      )
       .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
     const remTotal = remCash + remCheque;
 
