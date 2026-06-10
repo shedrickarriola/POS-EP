@@ -118,6 +118,7 @@ export async function GET(request: Request) {
             .eq('created_date_pht', reportDate);
 
           let othersTotal = 0;
+          let officeSet = new Set<string>();
           if (dayOrders && dayOrders.length > 0) {
             const clientNames = [
               ...new Set(dayOrders.map((o) => o.client_name).filter(Boolean)),
@@ -128,7 +129,7 @@ export async function GET(request: Request) {
                 .select('client_name, is_office_account')
                 .in('client_name', clientNames);
 
-              const officeSet = new Set(
+              officeSet = new Set(
                 (clientsData || [])
                   .filter((c) => c.is_office_account)
                   .map((c) => c.client_name)
@@ -139,35 +140,53 @@ export async function GET(request: Request) {
             }
           }
 
+          // Helper: check if a payment belongs to an office account
+          const isOfficePayment = (p: any) =>
+            officeSet.has(p.orders?.client_name || '');
+
           // === DAILY SALES ===
           const gen = Number(report?.generic_sales || 0);
           const brd = Number(report?.branded_sales || 0);
           const disc = Number(report?.discount_total || 0);
           const dailySalesTotal = gen + brd - disc - othersTotal;
 
-          const dailyCash = regularPayments
-            .filter((p: any) => p.payment_method === 'CASH')
+          // Same-day order payments = regularPayments whose order was created TODAY
+          const sameDayPayments = regularPayments.filter(
+            (p: any) => p.orders?.created_date_pht === reportDate
+          );
+          // Previous-day order payments = regularPayments whose order was created on a PAST date
+          const prevDayPayments = regularPayments.filter(
+            (p: any) =>
+              p.orders?.created_date_pht &&
+              p.orders.created_date_pht !== reportDate
+          );
+
+          // Daily Sales Cash/Online/Cheque — exclude office accounts
+          const dailyCash = sameDayPayments
+            .filter((p: any) => p.payment_method === 'CASH' && !isOfficePayment(p))
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-          const dailyOnline = regularPayments
-            .filter((p: any) => p.payment_method === 'ONLINE')
+          const dailyOnline = sameDayPayments
+            .filter((p: any) => p.payment_method === 'ONLINE' && !isOfficePayment(p))
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-          const dailyCheque = regularPayments
-            .filter((p: any) => p.payment_method === 'CHEQUE')
+          const dailyCheque = sameDayPayments
+            .filter((p: any) => p.payment_method === 'CHEQUE' && !isOfficePayment(p))
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-          // Remittances = ONLY legacyPayments (as per your version)
-          const remCash = legacyPayments
-            .filter((p: any) => p.payment_method === 'CASH')
+          // Remittances = previous-day order payments + legacy payments, exclude office accounts
+          const allRemittances = [...prevDayPayments, ...legacyPayments];
+
+          const remCash = allRemittances
+            .filter((p: any) => p.payment_method === 'CASH' && !isOfficePayment(p))
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-          const remOnline = legacyPayments
-            .filter((p: any) => p.payment_method === 'ONLINE')
+          const remOnline = allRemittances
+            .filter((p: any) => p.payment_method === 'ONLINE' && !isOfficePayment(p))
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-          const remCheque = legacyPayments
-            .filter((p: any) => p.payment_method === 'CHEQUE')
+          const remCheque = allRemittances
+            .filter((p: any) => p.payment_method === 'CHEQUE' && !isOfficePayment(p))
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
           const remittancesTotal = remCash + remOnline + remCheque;
