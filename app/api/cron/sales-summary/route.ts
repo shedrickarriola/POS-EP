@@ -227,7 +227,21 @@ export async function GET(request: Request) {
 
           // === Sort tables by Client Name ===
           const sortedRegular = [...regularPayments].sort((a, b) => {
-            // Primary: client name
+            const dateA = a.orders?.created_date_pht || '';
+            const dateB = b.orders?.created_date_pht || '';
+
+            if (dateA !== dateB) {
+              const timeA = dateA ? new Date(dateA).getTime() : 0;
+              const timeB = dateB ? new Date(dateB).getTime() : 0;
+
+              // Prevent NaN from breaking the array sort
+              const validTimeA = isNaN(timeA) ? 0 : timeA;
+              const validTimeB = isNaN(timeB) ? 0 : timeB;
+
+              return validTimeA - validTimeB;
+            }
+
+            // Fallback to sorting by Client Name
             const nameA = (
               a.orders?.client_name ||
               a.customer_name ||
@@ -238,20 +252,7 @@ export async function GET(request: Request) {
               b.customer_name ||
               ''
             ).toLowerCase();
-            const nameCmp = nameA.localeCompare(nameB);
-            if (nameCmp !== 0) return nameCmp;
-
-            // Secondary: order date (within same client)
-            const dateA = a.orders?.created_date_pht || '';
-            const dateB = b.orders?.created_date_pht || '';
-            if (dateA !== dateB) {
-              const timeA = dateA ? new Date(dateA).getTime() : 0;
-              const timeB = dateB ? new Date(dateB).getTime() : 0;
-              const validTimeA = isNaN(timeA) ? 0 : timeA;
-              const validTimeB = isNaN(timeB) ? 0 : timeB;
-              return validTimeA - validTimeB;
-            }
-            return 0;
+            return nameA.localeCompare(nameB);
           });
 
           const sortedLegacy = [...legacyPayments].sort((a, b) =>
@@ -375,167 +376,6 @@ export async function GET(request: Request) {
                       <div style="font-size:15px;font-weight:700;color:#111827;">₱${remCheque.toLocaleString()}</div>
                     </div>
                   </div>
-
-                  <!-- Remittances Detail Table (grouped by client + order date) -->
-                  ${
-                    allRemittances.length > 0
-                      ? (() => {
-                          // Sort remittances: by client name, then order date
-                          const sortedRem = [...allRemittances].sort(
-                            (a: any, b: any) => {
-                              const nameA = (
-                                a.orders?.client_name ||
-                                a.customer_name ||
-                                ''
-                              ).toLowerCase();
-                              const nameB = (
-                                b.orders?.client_name ||
-                                b.customer_name ||
-                                ''
-                              ).toLowerCase();
-                              const nameCmp = nameA.localeCompare(nameB);
-                              if (nameCmp !== 0) return nameCmp;
-                              const dateA = a.orders?.created_date_pht || '';
-                              const dateB = b.orders?.created_date_pht || '';
-                              return dateA.localeCompare(dateB);
-                            }
-                          );
-
-                          let remRows = '';
-                          let colorBand = 0;
-                          let i = 0;
-                          while (i < sortedRem.length) {
-                            const p = sortedRem[i] as any;
-                            const clientName =
-                              p.orders?.client_name || p.customer_name || '—';
-                            const orderDate = p.orders?.created_date_pht || '';
-
-                            const group: any[] = [];
-                            let j = i;
-                            while (j < sortedRem.length) {
-                              const q = sortedRem[j] as any;
-                              const qName =
-                                q.orders?.client_name || q.customer_name || '—';
-                              const qDate = q.orders?.created_date_pht || '';
-                              if (qName === clientName && qDate === orderDate) {
-                                group.push(q);
-                                j++;
-                              } else break;
-                            }
-                            i = j;
-
-                            const bgMain =
-                              colorBand % 2 === 0 ? '#f0fdfa' : '#ffffff';
-                            const bgSubtotal =
-                              colorBand % 2 === 0 ? '#ccfbf1' : '#e6faf7';
-                            colorBand++;
-
-                            const groupCash = group.reduce(
-                              (s, q) =>
-                                s +
-                                (q.payment_method === 'CASH' ||
-                                q.payment_method === 'ONLINE'
-                                  ? Number(q.amount)
-                                  : 0),
-                              0
-                            );
-                            const groupCheque = group.reduce(
-                              (s, q) =>
-                                s +
-                                (q.payment_method === 'CHEQUE'
-                                  ? Number(q.amount)
-                                  : 0),
-                              0
-                            );
-                            const groupTotal = group.reduce(
-                              (s, q) => s + Number(q.amount || 0),
-                              0
-                            );
-
-                            group.forEach((q: any, ri: number) => {
-                              const order = q.orders || {};
-                              const cashAmt =
-                                q.payment_method === 'CASH' ||
-                                q.payment_method === 'ONLINE'
-                                  ? Number(q.amount)
-                                  : 0;
-                              const chequeAmt =
-                                q.payment_method === 'CHEQUE'
-                                  ? Number(q.amount)
-                                  : 0;
-                              const showClient = ri === 0;
-                              remRows += `
-                        <tr style="background:${bgMain};border-bottom:1px solid #99f6e4;">
-                          <td style="padding:9px 10px;color:#6b7280;">${
-                            order.created_date_pht || '—'
-                          }</td>
-                          <td style="padding:9px 10px;font-weight:${
-                            showClient ? '700' : '400'
-                          };color:${showClient ? '#111827' : '#9ca3af'};">
-                            ${
-                              showClient
-                                ? clientName
-                                : '<span style="color:#d1d5db;">↳</span>'
-                            }
-                          </td>
-                          <td style="padding:9px 10px;font-family:monospace;color:#6366f1;">${
-                            order.order_number || '—'
-                          }</td>
-                          <td style="padding:9px 10px;font-family:monospace;color:#6b7280;">${
-                            order.dr_number || '—'
-                          }</td>
-                          <td style="padding:9px 10px;font-family:monospace;color:#d97706;">${
-                            q.pr_number || '—'
-                          }</td>
-                          <td style="padding:9px 10px;text-align:right;color:#059669;font-weight:600;">₱${cashAmt.toLocaleString()}</td>
-                          <td style="padding:9px 10px;text-align:right;color:#7c3aed;font-weight:600;">₱${chequeAmt.toLocaleString()}</td>
-                          <td style="padding:9px 10px;color:#6b7280;">${
-                            q.cheque_date || '—'
-                          }</td>
-                          <td style="padding:9px 10px;text-align:right;font-weight:700;color:#0f766e;">₱${Number(
-                            q.amount || 0
-                          ).toLocaleString()}</td>
-                        </tr>`;
-                            });
-
-                            if (group.length > 1) {
-                              remRows += `
-                        <tr style="background:${bgSubtotal};border-bottom:2px solid #5eead4;">
-                          <td style="padding:7px 10px;" colspan="5">
-                            <span style="font-size:10px;font-weight:800;color:#0f766e;letter-spacing:1px;text-transform:uppercase;">
-                              ${clientName} • ${orderDate} subtotal
-                            </span>
-                          </td>
-                          <td style="padding:7px 10px;text-align:right;font-weight:800;color:#059669;">₱${groupCash.toLocaleString()}</td>
-                          <td style="padding:7px 10px;text-align:right;font-weight:800;color:#7c3aed;">₱${groupCheque.toLocaleString()}</td>
-                          <td></td>
-                          <td style="padding:7px 10px;text-align:right;font-weight:900;color:#0f766e;">₱${groupTotal.toLocaleString()}</td>
-                        </tr>`;
-                            }
-                          }
-
-                          return `
-                    <div style="overflow-x:auto;border-radius:10px;border:1px solid #99f6e4;margin-bottom:28px;">
-                      <table style="width:100%;border-collapse:collapse;font-size:11.5px;min-width:560px;">
-                        <thead>
-                          <tr style="background:#0f766e;color:#ccfbf1;text-align:left;">
-                            <th style="padding:10px 10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:10px;">Order Date</th>
-                            <th style="padding:10px 10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:10px;">Client</th>
-                            <th style="padding:10px 10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:10px;">SO#</th>
-                            <th style="padding:10px 10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:10px;">DR#</th>
-                            <th style="padding:10px 10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:10px;">PR#</th>
-                            <th style="padding:10px 10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:10px;text-align:right;">Cash</th>
-                            <th style="padding:10px 10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:10px;text-align:right;">Cheque</th>
-                            <th style="padding:10px 10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:10px;">Chq Date</th>
-                            <th style="padding:10px 10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:10px;text-align:right;">Total</th>
-                          </tr>
-                        </thead>
-                        <tbody>${remRows}</tbody>
-                      </table>
-                    </div>`;
-                        })()
-                      : ''
-                  }
                 </div>
 
                 <!-- ===== DIVIDER ===== -->
@@ -651,130 +491,51 @@ export async function GET(request: Request) {
                         </tr>
                       </thead>
                       <tbody>
-                        ${(() => {
-                          // Group by client_name — new group only if client OR order date changes
-                          let rows = '';
-                          let colorBand = 0; // alternates per client group
-                          let i = 0;
-                          while (i < sortedRegular.length) {
-                            const p = sortedRegular[i] as any;
-                            const clientName =
-                              p.orders?.client_name || p.customer_name || '—';
-                            const orderDate = p.orders?.created_date_pht || '';
-
-                            // Collect all payments for this client+date group
-                            const group: any[] = [];
-                            let j = i;
-                            while (j < sortedRegular.length) {
-                              const q = sortedRegular[j] as any;
-                              const qName =
-                                q.orders?.client_name || q.customer_name || '—';
-                              const qDate = q.orders?.created_date_pht || '';
-                              if (qName === clientName && qDate === orderDate) {
-                                group.push(q);
-                                j++;
-                              } else {
-                                break;
-                              }
-                            }
-                            i = j;
-
-                            const bgMain =
-                              colorBand % 2 === 0 ? '#ffffff' : '#f8fafc';
-                            const bgSubtotal =
-                              colorBand % 2 === 0 ? '#f0f4ff' : '#eef2fb';
-                            colorBand++;
-
-                            const groupCash = group.reduce(
-                              (s, q) =>
-                                s +
-                                (q.payment_method === 'CASH' ||
-                                q.payment_method === 'ONLINE'
-                                  ? Number(q.amount)
-                                  : 0),
-                              0
-                            );
-                            const groupCheque = group.reduce(
-                              (s, q) =>
-                                s +
-                                (q.payment_method === 'CHEQUE'
-                                  ? Number(q.amount)
-                                  : 0),
-                              0
-                            );
-                            const groupTotal = group.reduce(
-                              (s, q) => s + Number(q.amount || 0),
-                              0
-                            );
-
-                            group.forEach((q: any, ri: number) => {
-                              const order = q.orders || {};
-                              const cashAmt =
-                                q.payment_method === 'CASH' ||
-                                q.payment_method === 'ONLINE'
-                                  ? Number(q.amount)
-                                  : 0;
-                              const chequeAmt =
-                                q.payment_method === 'CHEQUE'
-                                  ? Number(q.amount)
-                                  : 0;
-                              // Show client name only on first row of the group
-                              const showClient = ri === 0;
-                              rows += `
-                              <tr style="background:${bgMain};border-bottom:1px solid #f1f5f9;">
-                                <td style="padding:9px 10px;color:#6b7280;">${
-                                  order.created_date_pht || '—'
-                                }</td>
-                                <td style="padding:9px 10px;font-weight:${
-                                  showClient ? '700' : '400'
-                                };color:${showClient ? '#111827' : '#9ca3af'};">
-                                  ${
-                                    showClient
-                                      ? clientName
-                                      : '<span style="color:#d1d5db;">↳</span>'
-                                  }
-                                </td>
-                                <td style="padding:9px 10px;font-family:monospace;color:#6366f1;">${
-                                  order.order_number || '—'
-                                }</td>
-                                <td style="padding:9px 10px;font-family:monospace;color:#6b7280;">${
-                                  order.dr_number || '—'
-                                }</td>
-                                <td style="padding:9px 10px;font-family:monospace;color:#d97706;">${
-                                  q.pr_number || '—'
-                                }</td>
-                                <td style="padding:9px 10px;text-align:right;color:#059669;font-weight:600;">₱${cashAmt.toLocaleString()}</td>
-                                <td style="padding:9px 10px;text-align:right;color:#7c3aed;font-weight:600;">₱${chequeAmt.toLocaleString()}</td>
-                                <td style="padding:9px 10px;color:#6b7280;">${
-                                  q.cheque_date || '—'
-                                }</td>
-                                <td style="padding:9px 10px;color:#6b7280;">${
-                                  order.delivery_date || '—'
-                                }</td>
-                                <td style="padding:9px 10px;text-align:right;font-weight:700;color:#111827;">₱${Number(
-                                  q.amount || 0
-                                ).toLocaleString()}</td>
-                              </tr>`;
-                            });
-
-                            // Subtotal row if group has multiple payments
-                            if (group.length > 1) {
-                              rows += `
-                              <tr style="background:${bgSubtotal};border-bottom:2px solid #c7d2fe;">
-                                <td style="padding:7px 10px;" colspan="5">
-                                  <span style="font-size:10px;font-weight:800;color:#4f46e5;letter-spacing:1px;text-transform:uppercase;">
-                                    ${clientName} • ${orderDate} subtotal
-                                  </span>
-                                </td>
-                                <td style="padding:7px 10px;text-align:right;font-weight:800;color:#059669;">₱${groupCash.toLocaleString()}</td>
-                                <td style="padding:7px 10px;text-align:right;font-weight:800;color:#7c3aed;">₱${groupCheque.toLocaleString()}</td>
-                                <td colspan="2"></td>
-                                <td style="padding:7px 10px;text-align:right;font-weight:900;color:#4f46e5;">₱${groupTotal.toLocaleString()}</td>
-                              </tr>`;
-                            }
-                          }
-                          return rows;
-                        })()}
+                        ${sortedRegular
+                          .map((p: any, idx: number) => {
+                            const order = p.orders || {};
+                            const cashAmt =
+                              p.payment_method === 'CASH' ||
+                              p.payment_method === 'ONLINE'
+                                ? Number(p.amount)
+                                : 0;
+                            const chequeAmt =
+                              p.payment_method === 'CHEQUE'
+                                ? Number(p.amount)
+                                : 0;
+                            const rowBg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
+                            return `
+                            <tr style="background:${rowBg};border-bottom:1px solid #f1f5f9;">
+                              <td style="padding:9px 10px;color:#6b7280;">${
+                                order.created_date_pht || '—'
+                              }</td>
+                              <td style="padding:9px 10px;font-weight:600;color:#111827;">${
+                                order.client_name || p.customer_name || '—'
+                              }</td>
+                              <td style="padding:9px 10px;font-family:monospace;color:#6366f1;">${
+                                order.order_number || '—'
+                              }</td>
+                              <td style="padding:9px 10px;font-family:monospace;color:#6b7280;">${
+                                order.dr_number || '—'
+                              }</td>
+                              <td style="padding:9px 10px;font-family:monospace;color:#d97706;">${
+                                p.pr_number || '—'
+                              }</td>
+                              <td style="padding:9px 10px;text-align:right;color:#059669;font-weight:600;">₱${cashAmt.toLocaleString()}</td>
+                              <td style="padding:9px 10px;text-align:right;color:#7c3aed;font-weight:600;">₱${chequeAmt.toLocaleString()}</td>
+                              <td style="padding:9px 10px;color:#6b7280;">${
+                                p.cheque_date || '—'
+                              }</td>
+                              <td style="padding:9px 10px;color:#6b7280;">${
+                                order.delivery_date || '—'
+                              }</td>
+                              <td style="padding:9px 10px;text-align:right;font-weight:700;color:#111827;">₱${Number(
+                                p.amount || 0
+                              ).toLocaleString()}</td>
+                            </tr>
+                          `;
+                          })
+                          .join('')}
                       </tbody>
                     </table>
                   </div>
