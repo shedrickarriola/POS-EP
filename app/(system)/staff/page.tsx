@@ -154,6 +154,30 @@ export default function StaffDashboard() {
   // === CALENDAR DAY NOTES (admin-only, saved to daily_reports.notes) ===
   const [calendarNotes, setCalendarNotes] = useState<string>('');
   const [isSavingCalendarNotes, setIsSavingCalendarNotes] = useState(false);
+  // === WEEKLY REPORT ===
+  const [showWeeklyReportModal, setShowWeeklyReportModal] = useState(false);
+  const [weeklyReportData, setWeeklyReportData] = useState<{
+    days: Array<{
+      dateStr: string;
+      report: any;
+      othersAmount: number;
+      netTotal: number;
+      cashCollected: number;
+      chequeCollected: number;
+    }>;
+    totals: {
+      gen: number;
+      brd: number;
+      disc: number;
+      others: number;
+      netTotal: number;
+      cashCollected: number;
+      chequeCollected: number;
+      expenses: number;
+      actualCash: number;
+    };
+  } | null>(null);
+  const [weeklyReportLoading, setWeeklyReportLoading] = useState(false);
   const [toast, setToast] = useState<{
     show: boolean;
     msg: string;
@@ -1278,6 +1302,299 @@ export default function StaffDashboard() {
       setDayExpenses(expensesData || []);
     } catch (err) {
       console.error('Failed to fetch day details:', err);
+    }
+  };
+  // === FETCH WEEKLY REPORT DATA ===
+  const fetchWeeklyReport = async () => {
+    if (!selectedBranch?.id) return;
+    setWeeklyReportLoading(true);
+
+    try {
+      const now = new Date();
+      const sunday = new Date(now);
+      sunday.setDate(now.getDate() - now.getDay() + calendarWeekOffset * 7);
+
+      const dates = Array.from({ length: 7 }, (_, i) => {
+        const d = new Date(sunday);
+        d.setDate(sunday.getDate() + i);
+        return d.toISOString().split('T')[0];
+      });
+
+      // Fetch daily_reports for all 7 days
+      const { data: reportsData } = await supabase
+        .from('daily_reports')
+        .select('*')
+        .eq('branch_id', selectedBranch.id)
+        .in('report_date', dates);
+
+      const reportMap: Record<string, any> = {};
+      (reportsData || []).forEach((r: any) => {
+        reportMap[r.report_date] = r;
+      });
+
+      // Fetch orders for the week (with agent for performance breakdown)
+      const { data: ordersData } = await supabase
+        .from('orders')
+        .select(
+          'id, total_amount, client_name, created_date_pht, agent, order_number, dr_number, pr_number'
+        )
+        .eq('branch_id', selectedBranch.id)
+        .in('created_date_pht', dates);
+
+      const clientNames = [
+        ...new Set(
+          (ordersData || []).map((o: any) => o.client_name).filter(Boolean)
+        ),
+      ];
+      let officeMap: Record<string, boolean> = {};
+      if (clientNames.length > 0) {
+        const { data: clientsData } = await supabase
+          .from('clients')
+          .select('client_name, is_office_account')
+          .in('client_name', clientNames);
+        (clientsData || []).forEach((c: any) => {
+          officeMap[c.client_name] = c.is_office_account === true;
+        });
+      }
+
+      // Fetch payments for the week — full detail for agent/client/online breakdowns
+      const { data: paymentsData } = await supabase
+        .from('daily_payments')
+        .select(
+          `
+          id, amount, payment_method, report_date, order_id,
+          customer_name, pr_number, cheque_date, notes,
+          orders (
+            id, order_number, dr_number, pr_number,
+            client_name, agent, delivery_date, created_date_pht
+          )
+        `
+        )
+        .eq('branch_id', selectedBranch.id)
+        .in('report_date', dates);
+
+      // Fetch expenses for the week
+      const { data: expensesData } = await supabase
+        .from('daily_expenses')
+        .select('amount, report_date')
+        .eq('branch_id', selectedBranch.id)
+        .in('report_date', dates);
+
+      const totalExpenses = (expensesData || []).reduce(
+        (sum: number, e: any) => sum + Number(e.amount || 0),
+        0
+      );
+
+      const isOfficePayment = (p: any) =>
+        officeMap[(p.orders as any)?.client_name || p.customer_name || ''] ||
+        false;
+      const isOfficeOrder = (o: any) => officeMap[o.client_name] || false;
+
+      // Build per-day data
+      const days = dates.map((dateStr) => {
+        const report = reportMap[dateStr] || null;
+
+        const dayOthers = (ordersData || [])
+          .filter(
+            (o: any) => o.created_date_pht === dateStr && isOfficeOrder(o)
+          )
+          .reduce(
+            (sum: number, o: any) => sum + Number(o.total_amount || 0),
+            0
+          );
+
+        const gen = Number(report?.generic_sales || 0);
+        const brd = Number(report?.branded_sales || 0);
+        const disc = Number(report?.discount_total || 0);
+        const netTotal = gen + brd - disc - dayOthers;
+
+        const dayPaymentsArr = (paymentsData || []).filter(
+          (p: any) => p.report_date === dateStr
+        );
+
+        const cashCollected = dayPaymentsArr
+          .filter(
+            (p: any) => p.payment_method === 'CASH' && !isOfficePayment(p)
+          )
+          .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
+
+        const chequeCollected = dayPaymentsArr
+          .filter(
+            (p: any) => p.payment_method === 'CHEQUE' && !isOfficePayment(p)
+          )
+          .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
+
+        const onlineCollected = dayPaymentsArr
+          .filter(
+            (p: any) => p.payment_method === 'ONLINE' && !isOfficePayment(p)
+          )
+          .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
+
+        return {
+          dateStr,
+          report,
+          othersAmount: dayOthers,
+          netTotal,
+          cashCollected,
+          chequeCollected,
+          onlineCollected,
+        };
+      });
+
+      // Totals
+      const totals = days.reduce(
+        (acc, d) => ({
+          gen: acc.gen + Number(d.report?.generic_sales || 0),
+          brd: acc.brd + Number(d.report?.branded_sales || 0),
+          disc: acc.disc + Number(d.report?.discount_total || 0),
+          others: acc.others + d.othersAmount,
+          netTotal: acc.netTotal + d.netTotal,
+          cashCollected: acc.cashCollected + d.cashCollected,
+          chequeCollected: acc.chequeCollected + d.chequeCollected,
+          onlineCollected: acc.onlineCollected + (d as any).onlineCollected,
+          expenses: totalExpenses,
+          actualCash: acc.actualCash + d.cashCollected,
+        }),
+        {
+          gen: 0,
+          brd: 0,
+          disc: 0,
+          others: 0,
+          netTotal: 0,
+          cashCollected: 0,
+          chequeCollected: 0,
+          onlineCollected: 0,
+          expenses: totalExpenses,
+          actualCash: 0,
+        }
+      );
+      totals.actualCash = totals.cashCollected - totalExpenses;
+
+      // ── AGENT SALES PERFORMANCE (exclude office accounts) ──
+      const agentSalesMap = new Map<string, number>();
+      (ordersData || [])
+        .filter((o: any) => !isOfficeOrder(o))
+        .forEach((o: any) => {
+          const agent = o.agent || 'MAIN OFFICE';
+          agentSalesMap.set(
+            agent,
+            (agentSalesMap.get(agent) || 0) + Number(o.total_amount || 0)
+          );
+        });
+
+      // ── AGENT COLLECTIONS PERFORMANCE (exclude office accounts) ──
+      const agentCollMap = new Map<
+        string,
+        { cash: number; cheque: number; online: number }
+      >();
+      (paymentsData || [])
+        .filter((p: any) => !isOfficePayment(p))
+        .forEach((p: any) => {
+          const agent =
+            (p.orders as any)?.agent?.trim() ||
+            (p.order_id ? 'MAIN OFFICE' : 'MAIN OFFICE');
+          if (!agentCollMap.has(agent))
+            agentCollMap.set(agent, { cash: 0, cheque: 0, online: 0 });
+          const entry = agentCollMap.get(agent)!;
+          const method = (p.payment_method || 'CASH').toUpperCase();
+          const amt = Number(p.amount || 0);
+          if (method === 'CASH') entry.cash += amt;
+          else if (method === 'CHEQUE') entry.cheque += amt;
+          else entry.online += amt;
+        });
+
+      // ── ONLINE PAYMENTS TABLE ──
+      const onlinePayments = (paymentsData || [])
+        .filter((p: any) => p.payment_method === 'ONLINE')
+        .sort((a: any, b: any) => {
+          const nameA = a.customer_name || (a.orders as any)?.client_name || '';
+          const nameB = b.customer_name || (b.orders as any)?.client_name || '';
+          return nameA.localeCompare(nameB);
+        });
+
+      // ── CLIENT TOTALS (sales + payments, exclude office accounts) ──
+      const clientSalesMap = new Map<
+        string,
+        { total: number; agent: string }
+      >();
+      (ordersData || [])
+        .filter((o: any) => !isOfficeOrder(o))
+        .forEach((o: any) => {
+          const client = o.client_name || 'WALK-IN';
+          const existing = clientSalesMap.get(client);
+          clientSalesMap.set(client, {
+            total: (existing?.total || 0) + Number(o.total_amount || 0),
+            agent: existing?.agent || o.agent || 'MAIN OFFICE',
+          });
+        });
+
+      const clientPayMap = new Map<
+        string,
+        { cash: number; cheque: number; online: number }
+      >();
+      (paymentsData || [])
+        .filter((p: any) => !isOfficePayment(p))
+        .forEach((p: any) => {
+          const client =
+            (p.orders as any)?.client_name || p.customer_name || 'WALK-IN';
+          if (!clientPayMap.has(client))
+            clientPayMap.set(client, { cash: 0, cheque: 0, online: 0 });
+          const entry = clientPayMap.get(client)!;
+          const method = (p.payment_method || 'CASH').toUpperCase();
+          const amt = Number(p.amount || 0);
+          if (method === 'CASH') entry.cash += amt;
+          else if (method === 'CHEQUE') entry.cheque += amt;
+          else entry.online += amt;
+        });
+
+      // Merge client keys from both sales and payments, sort by total sales desc
+      const allClientKeys = [
+        ...new Set([...clientSalesMap.keys(), ...clientPayMap.keys()]),
+      ];
+      const clientRows = allClientKeys
+        .map((client) => {
+          const salesData = clientSalesMap.get(client);
+          const sales = salesData?.total || 0;
+          const agent = salesData?.agent || '—';
+          const pay = clientPayMap.get(client) || {
+            cash: 0,
+            cheque: 0,
+            online: 0,
+          };
+          return {
+            client,
+            agent,
+            sales,
+            cash: pay.cash,
+            cheque: pay.cheque,
+            online: pay.online,
+            totalPaid: pay.cash + pay.cheque + pay.online,
+          };
+        })
+        .sort((a, b) => b.sales - a.sales);
+
+      setWeeklyReportData({
+        days,
+        totals,
+        agentSales: Array.from(agentSalesMap.entries())
+          .map(([agent, total]) => ({ agent, total }))
+          .sort((a, b) => b.total - a.total),
+        agentCollections: Array.from(agentCollMap.entries())
+          .map(([agent, v]) => ({
+            agent,
+            ...v,
+            total: v.cash + v.cheque + v.online,
+          }))
+          .sort((a, b) => b.total - a.total),
+        onlinePayments,
+        clientRows,
+      } as any);
+      setShowWeeklyReportModal(true);
+    } catch (err) {
+      console.error('Failed to fetch weekly report:', err);
+      triggerToast('Failed to load weekly report', 'error');
+    } finally {
+      setWeeklyReportLoading(false);
     }
   };
   // === OFFICE USE - FETCH 3 TABLES ===
@@ -4206,6 +4523,16 @@ export default function StaffDashboard() {
               </h3>
               <div className="flex items-center gap-2">
                 <button
+                  onClick={() => {
+                    fetchWeeklyReport();
+                  }}
+                  disabled={weeklyReportLoading}
+                  className="flex items-center gap-1.5 px-4 py-1.5 bg-purple-600/20 hover:bg-purple-600/40 border border-purple-500/40 text-purple-300 text-xs font-black rounded-xl transition-all disabled:opacity-50"
+                >
+                  <TrendingUp size={13} />
+                  {weeklyReportLoading ? 'LOADING...' : 'WEEKLY REPORT'}
+                </button>
+                <button
                   onClick={() => setCalendarWeekOffset((o) => o - 1)}
                   className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-black rounded-xl transition-all"
                 >
@@ -4340,6 +4667,808 @@ export default function StaffDashboard() {
                   );
                 });
               })()}
+            </div>
+          </div>
+        )}
+
+        {/* ==================== WEEKLY REPORT MODAL ==================== */}
+        {showWeeklyReportModal && weeklyReportData && (
+          <div className="fixed inset-0 z-[3100] flex items-center justify-center bg-slate-950/90 backdrop-blur-sm p-4">
+            <div className="bg-slate-900 border border-purple-500/30 rounded-3xl w-full max-w-6xl max-h-[94vh] overflow-hidden flex flex-col">
+              {/* HEADER */}
+              <div className="px-8 py-6 border-b border-white/10 flex items-center justify-between bg-slate-950">
+                <div>
+                  <h2 className="text-2xl font-black text-purple-400 flex items-center gap-3">
+                    <TrendingUp size={24} />
+                    WEEKLY REPORT
+                  </h2>
+                  {(() => {
+                    const now = new Date();
+                    const sunday = new Date(now);
+                    sunday.setDate(
+                      now.getDate() - now.getDay() + calendarWeekOffset * 7
+                    );
+                    const saturday = new Date(sunday);
+                    saturday.setDate(sunday.getDate() + 6);
+                    return (
+                      <p className="text-sm text-slate-400 mt-1 font-mono">
+                        {sunday.toLocaleDateString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                        })}
+                        {' — '}
+                        {saturday.toLocaleDateString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                        })}
+                      </p>
+                    );
+                  })()}
+                </div>
+                <button
+                  onClick={() => {
+                    setShowWeeklyReportModal(false);
+                    setWeeklyReportData(null);
+                  }}
+                  className="text-4xl leading-none text-slate-400 hover:text-white"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-auto p-8 space-y-10">
+                {/* WEEKLY TOTALS CARDS */}
+                <div>
+                  <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-6">
+                    WEEKLY TOTALS
+                  </h3>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div className="bg-slate-950 rounded-3xl p-6 text-center border border-emerald-400/30">
+                      <div className="text-emerald-400 text-xs font-black tracking-widest mb-2">
+                        GENERIC
+                      </div>
+                      <div className="text-3xl font-black font-mono text-white">
+                        ₱{weeklyReportData.totals.gen.toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="bg-slate-950 rounded-3xl p-6 text-center border border-purple-400/30">
+                      <div className="text-purple-400 text-xs font-black tracking-widest mb-2">
+                        BRANDED
+                      </div>
+                      <div className="text-3xl font-black font-mono text-white">
+                        ₱{weeklyReportData.totals.brd.toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="bg-slate-950 rounded-3xl p-6 text-center border border-amber-400/30">
+                      <div className="text-amber-400 text-xs font-black tracking-widest mb-2">
+                        OTHERS
+                      </div>
+                      <div className="text-3xl font-black font-mono text-amber-400">
+                        ₱{weeklyReportData.totals.others.toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="bg-slate-950 rounded-3xl p-6 text-center border border-orange-400/30">
+                      <div className="text-orange-400 text-xs font-black tracking-widest mb-2">
+                        DISCOUNT
+                      </div>
+                      <div className="text-3xl font-black font-mono text-orange-400">
+                        ₱{weeklyReportData.totals.disc.toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="bg-emerald-500/10 border-2 border-emerald-400 rounded-3xl p-6 text-center">
+                      <div className="text-emerald-400 text-xs font-black tracking-widest mb-2">
+                        TOTAL SALES (NET)
+                      </div>
+                      <div className="text-3xl font-black font-mono text-emerald-400">
+                        ₱{weeklyReportData.totals.netTotal.toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="bg-slate-950 rounded-3xl p-6 text-center border border-blue-400/30">
+                      <div className="text-blue-400 text-xs font-black tracking-widest mb-2">
+                        CASH COLLECTED
+                      </div>
+                      <div className="text-3xl font-black font-mono text-white">
+                        ₱
+                        {weeklyReportData.totals.cashCollected.toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="bg-slate-950 rounded-3xl p-6 text-center border border-sky-400/30">
+                      <div className="text-sky-400 text-xs font-black tracking-widest mb-2">
+                        CHEQUE COLLECTED
+                      </div>
+                      <div className="text-3xl font-black font-mono text-white">
+                        ₱
+                        {weeklyReportData.totals.chequeCollected.toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="bg-slate-950 rounded-3xl p-6 text-center border border-red-400/30">
+                      <div className="text-red-400 text-xs font-black tracking-widest mb-2">
+                        EXPENSES
+                      </div>
+                      <div className="text-3xl font-black font-mono text-red-400">
+                        ₱{weeklyReportData.totals.expenses.toLocaleString()}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* ACTUAL CASH */}
+                  <div className="mt-4 bg-slate-950 rounded-3xl p-6 text-center border border-emerald-500">
+                    <div className="text-emerald-400 text-xs font-black uppercase tracking-widest mb-2">
+                      ACTUAL CASH (COLLECTED − EXPENSES)
+                    </div>
+                    <div className="text-4xl font-black font-mono text-emerald-400">
+                      ₱{weeklyReportData.totals.actualCash.toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+
+                {/* DAY-BY-DAY TABLE */}
+                <div>
+                  <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">
+                    DAY-BY-DAY BREAKDOWN
+                  </h3>
+                  <div className="bg-slate-950 rounded-3xl overflow-hidden">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-900 border-b border-white/10">
+                        <tr>
+                          <th className="text-left p-4 font-black text-slate-400">
+                            DAY
+                          </th>
+                          <th className="text-right p-4 font-black text-emerald-400">
+                            GEN
+                          </th>
+                          <th className="text-right p-4 font-black text-purple-400">
+                            BRD
+                          </th>
+                          <th className="text-right p-4 font-black text-amber-400">
+                            OTHERS
+                          </th>
+                          <th className="text-right p-4 font-black text-orange-400">
+                            DISC
+                          </th>
+                          <th className="text-right p-4 font-black text-emerald-300">
+                            NET SALES
+                          </th>
+                          <th className="text-right p-4 font-black text-blue-400">
+                            CASH
+                          </th>
+                          <th className="text-right p-4 font-black text-purple-400">
+                            ONLINE
+                          </th>
+                          <th className="text-right p-4 font-black text-sky-400">
+                            CHEQUE
+                          </th>
+                          <th className="text-center p-4 font-black text-slate-400">
+                            STATUS
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/10 text-slate-300">
+                        {weeklyReportData.days.map((day) => {
+                          const date = new Date(day.dateStr + 'T00:00:00');
+                          const isToday =
+                            day.dateStr ===
+                            new Date().toISOString().split('T')[0];
+                          const isFuture = date > new Date();
+                          return (
+                            <tr
+                              key={day.dateStr}
+                              className={`transition-colors ${
+                                isToday
+                                  ? 'bg-emerald-500/10'
+                                  : 'hover:bg-slate-900/60'
+                              }`}
+                            >
+                              <td className="p-4">
+                                <div className="flex items-center gap-2">
+                                  {isToday && (
+                                    <span className="text-[9px] font-black px-2 py-0.5 bg-emerald-500 text-white rounded-full">
+                                      TODAY
+                                    </span>
+                                  )}
+                                  <div className="font-black text-white">
+                                    {date.toLocaleDateString('en-US', {
+                                      weekday: 'short',
+                                      month: 'short',
+                                      day: 'numeric',
+                                    })}
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="p-4 text-right font-mono text-emerald-300">
+                                {day.report
+                                  ? `₱${Number(
+                                      day.report.generic_sales || 0
+                                    ).toLocaleString()}`
+                                  : '—'}
+                              </td>
+                              <td className="p-4 text-right font-mono text-purple-300">
+                                {day.report
+                                  ? `₱${Number(
+                                      day.report.branded_sales || 0
+                                    ).toLocaleString()}`
+                                  : '—'}
+                              </td>
+                              <td className="p-4 text-right font-mono text-amber-400">
+                                {day.report
+                                  ? `₱${day.othersAmount.toLocaleString()}`
+                                  : '—'}
+                              </td>
+                              <td className="p-4 text-right font-mono text-orange-400">
+                                {day.report
+                                  ? `₱${Number(
+                                      day.report.discount_total || 0
+                                    ).toLocaleString()}`
+                                  : '—'}
+                              </td>
+                              <td className="p-4 text-right font-black font-mono text-emerald-400">
+                                {day.report
+                                  ? `₱${day.netTotal.toLocaleString()}`
+                                  : '—'}
+                              </td>
+                              <td className="p-4 text-right font-mono text-blue-300">
+                                {`₱${day.cashCollected.toLocaleString()}`}
+                              </td>
+                              <td className="p-4 text-right font-mono text-purple-300">
+                                {`₱${(
+                                  (day as any).onlineCollected || 0
+                                ).toLocaleString()}`}
+                              </td>
+                              <td className="p-4 text-right font-mono text-sky-300">
+                                {`₱${day.chequeCollected.toLocaleString()}`}
+                              </td>
+                              <td className="p-4 text-center">
+                                {isFuture ? (
+                                  <span className="text-[10px] font-black text-slate-500 uppercase">
+                                    FUTURE
+                                  </span>
+                                ) : !day.report ? (
+                                  <span className="text-[10px] font-black text-red-500 uppercase">
+                                    MISSING
+                                  </span>
+                                ) : day.report.is_checked ? (
+                                  <span className="text-[10px] font-black text-emerald-500 uppercase flex items-center justify-center gap-1">
+                                    <CheckCircle2 size={12} /> CHECKED
+                                  </span>
+                                ) : (
+                                  <span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse inline-block" />
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        {/* TOTALS ROW */}
+                        <tr className="bg-slate-800 border-t-2 border-white/20">
+                          <td className="p-4 font-black text-white uppercase tracking-widest">
+                            WEEKLY TOTAL
+                          </td>
+                          <td className="p-4 text-right font-black font-mono text-emerald-300">
+                            ₱{weeklyReportData.totals.gen.toLocaleString()}
+                          </td>
+                          <td className="p-4 text-right font-black font-mono text-purple-300">
+                            ₱{weeklyReportData.totals.brd.toLocaleString()}
+                          </td>
+                          <td className="p-4 text-right font-black font-mono text-amber-400">
+                            ₱{weeklyReportData.totals.others.toLocaleString()}
+                          </td>
+                          <td className="p-4 text-right font-black font-mono text-orange-400">
+                            ₱{weeklyReportData.totals.disc.toLocaleString()}
+                          </td>
+                          <td className="p-4 text-right font-black font-mono text-emerald-400">
+                            ₱{weeklyReportData.totals.netTotal.toLocaleString()}
+                          </td>
+                          <td className="p-4 text-right font-black font-mono text-blue-300">
+                            ₱
+                            {weeklyReportData.totals.cashCollected.toLocaleString()}
+                          </td>
+                          <td className="p-4 text-right font-black font-mono text-purple-300">
+                            ₱
+                            {(
+                              (weeklyReportData.totals as any)
+                                .onlineCollected || 0
+                            ).toLocaleString()}
+                          </td>
+                          <td className="p-4 text-right font-black font-mono text-sky-300">
+                            ₱
+                            {weeklyReportData.totals.chequeCollected.toLocaleString()}
+                          </td>
+                          <td></td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* ── AGENT PERFORMANCE ── */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                  {/* SALES BY AGENT */}
+                  <div>
+                    <h3 className="text-xs font-black uppercase tracking-widest text-emerald-400 mb-4 flex items-center gap-2">
+                      📦 WEEKLY SALES BY AGENT
+                    </h3>
+                    <div className="bg-slate-950 rounded-3xl overflow-hidden">
+                      {(weeklyReportData as any).agentSales?.length === 0 ? (
+                        <div className="p-6 text-center text-slate-500 text-sm">
+                          No sales this week.
+                        </div>
+                      ) : (
+                        <table className="w-full text-sm">
+                          <thead className="bg-slate-900 border-b border-white/10">
+                            <tr>
+                              <th className="text-left p-4 font-black text-slate-400">
+                                AGENT
+                              </th>
+                              <th className="text-right p-4 font-black text-emerald-400">
+                                TOTAL SALES
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-white/10">
+                            {((weeklyReportData as any).agentSales || []).map(
+                              (row: any, i: number) => (
+                                <tr
+                                  key={i}
+                                  className="hover:bg-slate-900/60 transition-colors"
+                                >
+                                  <td className="p-4 font-bold text-white">
+                                    {row.agent}
+                                  </td>
+                                  <td className="p-4 text-right font-black font-mono text-emerald-400">
+                                    ₱
+                                    {row.total.toLocaleString(undefined, {
+                                      minimumFractionDigits: 2,
+                                    })}
+                                  </td>
+                                </tr>
+                              )
+                            )}
+                            <tr className="bg-slate-800 border-t-2 border-emerald-500/30">
+                              <td className="p-4 font-black text-emerald-300 uppercase tracking-widest text-xs">
+                                TOTAL
+                              </td>
+                              <td className="p-4 text-right font-black font-mono text-emerald-300">
+                                ₱
+                                {((weeklyReportData as any).agentSales || [])
+                                  .reduce((s: number, r: any) => s + r.total, 0)
+                                  .toLocaleString(undefined, {
+                                    minimumFractionDigits: 2,
+                                  })}
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* COLLECTIONS BY AGENT */}
+                  <div>
+                    <h3 className="text-xs font-black uppercase tracking-widest text-purple-400 mb-4 flex items-center gap-2">
+                      💰 WEEKLY COLLECTIONS BY AGENT
+                    </h3>
+                    <div className="bg-slate-950 rounded-3xl overflow-hidden">
+                      {(weeklyReportData as any).agentCollections?.length ===
+                      0 ? (
+                        <div className="p-6 text-center text-slate-500 text-sm">
+                          No collections this week.
+                        </div>
+                      ) : (
+                        <table className="w-full text-sm">
+                          <thead className="bg-slate-900 border-b border-white/10">
+                            <tr>
+                              <th className="text-left p-4 font-black text-slate-400">
+                                AGENT
+                              </th>
+                              <th className="text-right p-4 font-black text-emerald-400">
+                                CASH
+                              </th>
+                              <th className="text-right p-4 font-black text-amber-400">
+                                CHEQUE
+                              </th>
+                              <th className="text-right p-4 font-black text-sky-400">
+                                ONLINE
+                              </th>
+                              <th className="text-right p-4 font-black text-purple-300">
+                                TOTAL
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-white/10">
+                            {(
+                              (weeklyReportData as any).agentCollections || []
+                            ).map((row: any, i: number) => (
+                              <tr
+                                key={i}
+                                className="hover:bg-slate-900/60 transition-colors"
+                              >
+                                <td className="p-4 font-bold text-white">
+                                  {row.agent}
+                                </td>
+                                <td className="p-4 text-right font-mono text-emerald-300">
+                                  {row.cash > 0 ? (
+                                    `₱${row.cash.toLocaleString(undefined, {
+                                      minimumFractionDigits: 2,
+                                    })}`
+                                  ) : (
+                                    <span className="text-slate-700">—</span>
+                                  )}
+                                </td>
+                                <td className="p-4 text-right font-mono text-amber-300">
+                                  {row.cheque > 0 ? (
+                                    `₱${row.cheque.toLocaleString(undefined, {
+                                      minimumFractionDigits: 2,
+                                    })}`
+                                  ) : (
+                                    <span className="text-slate-700">—</span>
+                                  )}
+                                </td>
+                                <td className="p-4 text-right font-mono text-sky-300">
+                                  {row.online > 0 ? (
+                                    `₱${row.online.toLocaleString(undefined, {
+                                      minimumFractionDigits: 2,
+                                    })}`
+                                  ) : (
+                                    <span className="text-slate-700">—</span>
+                                  )}
+                                </td>
+                                <td className="p-4 text-right font-black font-mono text-purple-400">
+                                  ₱
+                                  {row.total.toLocaleString(undefined, {
+                                    minimumFractionDigits: 2,
+                                  })}
+                                </td>
+                              </tr>
+                            ))}
+                            {(() => {
+                              const colls =
+                                (weeklyReportData as any).agentCollections ||
+                                [];
+                              const tc = colls.reduce(
+                                (s: number, r: any) => s + r.cash,
+                                0
+                              );
+                              const tch = colls.reduce(
+                                (s: number, r: any) => s + r.cheque,
+                                0
+                              );
+                              const to = colls.reduce(
+                                (s: number, r: any) => s + r.online,
+                                0
+                              );
+                              const tt = tc + tch + to;
+                              return (
+                                <tr className="bg-slate-800 border-t-2 border-purple-500/30">
+                                  <td className="p-4 font-black text-purple-300 uppercase tracking-widest text-xs">
+                                    TOTAL
+                                  </td>
+                                  <td className="p-4 text-right font-black font-mono text-emerald-300">
+                                    ₱
+                                    {tc.toLocaleString(undefined, {
+                                      minimumFractionDigits: 2,
+                                    })}
+                                  </td>
+                                  <td className="p-4 text-right font-black font-mono text-amber-300">
+                                    ₱
+                                    {tch.toLocaleString(undefined, {
+                                      minimumFractionDigits: 2,
+                                    })}
+                                  </td>
+                                  <td className="p-4 text-right font-black font-mono text-sky-300">
+                                    ₱
+                                    {to.toLocaleString(undefined, {
+                                      minimumFractionDigits: 2,
+                                    })}
+                                  </td>
+                                  <td className="p-4 text-right font-black font-mono text-purple-300">
+                                    ₱
+                                    {tt.toLocaleString(undefined, {
+                                      minimumFractionDigits: 2,
+                                    })}
+                                  </td>
+                                </tr>
+                              );
+                            })()}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* ── ONLINE PAYMENTS TABLE ── */}
+                {(weeklyReportData as any).onlinePayments?.length > 0 && (
+                  <div>
+                    <h3 className="text-xs font-black uppercase tracking-widest text-sky-400 mb-4 flex items-center gap-2">
+                      🌐 ONLINE PAYMENTS THIS WEEK
+                    </h3>
+                    <div className="bg-slate-950 rounded-3xl overflow-hidden">
+                      <table className="w-full text-sm">
+                        <thead className="bg-slate-900 border-b border-white/10">
+                          <tr>
+                            <th className="text-left p-4 font-black text-slate-400">
+                              DATE
+                            </th>
+                            <th className="text-left p-4 font-black text-slate-400">
+                              CLIENT
+                            </th>
+                            <th className="text-center p-4 font-black text-slate-400">
+                              SO#
+                            </th>
+                            <th className="text-center p-4 font-black text-slate-400">
+                              DR#
+                            </th>
+                            <th className="text-center p-4 font-black text-slate-400">
+                              PR#
+                            </th>
+                            <th className="text-right p-4 font-black text-sky-400">
+                              AMOUNT
+                            </th>
+                            <th className="text-left p-4 font-black text-slate-400">
+                              REFERENCE / NOTES
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/10">
+                          {((weeklyReportData as any).onlinePayments || []).map(
+                            (p: any, i: number) => {
+                              const order = p.orders || {};
+                              return (
+                                <tr
+                                  key={p.id || i}
+                                  className="hover:bg-slate-900/60 transition-colors"
+                                >
+                                  <td className="p-4 font-mono text-slate-400 text-xs">
+                                    {p.report_date}
+                                  </td>
+                                  <td className="p-4 font-bold text-white">
+                                    {p.customer_name ||
+                                      order.client_name ||
+                                      '—'}
+                                  </td>
+                                  <td className="p-4 text-center font-mono text-slate-300">
+                                    {order.order_number || '—'}
+                                  </td>
+                                  <td className="p-4 text-center font-mono text-slate-300">
+                                    {order.dr_number || '—'}
+                                  </td>
+                                  <td className="p-4 text-center font-mono text-amber-300">
+                                    {p.pr_number || order.pr_number || '—'}
+                                  </td>
+                                  <td className="p-4 text-right font-black font-mono text-sky-400">
+                                    ₱
+                                    {Number(p.amount || 0).toLocaleString(
+                                      undefined,
+                                      { minimumFractionDigits: 2 }
+                                    )}
+                                  </td>
+                                  <td className="p-4 text-sky-300 text-sm">
+                                    {p.notes?.trim() || '—'}
+                                  </td>
+                                </tr>
+                              );
+                            }
+                          )}
+                          <tr className="bg-slate-800 border-t-2 border-sky-500/30">
+                            <td
+                              colSpan={5}
+                              className="p-4 font-black text-sky-300 uppercase tracking-widest text-xs"
+                            >
+                              TOTAL ONLINE
+                            </td>
+                            <td className="p-4 text-right font-black font-mono text-sky-300">
+                              ₱
+                              {((weeklyReportData as any).onlinePayments || [])
+                                .reduce(
+                                  (s: number, p: any) =>
+                                    s + Number(p.amount || 0),
+                                  0
+                                )
+                                .toLocaleString(undefined, {
+                                  minimumFractionDigits: 2,
+                                })}
+                            </td>
+                            <td></td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* ── CLIENT TOTALS TABLE ── */}
+                <div>
+                  <h3 className="text-xs font-black uppercase tracking-widest text-amber-400 mb-4 flex items-center gap-2">
+                    👤 SALES & PAYMENTS BY CLIENT
+                  </h3>
+                  <div className="bg-slate-950 rounded-3xl overflow-hidden">
+                    {(weeklyReportData as any).clientRows?.length === 0 ? (
+                      <div className="p-6 text-center text-slate-500 text-sm">
+                        No client activity this week.
+                      </div>
+                    ) : (
+                      <table className="w-full text-sm">
+                        <thead className="bg-slate-900 border-b border-white/10">
+                          <tr>
+                            <th className="text-left p-4 font-black text-slate-400">
+                              CLIENT
+                            </th>
+                            <th className="text-left p-4 font-black text-slate-400">
+                              AGENT
+                            </th>
+                            <th className="text-right p-4 font-black text-emerald-400">
+                              TOTAL SALES
+                            </th>
+                            <th className="text-right p-4 font-black text-blue-400">
+                              CASH PAID
+                            </th>
+                            <th className="text-right p-4 font-black text-amber-400">
+                              CHEQUE PAID
+                            </th>
+                            <th className="text-right p-4 font-black text-sky-400">
+                              ONLINE PAID
+                            </th>
+                            <th className="text-right p-4 font-black text-purple-300">
+                              TOTAL PAID
+                            </th>
+                            <th className="text-right p-4 font-black text-red-400">
+                              BALANCE
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/10">
+                          {((weeklyReportData as any).clientRows || []).map(
+                            (row: any, i: number) => {
+                              const balance = row.sales - row.totalPaid;
+                              return (
+                                <tr
+                                  key={i}
+                                  className="hover:bg-slate-900/60 transition-colors"
+                                >
+                                  <td className="p-4 font-bold text-white">
+                                    {row.client}
+                                  </td>
+                                  <td className="p-4 text-slate-400 text-xs font-medium">
+                                    {row.agent}
+                                  </td>
+                                  <td className="p-4 text-right font-mono text-emerald-300">
+                                    {row.sales > 0 ? (
+                                      `₱${row.sales.toLocaleString(undefined, {
+                                        minimumFractionDigits: 2,
+                                      })}`
+                                    ) : (
+                                      <span className="text-slate-700">—</span>
+                                    )}
+                                  </td>
+                                  <td className="p-4 text-right font-mono text-blue-300">
+                                    {row.cash > 0 ? (
+                                      `₱${row.cash.toLocaleString(undefined, {
+                                        minimumFractionDigits: 2,
+                                      })}`
+                                    ) : (
+                                      <span className="text-slate-700">—</span>
+                                    )}
+                                  </td>
+                                  <td className="p-4 text-right font-mono text-amber-300">
+                                    {row.cheque > 0 ? (
+                                      `₱${row.cheque.toLocaleString(undefined, {
+                                        minimumFractionDigits: 2,
+                                      })}`
+                                    ) : (
+                                      <span className="text-slate-700">—</span>
+                                    )}
+                                  </td>
+                                  <td className="p-4 text-right font-mono text-sky-300">
+                                    {row.online > 0 ? (
+                                      `₱${row.online.toLocaleString(undefined, {
+                                        minimumFractionDigits: 2,
+                                      })}`
+                                    ) : (
+                                      <span className="text-slate-700">—</span>
+                                    )}
+                                  </td>
+                                  <td className="p-4 text-right font-black font-mono text-purple-400">
+                                    {row.totalPaid > 0 ? (
+                                      `₱${row.totalPaid.toLocaleString(
+                                        undefined,
+                                        { minimumFractionDigits: 2 }
+                                      )}`
+                                    ) : (
+                                      <span className="text-slate-700">—</span>
+                                    )}
+                                  </td>
+                                  <td className="p-4 text-right font-black font-mono">
+                                    <span
+                                      className={
+                                        balance > 0
+                                          ? 'text-red-400'
+                                          : balance < 0
+                                          ? 'text-sky-300'
+                                          : 'text-slate-600'
+                                      }
+                                    >
+                                      {balance !== 0
+                                        ? `₱${Math.abs(balance).toLocaleString(
+                                            undefined,
+                                            { minimumFractionDigits: 2 }
+                                          )}`
+                                        : '—'}
+                                      {balance < 0 ? ' (over)' : ''}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            }
+                          )}
+                          {(() => {
+                            const rows =
+                              (weeklyReportData as any).clientRows || [];
+                            const ts = rows.reduce(
+                              (s: number, r: any) => s + r.sales,
+                              0
+                            );
+                            const tc = rows.reduce(
+                              (s: number, r: any) => s + r.cash,
+                              0
+                            );
+                            const tch = rows.reduce(
+                              (s: number, r: any) => s + r.cheque,
+                              0
+                            );
+                            const to = rows.reduce(
+                              (s: number, r: any) => s + r.online,
+                              0
+                            );
+                            const tp = tc + tch + to;
+                            return (
+                              <tr className="bg-slate-800 border-t-2 border-amber-500/30">
+                                <td
+                                  colSpan={2}
+                                  className="p-4 font-black text-amber-300 uppercase tracking-widest text-xs"
+                                >
+                                  TOTAL
+                                </td>
+                                <td className="p-4 text-right font-black font-mono text-emerald-300">
+                                  ₱
+                                  {ts.toLocaleString(undefined, {
+                                    minimumFractionDigits: 2,
+                                  })}
+                                </td>
+                                <td className="p-4 text-right font-black font-mono text-blue-300">
+                                  ₱
+                                  {tc.toLocaleString(undefined, {
+                                    minimumFractionDigits: 2,
+                                  })}
+                                </td>
+                                <td className="p-4 text-right font-black font-mono text-amber-300">
+                                  ₱
+                                  {tch.toLocaleString(undefined, {
+                                    minimumFractionDigits: 2,
+                                  })}
+                                </td>
+                                <td className="p-4 text-right font-black font-mono text-sky-300">
+                                  ₱
+                                  {to.toLocaleString(undefined, {
+                                    minimumFractionDigits: 2,
+                                  })}
+                                </td>
+                                <td className="p-4 text-right font-black font-mono text-purple-300">
+                                  ₱
+                                  {tp.toLocaleString(undefined, {
+                                    minimumFractionDigits: 2,
+                                  })}
+                                </td>
+                                <td></td>
+                              </tr>
+                            );
+                          })()}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}
