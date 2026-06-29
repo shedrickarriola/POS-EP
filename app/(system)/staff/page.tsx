@@ -1470,17 +1470,58 @@ export default function StaffDashboard() {
       );
       totals.actualCash = totals.cashCollected - totalExpenses;
 
+      // ── AGENT WEEKLY QUOTAS from profiles ──
+      const { data: profilesData } = await supabase
+        .from('profiles')
+        .select('full_name, agent_weekly_quota')
+        .not('agent_weekly_quota', 'is', null)
+        .gt('agent_weekly_quota', 0);
+
+      const quotaMap = new Map<string, number>();
+      (profilesData || []).forEach((p: any) => {
+        if (p.full_name)
+          quotaMap.set(
+            p.full_name.trim().toUpperCase(),
+            Number(p.agent_weekly_quota || 0)
+          );
+      });
+
+      console.log('=== QUOTA MAP KEYS ===', Array.from(quotaMap.entries()));
+
       // ── AGENT SALES PERFORMANCE (exclude office accounts) ──
-      const agentSalesMap = new Map<string, number>();
+      // Pre-seed with ALL agents who have a quota so they show even with zero sales this week
+      const agentSalesMap = new Map<
+        string,
+        { total: number; displayName: string }
+      >();
+      (profilesData || []).forEach((p: any) => {
+        if (p.full_name) {
+          const displayName = p.full_name.trim();
+          const key = displayName.toUpperCase();
+          agentSalesMap.set(key, { total: 0, displayName });
+        }
+      });
       (ordersData || [])
         .filter((o: any) => !isOfficeOrder(o))
         .forEach((o: any) => {
-          const agent = o.agent || 'MAIN OFFICE';
-          agentSalesMap.set(
-            agent,
-            (agentSalesMap.get(agent) || 0) + Number(o.total_amount || 0)
-          );
+          const displayName = (o.agent || 'MAIN OFFICE').trim();
+          const key = displayName.toUpperCase();
+          const existing = agentSalesMap.get(key);
+          agentSalesMap.set(key, {
+            total: (existing?.total || 0) + Number(o.total_amount || 0),
+            displayName: existing?.displayName || displayName,
+          });
         });
+
+      console.log(
+        '=== AGENT SALES MAP KEYS ===',
+        Array.from(agentSalesMap.entries()).map(([k, v]) => ({
+          key: k,
+          displayName: v.displayName,
+          total: v.total,
+        }))
+      );
+      console.log('=== PROFILES RAW ===', profilesData);
 
       // ── AGENT COLLECTIONS PERFORMANCE (exclude office accounts) ──
       const agentCollMap = new Map<
@@ -1577,7 +1618,12 @@ export default function StaffDashboard() {
         days,
         totals,
         agentSales: Array.from(agentSalesMap.entries())
-          .map(([agent, total]) => ({ agent, total }))
+          .map(([key, v]) => ({
+            agent: v.displayName,
+            total: v.total,
+            quota: quotaMap.get(key) || 0,
+          }))
+          .filter((r) => r.total > 0)
           .sort((a, b) => b.total - a.total),
         agentCollections: Array.from(agentCollMap.entries())
           .map(([agent, v]) => ({
@@ -5001,28 +5047,95 @@ export default function StaffDashboard() {
                                 AGENT
                               </th>
                               <th className="text-right p-4 font-black text-emerald-400">
-                                TOTAL SALES
+                                SALES
+                              </th>
+                              <th className="text-right p-4 font-black text-slate-400">
+                                QUOTA
+                              </th>
+                              <th className="text-left p-4 font-black text-slate-400">
+                                PROGRESS
                               </th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-white/10">
                             {((weeklyReportData as any).agentSales || []).map(
-                              (row: any, i: number) => (
-                                <tr
-                                  key={i}
-                                  className="hover:bg-slate-900/60 transition-colors"
-                                >
-                                  <td className="p-4 font-bold text-white">
-                                    {row.agent}
-                                  </td>
-                                  <td className="p-4 text-right font-black font-mono text-emerald-400">
-                                    ₱
-                                    {row.total.toLocaleString(undefined, {
-                                      minimumFractionDigits: 2,
-                                    })}
-                                  </td>
-                                </tr>
-                              )
+                              (row: any, i: number) => {
+                                const rawPct =
+                                  row.quota > 0
+                                    ? (row.total / row.quota) * 100
+                                    : 0;
+                                const barPct = Math.min(rawPct, 100);
+                                const barColor =
+                                  rawPct >= 100
+                                    ? 'bg-emerald-400'
+                                    : rawPct >= 75
+                                    ? 'bg-amber-400'
+                                    : rawPct >= 50
+                                    ? 'bg-orange-400'
+                                    : 'bg-red-500';
+                                return (
+                                  <tr
+                                    key={i}
+                                    className="hover:bg-slate-900/60 transition-colors"
+                                  >
+                                    <td className="p-4 font-bold text-white">
+                                      {row.agent}
+                                    </td>
+                                    <td className="p-4 text-right font-black font-mono text-emerald-400">
+                                      ₱
+                                      {row.total.toLocaleString(undefined, {
+                                        minimumFractionDigits: 2,
+                                      })}
+                                    </td>
+                                    <td className="p-4 text-right font-mono text-slate-400 whitespace-nowrap">
+                                      {row.quota > 0 ? (
+                                        `₱${row.quota.toLocaleString(
+                                          undefined,
+                                          { minimumFractionDigits: 2 }
+                                        )}`
+                                      ) : (
+                                        <span className="text-slate-700">
+                                          —
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="p-4 min-w-[120px]">
+                                      {row.quota > 0 ? (
+                                        <div className="space-y-1">
+                                          <div className="flex items-center justify-between">
+                                            <span
+                                              className={`text-[10px] font-black ${
+                                                rawPct >= 100
+                                                  ? 'text-emerald-400'
+                                                  : rawPct >= 75
+                                                  ? 'text-amber-400'
+                                                  : 'text-red-400'
+                                              }`}
+                                            >
+                                              {rawPct.toFixed(1)}%
+                                            </span>
+                                            {rawPct >= 100 && (
+                                              <span className="text-[9px] font-black text-emerald-300">
+                                                ✓ MET
+                                              </span>
+                                            )}
+                                          </div>
+                                          <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+                                            <div
+                                              className={`h-2 rounded-full ${barColor}`}
+                                              style={{ width: `${barPct}%` }}
+                                            />
+                                          </div>
+                                        </div>
+                                      ) : (
+                                        <span className="text-slate-700 text-xs">
+                                          —
+                                        </span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              }
                             )}
                             <tr className="bg-slate-800 border-t-2 border-emerald-500/30">
                               <td className="p-4 font-black text-emerald-300 uppercase tracking-widest text-xs">
@@ -5036,6 +5149,15 @@ export default function StaffDashboard() {
                                     minimumFractionDigits: 2,
                                   })}
                               </td>
+                              <td className="p-4 text-right font-black font-mono text-slate-400">
+                                ₱
+                                {((weeklyReportData as any).agentSales || [])
+                                  .reduce((s: number, r: any) => s + r.quota, 0)
+                                  .toLocaleString(undefined, {
+                                    minimumFractionDigits: 2,
+                                  })}
+                              </td>
+                              <td></td>
                             </tr>
                           </tbody>
                         </table>
