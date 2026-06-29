@@ -739,7 +739,7 @@ export async function GET(request: Request) {
 
             supabaseAdmin
               .from('purchase_orders')
-              .select('id, supplier_name, po_number, invoice_id, total_amount, generic_amt, branded_amt, created_date_pht, status, is_checked, notes, created_by')
+              .select('id, supplier_name, po_number, invoice_id, total_amount, generic_amt, branded_amt, created_date_pht, status, is_checked, notes, created_by, profiles!purchase_orders_created_by_fkey(full_name)')
               .eq('branch_id', b.id)
               .in('created_date_pht', weekDates)
               .order('created_date_pht', { ascending: true }),
@@ -871,7 +871,8 @@ export async function GET(request: Request) {
           (purchaseOrdersData || []).forEach((p: any) => {
             const supplier = p.supplier_name || 'UNKNOWN';
             const ex = poBySupplier.get(supplier) || { generic: 0, branded: 0, total: 0, count: 0, allChecked: true, hasReceived: false, inputBy: new Set<string>() };
-            if (p.created_by) ex.inputBy.add(p.created_by.trim());
+            const inputName = (p.profiles as any)?.full_name?.trim() || p.created_by || 'UNKNOWN';
+            ex.inputBy.add(inputName);
             poBySupplier.set(supplier, {
               generic: ex.generic + Number(p.generic_amt || 0),
               branded: ex.branded + Number(p.branded_amt || 0),
@@ -1738,7 +1739,7 @@ export async function GET(request: Request) {
 
             supabaseAdmin
               .from('purchase_orders')
-              .select('id, supplier_name, po_number, invoice_id, total_amount, generic_amt, branded_amt, created_date_pht, status, is_checked, notes, created_by')
+              .select('id, supplier_name, po_number, invoice_id, total_amount, generic_amt, branded_amt, created_date_pht, status, is_checked, notes, created_by, profiles!purchase_orders_created_by_fkey(full_name)')
               .eq('branch_id', b.id)
               .in('created_date_pht', monthDates)
               .order('created_date_pht', { ascending: true }),
@@ -1817,7 +1818,8 @@ export async function GET(request: Request) {
           (purchaseOrdersData || []).forEach((p: any) => {
             const supplier = p.supplier_name || 'UNKNOWN';
             const ex = poBySupplier.get(supplier) || { generic: 0, branded: 0, total: 0, count: 0, allChecked: true, hasReceived: false, inputBy: new Set<string>() };
-            if (p.created_by) ex.inputBy.add(p.created_by.trim());
+            const inputName = (p.profiles as any)?.full_name?.trim() || p.created_by || 'UNKNOWN';
+            ex.inputBy.add(inputName);
             poBySupplier.set(supplier, {
               generic: ex.generic + Number(p.generic_amt || 0),
               branded: ex.branded + Number(p.branded_amt || 0),
