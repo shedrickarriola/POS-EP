@@ -150,7 +150,7 @@ export async function GET(request: Request) {
     });
 
     // 4. MESSAGE LOOP (Telegram only — skip for email-only types)
-    if (type !== 'DAILY_EMAIL' && type !== 'WEEKLY_EMAIL') {
+    if (type !== 'DAILY_EMAIL' && type !== 'WEEKLY_EMAIL' && type !== 'MONTHLY_EMAIL') {
     for (const group of Object.values(orgGroups) as any[]) {
       let message = '';
       if (type === 'STOCK_ADVISORY') {
@@ -697,6 +697,7 @@ export async function GET(request: Request) {
             { data: paymentsData },
             { data: expensesData },
             { data: profilesData },
+            { data: purchaseOrdersData },
           ] = await Promise.all([
             supabaseAdmin
               .from('daily_reports')
@@ -735,6 +736,13 @@ export async function GET(request: Request) {
               .select('full_name, agent_weekly_quota')
               .not('agent_weekly_quota', 'is', null)
               .gt('agent_weekly_quota', 0),
+
+            supabaseAdmin
+              .from('purchase_orders')
+              .select('id, supplier_name, po_number, invoice_id, total_amount, generic_amt, branded_amt, created_date_pht, status, is_checked, notes')
+              .eq('branch_id', b.id)
+              .in('created_date_pht', weekDates)
+              .order('created_date_pht', { ascending: true }),
           ]);
 
           // ── Office account lookup ──
@@ -853,8 +861,28 @@ export async function GET(request: Request) {
           const weekNetTotal = weekGen + weekBrd - weekDisc - weekOthers;
           const weekActualCash = weekCash - totalExpenses;
 
-          // ── Agent sales + quota ──
-          const quotaMap = new Map<string, number>();
+          // ── Purchase Orders ──
+          const poTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.total_amount || 0), 0);
+          const poGenTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.generic_amt || 0), 0);
+          const poBrdTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.branded_amt || 0), 0);
+
+          // Group POs by supplier, sorted by total desc
+          const poBySupplier = new Map<string, { generic: number; branded: number; total: number; count: number; allChecked: boolean; hasReceived: boolean }>();
+          (purchaseOrdersData || []).forEach((p: any) => {
+            const supplier = p.supplier_name || 'UNKNOWN';
+            const ex = poBySupplier.get(supplier) || { generic: 0, branded: 0, total: 0, count: 0, allChecked: true, hasReceived: false };
+            poBySupplier.set(supplier, {
+              generic: ex.generic + Number(p.generic_amt || 0),
+              branded: ex.branded + Number(p.branded_amt || 0),
+              total: ex.total + Number(p.total_amount || 0),
+              count: ex.count + 1,
+              allChecked: ex.allChecked && !!p.is_checked,
+              hasReceived: ex.hasReceived || p.status === 'RECEIVED',
+            });
+          });
+          const poRows = Array.from(poBySupplier.entries())
+            .map(([supplier, v]) => ({ supplier, ...v }))
+            .sort((a, b) => b.total - a.total);
           (profilesData || []).forEach((p: any) => {
             if (p.full_name)
               quotaMap.set(
@@ -1093,6 +1121,77 @@ export async function GET(request: Request) {
                   weekActualCash
                 )}</div>
               </div>
+
+              <!-- CASH vs STOCKS SUMMARY -->
+              <table style="width:100%; border-collapse:collapse; margin-bottom:28px;">
+                <tr>
+                  <td style="padding:4px;">
+                    <div style="background:#064e3b; border:1px solid #10b981; border-radius:12px; padding:16px; text-align:center;">
+                      <div style="color:#10b981; font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">💰 MONEY COMING IN</div>
+                      <div style="color:#10b981; font-size:22px; font-weight:900; font-family:monospace;">${fmt(weekActualCash)}</div>
+                      <div style="color:#64748b; font-size:10px; margin-top:4px;">Net Cash − Expenses</div>
+                    </div>
+                  </td>
+                  <td style="padding:4px;">
+                    <div style="background:#450a0a; border:1px solid #ef4444; border-radius:12px; padding:16px; text-align:center;">
+                      <div style="color:#f87171; font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">📦 MONEY FOR STOCKS</div>
+                      <div style="color:#f87171; font-size:22px; font-weight:900; font-family:monospace;">${fmt(poTotal)}</div>
+                      <div style="color:#64748b; font-size:10px; margin-top:4px;">Total Purchase Orders</div>
+                    </div>
+                  </td>
+                  <td style="padding:4px;">
+                    <div style="background:${weekActualCash - poTotal >= 0 ? '#064e3b' : '#450a0a'}; border:2px solid ${weekActualCash - poTotal >= 0 ? '#10b981' : '#ef4444'}; border-radius:12px; padding:16px; text-align:center;">
+                      <div style="color:${weekActualCash - poTotal >= 0 ? '#10b981' : '#f87171'}; font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">📊 NET POSITION</div>
+                      <div style="color:${weekActualCash - poTotal >= 0 ? '#10b981' : '#f87171'}; font-size:22px; font-weight:900; font-family:monospace;">${fmt(weekActualCash - poTotal)}</div>
+                      <div style="color:#64748b; font-size:10px; margin-top:4px;">Cash − Stock Spending</div>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+
+              ${poRows.length > 0 ? `
+              <!-- PURCHASE ORDERS -->
+              <h3 style="color:#f97316; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">🧾 Purchase Orders This Week</h3>
+              <div style="overflow-x:auto; margin-bottom:28px;">
+                <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                  <thead>
+                    <tr>
+                      <th ${thL}>Supplier</th>
+                      <th style="padding:10px 12px; text-align:center; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;"># POs</th>
+                      <th ${thR}>Generic</th>
+                      <th ${thR}>Branded</th>
+                      <th ${thR}>Total</th>
+                      <th style="padding:10px 12px; text-align:center; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${poRows.map((p: any, i: number) => {
+                      const row = i % 2 === 0 ? trNorm : trAlt;
+                      const status = p.allChecked
+                        ? '<span style="color:#10b981;font-size:10px;font-weight:700;">✓ ALL CHECKED</span>'
+                        : p.hasReceived
+                        ? '<span style="color:#60a5fa;font-size:10px;font-weight:700;">RECEIVED</span>'
+                        : '<span style="color:#f97316;font-size:10px;font-weight:700;">PENDING</span>';
+                      return `<tr ${row}>
+                        <td ${tdL} style="padding:8px 12px; font-weight:700; color:#e2e8f0;">${p.supplier}</td>
+                        <td style="padding:8px 12px; text-align:center; font-family:monospace; color:#94a3b8;">${p.count}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${p.generic > 0 ? fmt(p.generic) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd;">${p.branded > 0 ? fmt(p.branded) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#f97316; font-weight:900;">${fmt(p.total)}</td>
+                        <td style="padding:8px 12px; text-align:center;">${status}</td>
+                      </tr>`;
+                    }).join('')}
+                    <tr style="background:#1e293b; border-top:2px solid #475569;">
+                      <td ${tdL} style="padding:10px 12px; font-weight:900; color:#f97316; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
+                      <td style="padding:10px 12px; text-align:center; font-family:monospace; color:#94a3b8; font-weight:900;">${poRows.reduce((s: number, r: any) => s + r.count, 0)}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(poGenTotal)}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(poBrdTotal)}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#f97316; font-weight:900;">${fmt(poTotal)}</td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>` : ''}
 
               <!-- DAY BY DAY BREAKDOWN -->
               <h3 style="color:#94a3b8; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">Day-by-Day Breakdown</h3>
@@ -1594,6 +1693,7 @@ export async function GET(request: Request) {
             { data: paymentsData },
             { data: expensesData },
             { data: profilesData },
+            { data: purchaseOrdersData },
           ] = await Promise.all([
             supabaseAdmin
               .from('daily_reports')
@@ -1628,6 +1728,13 @@ export async function GET(request: Request) {
               .select('full_name, agent_weekly_quota')
               .not('agent_weekly_quota', 'is', null)
               .gt('agent_weekly_quota', 0),
+
+            supabaseAdmin
+              .from('purchase_orders')
+              .select('id, supplier_name, po_number, invoice_id, total_amount, generic_amt, branded_amt, created_date_pht, status, is_checked, notes')
+              .eq('branch_id', b.id)
+              .in('created_date_pht', monthDates)
+              .order('created_date_pht', { ascending: true }),
           ]);
 
           // ── Office account lookup ──
@@ -1693,11 +1800,55 @@ export async function GET(request: Request) {
           const monthNetTotal = monthGenTotal + monthBrdTotal - monthDiscTotal - monthOthersTotal;
           const monthActualCash = monthCashTotal - totalExpenses;
 
-          // ── Agent sales + quota (monthly quota = weekly * 4) ──
+          // ── Purchase Orders ──
+          const poRows = (purchaseOrdersData || []).sort((a: any, b: any) => {
+            if (a.created_date_pht !== b.created_date_pht)
+              return a.created_date_pht.localeCompare(b.created_date_pht);
+            return (a.supplier_name || '').localeCompare(b.supplier_name || '');
+          });
+          const poTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.total_amount || 0), 0);
+          const poGenTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.generic_amt || 0), 0);
+          const poBrdTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.branded_amt || 0), 0);
+
+          // Group POs by supplier, sorted by total desc
+          const poBySupplier = new Map<string, { generic: number; branded: number; total: number; count: number; allChecked: boolean; hasReceived: boolean }>();
+          (purchaseOrdersData || []).forEach((p: any) => {
+            const supplier = p.supplier_name || 'UNKNOWN';
+            const ex = poBySupplier.get(supplier) || { generic: 0, branded: 0, total: 0, count: 0, allChecked: true, hasReceived: false };
+            poBySupplier.set(supplier, {
+              generic: ex.generic + Number(p.generic_amt || 0),
+              branded: ex.branded + Number(p.branded_amt || 0),
+              total: ex.total + Number(p.total_amount || 0),
+              count: ex.count + 1,
+              allChecked: ex.allChecked && !!p.is_checked,
+              hasReceived: ex.hasReceived || p.status === 'RECEIVED',
+            });
+          });
+          const poRows = Array.from(poBySupplier.entries())
+            .map(([supplier, v]) => ({ supplier, ...v }))
+            .sort((a, b) => b.total - a.total);
+
+          // ── Agent sales + quota ──
+          // Daily quota = weekly_quota / 6 (Mon–Sat, Sunday is non-working)
+          // Monthly quota = daily_quota × number of Mon–Sat days in the month
+          const workingDaysInMonth = (() => {
+            let count = 0;
+            const d = new Date(todayDateM.getFullYear(), todayDateM.getMonth(), 1);
+            const lastDay = new Date(todayDateM.getFullYear(), todayDateM.getMonth() + 1, 0).getDate();
+            for (let day = 1; day <= lastDay; day++) {
+              d.setDate(day);
+              const dow = d.getDay(); // 0 = Sun, 6 = Sat
+              if (dow !== 0) count++; // Mon–Sat
+            }
+            return count;
+          })();
           const quotaMap = new Map<string, number>();
           (profilesData || []).forEach((p: any) => {
-            if (p.full_name)
-              quotaMap.set(p.full_name.trim().toUpperCase(), Number(p.agent_weekly_quota || 0) * 4);
+            if (p.full_name) {
+              const dailyQuota = Number(p.agent_weekly_quota || 0) / 6;
+              const monthlyQuota = dailyQuota * workingDaysInMonth;
+              quotaMap.set(p.full_name.trim().toUpperCase(), monthlyQuota);
+            }
           });
 
           const agentSalesMap = new Map<string, { total: number; displayName: string }>();
@@ -1857,6 +2008,77 @@ export async function GET(request: Request) {
                 <div style="color:#10b981; font-size:12px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">ACTUAL CASH (COLLECTED − EXPENSES)</div>
                 <div style="color:#10b981; font-size:28px; font-weight:900; font-family:monospace;">${fmt(monthActualCash)}</div>
               </div>
+
+              <!-- CASH vs STOCKS SUMMARY -->
+              <table style="width:100%; border-collapse:collapse; margin-bottom:28px;">
+                <tr>
+                  <td style="padding:4px;">
+                    <div style="background:#064e3b; border:1px solid #10b981; border-radius:12px; padding:16px; text-align:center;">
+                      <div style="color:#10b981; font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">💰 MONEY COMING IN</div>
+                      <div style="color:#10b981; font-size:22px; font-weight:900; font-family:monospace;">${fmt(monthActualCash)}</div>
+                      <div style="color:#64748b; font-size:10px; margin-top:4px;">Net Cash − Expenses</div>
+                    </div>
+                  </td>
+                  <td style="padding:4px;">
+                    <div style="background:#450a0a; border:1px solid #ef4444; border-radius:12px; padding:16px; text-align:center;">
+                      <div style="color:#f87171; font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">📦 MONEY FOR STOCKS</div>
+                      <div style="color:#f87171; font-size:22px; font-weight:900; font-family:monospace;">${fmt(poTotal)}</div>
+                      <div style="color:#64748b; font-size:10px; margin-top:4px;">Total Purchase Orders</div>
+                    </div>
+                  </td>
+                  <td style="padding:4px;">
+                    <div style="background:${monthActualCash - poTotal >= 0 ? '#064e3b' : '#450a0a'}; border:2px solid ${monthActualCash - poTotal >= 0 ? '#10b981' : '#ef4444'}; border-radius:12px; padding:16px; text-align:center;">
+                      <div style="color:${monthActualCash - poTotal >= 0 ? '#10b981' : '#f87171'}; font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">📊 NET POSITION</div>
+                      <div style="color:${monthActualCash - poTotal >= 0 ? '#10b981' : '#f87171'}; font-size:22px; font-weight:900; font-family:monospace;">${fmt(monthActualCash - poTotal)}</div>
+                      <div style="color:#64748b; font-size:10px; margin-top:4px;">Cash − Stock Spending</div>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+
+              ${poRows.length > 0 ? `
+              <!-- PURCHASE ORDERS -->
+              <h3 style="color:#f97316; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">🧾 Purchase Orders This Month</h3>
+              <div style="overflow-x:auto; margin-bottom:28px;">
+                <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                  <thead>
+                    <tr>
+                      <th ${thL}>Supplier</th>
+                      <th style="padding:10px 12px; text-align:center; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;"># POs</th>
+                      <th ${thR}>Generic</th>
+                      <th ${thR}>Branded</th>
+                      <th ${thR}>Total</th>
+                      <th style="padding:10px 12px; text-align:center; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${poRows.map((p: any, i: number) => {
+                      const row = i % 2 === 0 ? trNorm : trAlt;
+                      const status = p.allChecked
+                        ? '<span style="color:#10b981;font-size:10px;font-weight:700;">✓ ALL CHECKED</span>'
+                        : p.hasReceived
+                        ? '<span style="color:#60a5fa;font-size:10px;font-weight:700;">RECEIVED</span>'
+                        : '<span style="color:#f97316;font-size:10px;font-weight:700;">PENDING</span>';
+                      return `<tr ${row}>
+                        <td ${tdL} style="padding:8px 12px; font-weight:700; color:#e2e8f0;">${p.supplier}</td>
+                        <td style="padding:8px 12px; text-align:center; font-family:monospace; color:#94a3b8;">${p.count}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${p.generic > 0 ? fmt(p.generic) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd;">${p.branded > 0 ? fmt(p.branded) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#f97316; font-weight:900;">${fmt(p.total)}</td>
+                        <td style="padding:8px 12px; text-align:center;">${status}</td>
+                      </tr>`;
+                    }).join('')}
+                    <tr style="background:#1e293b; border-top:2px solid #475569;">
+                      <td ${tdL} style="padding:10px 12px; font-weight:900; color:#f97316; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
+                      <td style="padding:10px 12px; text-align:center; font-family:monospace; color:#94a3b8; font-weight:900;">${poRows.reduce((s: number, r: any) => s + r.count, 0)}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(poGenTotal)}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(poBrdTotal)}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#f97316; font-weight:900;">${fmt(poTotal)}</td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>` : ''}
 
               <!-- DAY BY DAY BREAKDOWN -->
               <h3 style="color:#94a3b8; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">Day-by-Day Breakdown</h3>
