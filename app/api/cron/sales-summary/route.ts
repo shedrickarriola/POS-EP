@@ -739,7 +739,7 @@ export async function GET(request: Request) {
 
             supabaseAdmin
               .from('purchase_orders')
-              .select('id, supplier_name, po_number, invoice_id, total_amount, generic_amt, branded_amt, created_date_pht, status, is_checked, notes')
+              .select('id, supplier_name, po_number, invoice_id, total_amount, generic_amt, branded_amt, created_date_pht, status, is_checked, notes, created_by')
               .eq('branch_id', b.id)
               .in('created_date_pht', weekDates)
               .order('created_date_pht', { ascending: true }),
@@ -867,10 +867,11 @@ export async function GET(request: Request) {
           const poBrdTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.branded_amt || 0), 0);
 
           // Group POs by supplier, sorted by total desc
-          const poBySupplier = new Map<string, { generic: number; branded: number; total: number; count: number; allChecked: boolean; hasReceived: boolean }>();
+          const poBySupplier = new Map<string, { generic: number; branded: number; total: number; count: number; allChecked: boolean; hasReceived: boolean; inputBy: Set<string> }>();
           (purchaseOrdersData || []).forEach((p: any) => {
             const supplier = p.supplier_name || 'UNKNOWN';
-            const ex = poBySupplier.get(supplier) || { generic: 0, branded: 0, total: 0, count: 0, allChecked: true, hasReceived: false };
+            const ex = poBySupplier.get(supplier) || { generic: 0, branded: 0, total: 0, count: 0, allChecked: true, hasReceived: false, inputBy: new Set<string>() };
+            if (p.created_by) ex.inputBy.add(p.created_by.trim());
             poBySupplier.set(supplier, {
               generic: ex.generic + Number(p.generic_amt || 0),
               branded: ex.branded + Number(p.branded_amt || 0),
@@ -878,11 +879,15 @@ export async function GET(request: Request) {
               count: ex.count + 1,
               allChecked: ex.allChecked && !!p.is_checked,
               hasReceived: ex.hasReceived || p.status === 'RECEIVED',
+              inputBy: ex.inputBy,
             });
           });
           const poRows = Array.from(poBySupplier.entries())
-            .map(([supplier, v]) => ({ supplier, ...v }))
+            .map(([supplier, v]) => ({ supplier, ...v, inputBy: Array.from(v.inputBy).join(', ') || '—' }))
             .sort((a, b) => b.total - a.total);
+
+          // ── Agent sales + quota ──
+          const quotaMap = new Map<string, number>();
           (profilesData || []).forEach((p: any) => {
             if (p.full_name)
               quotaMap.set(
@@ -1161,6 +1166,7 @@ export async function GET(request: Request) {
                       <th ${thR}>Generic</th>
                       <th ${thR}>Branded</th>
                       <th ${thR}>Total</th>
+                      <th ${thL}>Input By</th>
                       <th style="padding:10px 12px; text-align:center; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Status</th>
                     </tr>
                   </thead>
@@ -1178,6 +1184,7 @@ export async function GET(request: Request) {
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${p.generic > 0 ? fmt(p.generic) : '—'}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd;">${p.branded > 0 ? fmt(p.branded) : '—'}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#f97316; font-weight:900;">${fmt(p.total)}</td>
+                        <td ${tdL} style="padding:8px 12px; color:#94a3b8; font-size:11px;">${p.inputBy}</td>
                         <td style="padding:8px 12px; text-align:center;">${status}</td>
                       </tr>`;
                     }).join('')}
@@ -1187,7 +1194,7 @@ export async function GET(request: Request) {
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(poGenTotal)}</td>
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(poBrdTotal)}</td>
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#f97316; font-weight:900;">${fmt(poTotal)}</td>
-                      <td></td>
+                      <td></td><td></td>
                     </tr>
                   </tbody>
                 </table>
@@ -1731,7 +1738,7 @@ export async function GET(request: Request) {
 
             supabaseAdmin
               .from('purchase_orders')
-              .select('id, supplier_name, po_number, invoice_id, total_amount, generic_amt, branded_amt, created_date_pht, status, is_checked, notes')
+              .select('id, supplier_name, po_number, invoice_id, total_amount, generic_amt, branded_amt, created_date_pht, status, is_checked, notes, created_by')
               .eq('branch_id', b.id)
               .in('created_date_pht', monthDates)
               .order('created_date_pht', { ascending: true }),
@@ -1806,10 +1813,11 @@ export async function GET(request: Request) {
           const poBrdTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.branded_amt || 0), 0);
 
           // Group POs by supplier, sorted by total desc
-          const poBySupplier = new Map<string, { generic: number; branded: number; total: number; count: number; allChecked: boolean; hasReceived: boolean }>();
+          const poBySupplier = new Map<string, { generic: number; branded: number; total: number; count: number; allChecked: boolean; hasReceived: boolean; inputBy: Set<string> }>();
           (purchaseOrdersData || []).forEach((p: any) => {
             const supplier = p.supplier_name || 'UNKNOWN';
-            const ex = poBySupplier.get(supplier) || { generic: 0, branded: 0, total: 0, count: 0, allChecked: true, hasReceived: false };
+            const ex = poBySupplier.get(supplier) || { generic: 0, branded: 0, total: 0, count: 0, allChecked: true, hasReceived: false, inputBy: new Set<string>() };
+            if (p.created_by) ex.inputBy.add(p.created_by.trim());
             poBySupplier.set(supplier, {
               generic: ex.generic + Number(p.generic_amt || 0),
               branded: ex.branded + Number(p.branded_amt || 0),
@@ -1817,10 +1825,11 @@ export async function GET(request: Request) {
               count: ex.count + 1,
               allChecked: ex.allChecked && !!p.is_checked,
               hasReceived: ex.hasReceived || p.status === 'RECEIVED',
+              inputBy: ex.inputBy,
             });
           });
           const poRows = Array.from(poBySupplier.entries())
-            .map(([supplier, v]) => ({ supplier, ...v }))
+            .map(([supplier, v]) => ({ supplier, ...v, inputBy: Array.from(v.inputBy).join(', ') || '—' }))
             .sort((a, b) => b.total - a.total);
 
           // ── Agent sales + quota ──
@@ -2043,6 +2052,7 @@ export async function GET(request: Request) {
                       <th ${thR}>Generic</th>
                       <th ${thR}>Branded</th>
                       <th ${thR}>Total</th>
+                      <th ${thL}>Input By</th>
                       <th style="padding:10px 12px; text-align:center; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Status</th>
                     </tr>
                   </thead>
@@ -2060,6 +2070,7 @@ export async function GET(request: Request) {
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${p.generic > 0 ? fmt(p.generic) : '—'}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd;">${p.branded > 0 ? fmt(p.branded) : '—'}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#f97316; font-weight:900;">${fmt(p.total)}</td>
+                        <td ${tdL} style="padding:8px 12px; color:#94a3b8; font-size:11px;">${p.inputBy}</td>
                         <td style="padding:8px 12px; text-align:center;">${status}</td>
                       </tr>`;
                     }).join('')}
@@ -2069,7 +2080,7 @@ export async function GET(request: Request) {
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(poGenTotal)}</td>
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(poBrdTotal)}</td>
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#f97316; font-weight:900;">${fmt(poTotal)}</td>
-                      <td></td>
+                      <td></td><td></td>
                     </tr>
                   </tbody>
                 </table>
