@@ -1536,6 +1536,596 @@ export async function GET(request: Request) {
         message: `Weekly email reports sent for ${weekStart} to ${weekEnd}`,
       });
     }
+    // ==================== MONTHLY EMAIL REPORT (LAST DAY OF MONTH) - OFFICE BRANCHES ====================
+    if (type === 'MONTHLY_EMAIL') {
+      console.log('📧 Starting Monthly Email Report - Office Branches Only');
+
+      const { data: monthlyOrgs } = await supabaseAdmin
+        .from('organizations')
+        .select('id, name, owner_email')
+        .not('owner_email', 'is', null);
+
+      // Compute the full month range: first day → last day of current month (PHT)
+      const todayDateM = new Date(todayPHT);
+      const monthStart = new Date(todayDateM.getFullYear(), todayDateM.getMonth(), 1)
+        .toISOString().split('T')[0];
+      const monthEnd = todayPHT; // last day of month (cron fires on last day)
+      const monthLabel = todayDateM.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+      // Build array of all dates in the month
+      const monthDates: string[] = [];
+      const cursor = new Date(monthStart + 'T00:00:00');
+      const endDate = new Date(monthEnd + 'T00:00:00');
+      while (cursor <= endDate) {
+        monthDates.push(cursor.toISOString().split('T')[0]);
+        cursor.setDate(cursor.getDate() + 1);
+      }
+
+      for (const org of monthlyOrgs || []) {
+        if (!org.owner_email) continue;
+
+        const { data: officeBranchesRaw } = await supabaseAdmin
+          .from('branches')
+          .select('*')
+          .eq('org_id', org.id)
+          .eq('is_office_use', true);
+
+        const officeBranches = (officeBranchesRaw || []).filter(
+          (b: any) => b.test_env !== true
+        );
+
+        if (!officeBranches || officeBranches.length === 0) {
+          console.log(`⏭️ ${org.name} has no office branches, skipping monthly email`);
+          continue;
+        }
+
+        let emailHtml = `
+          <div style="font-family: Arial, sans-serif; max-width: 1000px; margin: 0 auto; padding: 30px; background: #0f172a; color: #e2e8f0;">
+            <h1 style="color: #f59e0b; text-align: center; margin-bottom: 4px;">📆 Monthly Report</h1>
+            <p style="text-align:center; color:#64748b; margin:0 0 4px 0; font-size:16px;">${org.name}</p>
+            <p style="text-align:center; color:#94a3b8; margin:0 0 24px 0; font-size:14px;">${monthLabel} • ${monthStart} — ${monthEnd}</p>
+            <hr style="border: 1px solid #334155; margin-bottom: 30px;">
+        `;
+
+        for (const b of officeBranches) {
+          const [
+            { data: reportsData },
+            { data: ordersData },
+            { data: paymentsData },
+            { data: expensesData },
+            { data: profilesData },
+          ] = await Promise.all([
+            supabaseAdmin
+              .from('daily_reports')
+              .select('*')
+              .eq('branch_id', b.id)
+              .in('report_date', monthDates),
+
+            supabaseAdmin
+              .from('orders')
+              .select('id, total_amount, client_name, created_date_pht, agent, order_number, dr_number')
+              .eq('branch_id', b.id)
+              .in('created_date_pht', monthDates),
+
+            supabaseAdmin
+              .from('daily_payments')
+              .select(`
+                id, amount, payment_method, report_date, order_id,
+                customer_name, pr_number, notes,
+                orders ( id, order_number, dr_number, client_name, agent )
+              `)
+              .eq('branch_id', b.id)
+              .in('report_date', monthDates),
+
+            supabaseAdmin
+              .from('daily_expenses')
+              .select('amount, report_date')
+              .eq('branch_id', b.id)
+              .in('report_date', monthDates),
+
+            supabaseAdmin
+              .from('profiles')
+              .select('full_name, agent_weekly_quota')
+              .not('agent_weekly_quota', 'is', null)
+              .gt('agent_weekly_quota', 0),
+          ]);
+
+          // ── Office account lookup ──
+          const clientNames = [
+            ...new Set((ordersData || []).map((o: any) => o.client_name).filter(Boolean)),
+          ];
+          let officeMap: Record<string, boolean> = {};
+          if (clientNames.length > 0) {
+            const { data: clientsData } = await supabaseAdmin
+              .from('clients')
+              .select('client_name, is_office_account')
+              .in('client_name', clientNames);
+            (clientsData || []).forEach((c: any) => {
+              officeMap[c.client_name] = c.is_office_account === true;
+            });
+          }
+
+          const isOfficeOrder = (o: any) => officeMap[o.client_name] || false;
+          const isOfficePayment = (p: any) =>
+            officeMap[(p.orders as any)?.client_name || p.customer_name || ''] || false;
+
+          // ── Report map ──
+          const reportMap: Record<string, any> = {};
+          (reportsData || []).forEach((r: any) => { reportMap[r.report_date] = r; });
+
+          // ── Totals ──
+          const totalExpenses = (expensesData || []).reduce(
+            (s: number, e: any) => s + Number(e.amount || 0), 0
+          );
+
+          let monthGenTotal = 0, monthBrdTotal = 0, monthDiscTotal = 0, monthOthersTotal = 0;
+          let monthCashTotal = 0, monthChequeTotal = 0, monthOnlineTotal = 0;
+
+          const dayRows: Array<{
+            dateStr: string;
+            gen: number; brd: number; disc: number; others: number; netTotal: number;
+            cash: number; cheque: number; online: number;
+            hasReport: boolean; isChecked: boolean;
+          }> = monthDates.map((dateStr) => {
+            const report = reportMap[dateStr];
+            const dayOrders = (ordersData || []).filter((o: any) => o.created_date_pht === dateStr);
+            const others = dayOrders.filter(isOfficeOrder)
+              .reduce((s: number, o: any) => s + Number(o.total_amount || 0), 0);
+            const gen = Number(report?.generic_sales || 0);
+            const brd = Number(report?.branded_sales || 0);
+            const disc = Number(report?.discount_total || 0);
+            const netTotal = gen + brd - disc - others;
+
+            const dayPay = (paymentsData || []).filter((p: any) => p.report_date === dateStr);
+            const cash = dayPay.filter((p: any) => p.payment_method === 'CASH' && !isOfficePayment(p))
+              .reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
+            const cheque = dayPay.filter((p: any) => p.payment_method === 'CHEQUE' && !isOfficePayment(p))
+              .reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
+            const online = dayPay.filter((p: any) => p.payment_method === 'ONLINE' && !isOfficePayment(p))
+              .reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
+
+            monthGenTotal += gen; monthBrdTotal += brd; monthDiscTotal += disc; monthOthersTotal += others;
+            monthCashTotal += cash; monthChequeTotal += cheque; monthOnlineTotal += online;
+
+            return { dateStr, gen, brd, disc, others, netTotal, cash, cheque, online, hasReport: !!report, isChecked: report?.is_checked || false };
+          });
+
+          const monthNetTotal = monthGenTotal + monthBrdTotal - monthDiscTotal - monthOthersTotal;
+          const monthActualCash = monthCashTotal - totalExpenses;
+
+          // ── Agent sales + quota (monthly quota = weekly * 4) ──
+          const quotaMap = new Map<string, number>();
+          (profilesData || []).forEach((p: any) => {
+            if (p.full_name)
+              quotaMap.set(p.full_name.trim().toUpperCase(), Number(p.agent_weekly_quota || 0) * 4);
+          });
+
+          const agentSalesMap = new Map<string, { total: number; displayName: string }>();
+          (profilesData || []).forEach((p: any) => {
+            if (p.full_name) {
+              const key = p.full_name.trim().toUpperCase();
+              agentSalesMap.set(key, { total: 0, displayName: p.full_name.trim() });
+            }
+          });
+          (ordersData || []).filter((o: any) => !isOfficeOrder(o)).forEach((o: any) => {
+            const display = (o.agent || 'MAIN OFFICE').trim();
+            const key = display.toUpperCase();
+            const ex = agentSalesMap.get(key);
+            agentSalesMap.set(key, {
+              total: (ex?.total || 0) + Number(o.total_amount || 0),
+              displayName: ex?.displayName || display,
+            });
+          });
+
+          const agentSalesRows = Array.from(agentSalesMap.entries())
+            .map(([key, v]) => ({ agent: v.displayName, total: v.total, quota: quotaMap.get(key) || 0 }))
+            .filter(r => r.total > 0)
+            .sort((a, b) => b.total - a.total);
+
+          // ── Agent collections ──
+          const agentCollMap = new Map<string, { cash: number; cheque: number; online: number }>();
+          (paymentsData || []).filter((p: any) => !isOfficePayment(p)).forEach((p: any) => {
+            const agent = ((p.orders as any)?.agent || 'MAIN OFFICE').trim();
+            const key = agent.toUpperCase();
+            if (!agentCollMap.has(key)) agentCollMap.set(key, { cash: 0, cheque: 0, online: 0 });
+            const entry = agentCollMap.get(key)!;
+            const method = (p.payment_method || 'CASH').toUpperCase();
+            const amt = Number(p.amount || 0);
+            if (method === 'CASH') entry.cash += amt;
+            else if (method === 'CHEQUE') entry.cheque += amt;
+            else entry.online += amt;
+          });
+          const agentCollRows = Array.from(agentCollMap.entries())
+            .map(([key, v]) => ({
+              agent: key.charAt(0) + key.slice(1).toLowerCase(),
+              cash: v.cash, cheque: v.cheque, online: v.online,
+              total: v.cash + v.cheque + v.online,
+            }))
+            .sort((a, b) => b.total - a.total);
+
+          // ── Online payments ──
+          const onlinePayments = (paymentsData || [])
+            .filter((p: any) => p.payment_method === 'ONLINE')
+            .sort((a: any, b: any) =>
+              ((a.orders as any)?.client_name || a.customer_name || '').localeCompare(
+                (b.orders as any)?.client_name || b.customer_name || ''
+              )
+            );
+
+          // ── Client rows ──
+          const clientSalesMap = new Map<string, { total: number; agent: string }>();
+          (ordersData || []).filter((o: any) => !isOfficeOrder(o)).forEach((o: any) => {
+            const client = o.client_name || 'WALK-IN';
+            const ex = clientSalesMap.get(client);
+            clientSalesMap.set(client, {
+              total: (ex?.total || 0) + Number(o.total_amount || 0),
+              agent: ex?.agent || o.agent || 'MAIN OFFICE',
+            });
+          });
+          const clientPayMap = new Map<string, { cash: number; cheque: number; online: number }>();
+          (paymentsData || []).filter((p: any) => !isOfficePayment(p)).forEach((p: any) => {
+            const client = (p.orders as any)?.client_name || p.customer_name || 'WALK-IN';
+            if (!clientPayMap.has(client)) clientPayMap.set(client, { cash: 0, cheque: 0, online: 0 });
+            const entry = clientPayMap.get(client)!;
+            const method = (p.payment_method || 'CASH').toUpperCase();
+            const amt = Number(p.amount || 0);
+            if (method === 'CASH') entry.cash += amt;
+            else if (method === 'CHEQUE') entry.cheque += amt;
+            else entry.online += amt;
+          });
+          const allClientKeys = [...new Set([...clientSalesMap.keys(), ...clientPayMap.keys()])];
+          const clientRows = allClientKeys.map((client) => {
+            const sd = clientSalesMap.get(client);
+            const pay = clientPayMap.get(client) || { cash: 0, cheque: 0, online: 0 };
+            const totalPaid = pay.cash + pay.cheque + pay.online;
+            return {
+              client, agent: sd?.agent || '—', sales: sd?.total || 0,
+              cash: pay.cash, cheque: pay.cheque, online: pay.online,
+              totalPaid, balance: (sd?.total || 0) - totalPaid,
+            };
+          }).sort((a, b) => b.sales - a.sales);
+
+          // ── HTML helpers ──
+          const fmt = (n: number) => `₱${n.toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
+          const tdR = `style="padding:8px 12px; text-align:right; font-family:monospace;"`;
+          const tdL = `style="padding:8px 12px; text-align:left;"`;
+          const thR = `style="padding:10px 12px; text-align:right; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;"`;
+          const thL = `style="padding:10px 12px; text-align:left; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;"`;
+          const trAlt = `style="background:#1e293b;"`;
+          const trNorm = `style="background:#0f172a;"`;
+
+          emailHtml += `
+            <div style="background:#1e293b; border-radius:16px; padding:24px; margin-bottom:32px; border:1px solid #334155;">
+              <h2 style="color:#fbbf24; margin:0 0 20px 0; font-size:20px;">🏢 ${b.branch_name.toUpperCase()}</h2>
+
+              <!-- MONTHLY TOTALS CARDS -->
+              <table style="width:100%; border-collapse:collapse; margin-bottom:24px;">
+                <tr>
+                  <td style="padding:4px;">
+                    <div style="background:#0f172a; border:1px solid #059669; border-radius:12px; padding:16px; text-align:center;">
+                      <div style="color:#10b981; font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">GENERIC</div>
+                      <div style="color:#fff; font-size:20px; font-weight:900; font-family:monospace;">${fmt(monthGenTotal)}</div>
+                    </div>
+                  </td>
+                  <td style="padding:4px;">
+                    <div style="background:#0f172a; border:1px solid #7c3aed; border-radius:12px; padding:16px; text-align:center;">
+                      <div style="color:#a855f7; font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">BRANDED</div>
+                      <div style="color:#fff; font-size:20px; font-weight:900; font-family:monospace;">${fmt(monthBrdTotal)}</div>
+                    </div>
+                  </td>
+                  <td style="padding:4px;">
+                    <div style="background:#0f172a; border:1px solid #d97706; border-radius:12px; padding:16px; text-align:center;">
+                      <div style="color:#f59e0b; font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">OTHERS</div>
+                      <div style="color:#f59e0b; font-size:20px; font-weight:900; font-family:monospace;">${fmt(monthOthersTotal)}</div>
+                    </div>
+                  </td>
+                  <td style="padding:4px;">
+                    <div style="background:#0f172a; border:1px solid #ea580c; border-radius:12px; padding:16px; text-align:center;">
+                      <div style="color:#f97316; font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">DISCOUNT</div>
+                      <div style="color:#f97316; font-size:20px; font-weight:900; font-family:monospace;">${fmt(monthDiscTotal)}</div>
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:4px;">
+                    <div style="background:#064e3b; border:2px solid #10b981; border-radius:12px; padding:16px; text-align:center;">
+                      <div style="color:#10b981; font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">NET SALES</div>
+                      <div style="color:#10b981; font-size:22px; font-weight:900; font-family:monospace;">${fmt(monthNetTotal)}</div>
+                    </div>
+                  </td>
+                  <td style="padding:4px;">
+                    <div style="background:#0f172a; border:1px solid #2563eb; border-radius:12px; padding:16px; text-align:center;">
+                      <div style="color:#60a5fa; font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">CASH</div>
+                      <div style="color:#fff; font-size:20px; font-weight:900; font-family:monospace;">${fmt(monthCashTotal)}</div>
+                    </div>
+                  </td>
+                  <td style="padding:4px;">
+                    <div style="background:#0f172a; border:1px solid #0284c7; border-radius:12px; padding:16px; text-align:center;">
+                      <div style="color:#38bdf8; font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">CHEQUE</div>
+                      <div style="color:#fff; font-size:20px; font-weight:900; font-family:monospace;">${fmt(monthChequeTotal)}</div>
+                    </div>
+                  </td>
+                  <td style="padding:4px;">
+                    <div style="background:#0f172a; border:1px solid #dc2626; border-radius:12px; padding:16px; text-align:center;">
+                      <div style="color:#f87171; font-size:11px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">EXPENSES</div>
+                      <div style="color:#f87171; font-size:20px; font-weight:900; font-family:monospace;">${fmt(totalExpenses)}</div>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+              <div style="background:#064e3b; border:2px solid #10b981; border-radius:12px; padding:20px; text-align:center; margin-bottom:28px;">
+                <div style="color:#10b981; font-size:12px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">ACTUAL CASH (COLLECTED − EXPENSES)</div>
+                <div style="color:#10b981; font-size:28px; font-weight:900; font-family:monospace;">${fmt(monthActualCash)}</div>
+              </div>
+
+              <!-- DAY BY DAY BREAKDOWN -->
+              <h3 style="color:#94a3b8; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">Day-by-Day Breakdown</h3>
+              <div style="overflow-x:auto; margin-bottom:28px;">
+                <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                  <thead>
+                    <tr>
+                      <th ${thL}>Day</th>
+                      <th ${thR}>Generic</th>
+                      <th ${thR}>Branded</th>
+                      <th ${thR}>Others</th>
+                      <th ${thR}>Disc</th>
+                      <th ${thR}>Net Sales</th>
+                      <th ${thR}>Cash</th>
+                      <th ${thR}>Online</th>
+                      <th ${thR}>Cheque</th>
+                      <th style="padding:10px 12px; text-align:center; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${dayRows.map((d, i) => {
+                      const date = new Date(d.dateStr + 'T00:00:00');
+                      const dayLabel = date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+                      const isToday = d.dateStr === todayPHT;
+                      const isFuture = date > new Date(todayPHT);
+                      const status = isFuture
+                        ? '<span style="color:#475569;font-size:10px;font-weight:700;">FUTURE</span>'
+                        : !d.hasReport
+                        ? '<span style="color:#ef4444;font-size:10px;font-weight:700;">MISSING</span>'
+                        : d.isChecked
+                        ? '<span style="color:#10b981;font-size:10px;font-weight:700;">✓ CHECKED</span>'
+                        : '<span style="color:#f97316;font-size:10px;font-weight:700;">PENDING</span>';
+                      const row = i % 2 === 0 ? trNorm : trAlt;
+                      return `<tr ${row}>
+                        <td ${tdL} style="padding:8px 12px; font-weight:700; color:${isToday ? '#10b981' : '#e2e8f0'};">${dayLabel}${isToday ? ' <span style="background:#10b981;color:#000;font-size:9px;font-weight:900;padding:1px 6px;border-radius:99px;">TODAY</span>' : ''}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${d.hasReport ? fmt(d.gen) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd;">${d.hasReport ? fmt(d.brd) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fcd34d;">${d.hasReport ? fmt(d.others) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fdba74;">${d.hasReport ? fmt(d.disc) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#10b981; font-weight:900;">${d.hasReport ? fmt(d.netTotal) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#93c5fd;">${fmt(d.cash)}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd;">${fmt(d.online)}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#7dd3fc;">${fmt(d.cheque)}</td>
+                        <td style="padding:8px 12px; text-align:center;">${status}</td>
+                      </tr>`;
+                    }).join('')}
+                    <tr style="background:#1e293b; border-top:2px solid #475569;">
+                      <td ${tdL} style="padding:10px 12px; font-weight:900; color:#fff; font-size:12px; text-transform:uppercase; letter-spacing:1px;">MONTHLY TOTAL</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(monthGenTotal)}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(monthBrdTotal)}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fcd34d; font-weight:900;">${fmt(monthOthersTotal)}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fdba74; font-weight:900;">${fmt(monthDiscTotal)}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#10b981; font-weight:900;">${fmt(monthNetTotal)}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#93c5fd; font-weight:900;">${fmt(monthCashTotal)}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(monthOnlineTotal)}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#7dd3fc; font-weight:900;">${fmt(monthChequeTotal)}</td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <!-- AGENT SALES + QUOTA -->
+              <h3 style="color:#10b981; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">📦 Monthly Sales by Agent</h3>
+              <div style="overflow-x:auto; margin-bottom:28px;">
+                <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                  <thead>
+                    <tr>
+                      <th ${thL}>Agent</th>
+                      <th ${thR}>Sales</th>
+                      <th ${thR}>Monthly Quota</th>
+                      <th ${thR}>% Achieved</th>
+                      <th style="padding:10px 12px; text-align:left; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px; width:160px;">Progress</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${agentSalesRows.map((r, i) => {
+                      const rawPct = r.quota > 0 ? (r.total / r.quota) * 100 : 0;
+                      const barPct = Math.min(rawPct, 100);
+                      const barColor = rawPct >= 100 ? '#10b981' : rawPct >= 75 ? '#f59e0b' : rawPct >= 50 ? '#f97316' : '#ef4444';
+                      const pctColor = rawPct >= 100 ? '#10b981' : rawPct >= 75 ? '#f59e0b' : '#ef4444';
+                      const metBadge = rawPct >= 100 ? ' <span style="background:#064e3b;color:#10b981;font-size:9px;font-weight:900;padding:1px 6px;border-radius:99px;">✓ MET</span>' : '';
+                      const row = i % 2 === 0 ? trNorm : trAlt;
+                      return `<tr ${row}>
+                        <td ${tdL} style="padding:8px 12px; font-weight:700; color:#e2e8f0;">${r.agent}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#10b981; font-weight:900;">${fmt(r.total)}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#64748b;">${r.quota > 0 ? fmt(r.quota) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:${pctColor}; font-weight:700;">${r.quota > 0 ? rawPct.toFixed(1) + '%' : '—'}${metBadge}</td>
+                        <td style="padding:8px 12px;">
+                          ${r.quota > 0 ? `
+                            <div style="background:#1e293b; border-radius:99px; height:8px; overflow:hidden; width:140px;">
+                              <div style="background:${barColor}; height:8px; width:${barPct}%; border-radius:99px;"></div>
+                            </div>` : '<span style="color:#334155;font-size:11px;">—</span>'}
+                        </td>
+                      </tr>`;
+                    }).join('')}
+                    <tr style="background:#1e293b; border-top:2px solid #475569;">
+                      <td ${tdL} style="padding:10px 12px; font-weight:900; color:#10b981; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#10b981; font-weight:900;">${fmt(agentSalesRows.reduce((s, r) => s + r.total, 0))}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#64748b; font-weight:900;">${fmt(agentSalesRows.reduce((s, r) => s + r.quota, 0))}</td>
+                      <td></td><td></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <!-- AGENT COLLECTIONS -->
+              <h3 style="color:#a855f7; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">💰 Monthly Collections by Agent</h3>
+              <div style="overflow-x:auto; margin-bottom:28px;">
+                <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                  <thead>
+                    <tr>
+                      <th ${thL}>Agent</th>
+                      <th ${thR}>Cash</th>
+                      <th ${thR}>Cheque</th>
+                      <th ${thR}>Online</th>
+                      <th ${thR}>Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${agentCollRows.map((r, i) => {
+                      const row = i % 2 === 0 ? trNorm : trAlt;
+                      return `<tr ${row}>
+                        <td ${tdL} style="padding:8px 12px; font-weight:700; color:#e2e8f0;">${r.agent}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.cash > 0 ? fmt(r.cash) : '<span style="color:#1e293b;">—</span>'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fcd34d;">${r.cheque > 0 ? fmt(r.cheque) : '<span style="color:#1e293b;">—</span>'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#7dd3fc;">${r.online > 0 ? fmt(r.online) : '<span style="color:#1e293b;">—</span>'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(r.total)}</td>
+                      </tr>`;
+                    }).join('')}
+                    ${(() => {
+                      const tc = agentCollRows.reduce((s, r) => s + r.cash, 0);
+                      const tch = agentCollRows.reduce((s, r) => s + r.cheque, 0);
+                      const to = agentCollRows.reduce((s, r) => s + r.online, 0);
+                      return `<tr style="background:#1e293b; border-top:2px solid #475569;">
+                        <td ${tdL} style="padding:10px 12px; font-weight:900; color:#a855f7; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
+                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(tc)}</td>
+                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fcd34d; font-weight:900;">${fmt(tch)}</td>
+                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#7dd3fc; font-weight:900;">${fmt(to)}</td>
+                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(tc + tch + to)}</td>
+                      </tr>`;
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+
+              ${onlinePayments.length > 0 ? `
+              <!-- ONLINE PAYMENTS -->
+              <h3 style="color:#38bdf8; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">🌐 Online Payments This Month</h3>
+              <div style="overflow-x:auto; margin-bottom:28px;">
+                <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                  <thead>
+                    <tr>
+                      <th ${thL}>Date</th>
+                      <th ${thL}>Client</th>
+                      <th ${thL}>SO#</th>
+                      <th ${thL}>DR#</th>
+                      <th ${thL}>PR#</th>
+                      <th ${thR}>Amount</th>
+                      <th ${thL}>Reference / Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${onlinePayments.map((p: any, i: number) => {
+                      const order = p.orders || {};
+                      const row = i % 2 === 0 ? trNorm : trAlt;
+                      return `<tr ${row}>
+                        <td ${tdL} style="padding:8px 12px; font-family:monospace; color:#64748b; font-size:11px;">${p.report_date}</td>
+                        <td ${tdL} style="padding:8px 12px; font-weight:700; color:#e2e8f0;">${p.customer_name || order.client_name || '—'}</td>
+                        <td ${tdL} style="padding:8px 12px; font-family:monospace; color:#94a3b8;">${order.order_number || '—'}</td>
+                        <td ${tdL} style="padding:8px 12px; font-family:monospace; color:#94a3b8;">${order.dr_number || '—'}</td>
+                        <td ${tdL} style="padding:8px 12px; font-family:monospace; color:#fcd34d;">${p.pr_number || order.pr_number || '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#38bdf8; font-weight:900;">${fmt(Number(p.amount || 0))}</td>
+                        <td ${tdL} style="padding:8px 12px; color:#7dd3fc; font-size:12px;">${p.notes?.trim() || '—'}</td>
+                      </tr>`;
+                    }).join('')}
+                    <tr style="background:#1e293b; border-top:2px solid #475569;">
+                      <td colspan="5" ${tdL} style="padding:10px 12px; font-weight:900; color:#38bdf8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL ONLINE</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#38bdf8; font-weight:900;">${fmt(onlinePayments.reduce((s: number, p: any) => s + Number(p.amount || 0), 0))}</td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>` : ''}
+
+              <!-- CLIENT SALES & PAYMENTS -->
+              <h3 style="color:#f59e0b; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">👤 Sales & Payments by Client</h3>
+              <div style="overflow-x:auto; margin-bottom:8px;">
+                <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                  <thead>
+                    <tr>
+                      <th ${thL}>Client</th>
+                      <th ${thL}>Agent</th>
+                      <th ${thR}>Total Sales</th>
+                      <th ${thR}>Cash Paid</th>
+                      <th ${thR}>Cheque Paid</th>
+                      <th ${thR}>Online Paid</th>
+                      <th ${thR}>Total Paid</th>
+                      <th ${thR}>Balance</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${clientRows.map((r, i) => {
+                      const balColor = r.balance > 0 ? '#ef4444' : r.balance < 0 ? '#38bdf8' : '#475569';
+                      const balText = r.balance !== 0 ? fmt(Math.abs(r.balance)) + (r.balance < 0 ? ' (over)' : '') : '—';
+                      const row = i % 2 === 0 ? trNorm : trAlt;
+                      return `<tr ${row}>
+                        <td ${tdL} style="padding:8px 12px; font-weight:700; color:#e2e8f0;">${r.client}</td>
+                        <td ${tdL} style="padding:8px 12px; color:#64748b; font-size:11px;">${r.agent}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.sales > 0 ? fmt(r.sales) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#93c5fd;">${r.cash > 0 ? fmt(r.cash) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fcd34d;">${r.cheque > 0 ? fmt(r.cheque) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#7dd3fc;">${r.online > 0 ? fmt(r.online) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${r.totalPaid > 0 ? fmt(r.totalPaid) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:${balColor}; font-weight:700;">${balText}</td>
+                      </tr>`;
+                    }).join('')}
+                    ${(() => {
+                      const ts = clientRows.reduce((s, r) => s + r.sales, 0);
+                      const tc = clientRows.reduce((s, r) => s + r.cash, 0);
+                      const tch = clientRows.reduce((s, r) => s + r.cheque, 0);
+                      const to = clientRows.reduce((s, r) => s + r.online, 0);
+                      const tp = tc + tch + to;
+                      return `<tr style="background:#1e293b; border-top:2px solid #475569;">
+                        <td colspan="2" ${tdL} style="padding:10px 12px; font-weight:900; color:#f59e0b; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
+                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(ts)}</td>
+                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#93c5fd; font-weight:900;">${fmt(tc)}</td>
+                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fcd34d; font-weight:900;">${fmt(tch)}</td>
+                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#7dd3fc; font-weight:900;">${fmt(to)}</td>
+                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(tp)}</td>
+                        <td></td>
+                      </tr>`;
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+
+            </div>
+          `;
+        } // end branch loop
+
+        emailHtml += `
+          <p style="text-align:center; color:#475569; font-size:12px; margin-top:32px;">
+            Generated by EconoPOS • Monthly Report • ${monthLabel}
+          </p>
+        </div>`;
+
+        const emailList = org.owner_email.split(',').map((e: string) => e.trim()).filter(Boolean);
+        if (emailList.length > 0) {
+          try {
+            await resend.emails.send({
+              from: 'Econo Drugstore <stock@alerts.econo-pos.com>',
+              to: emailList,
+              subject: `📆 Monthly Report — ${monthLabel} | ${org.name}`,
+              html: emailHtml,
+            });
+            console.log(`✅ Monthly email sent to ${org.owner_email} (${org.name})`);
+          } catch (err) {
+            console.error(`❌ Monthly email failed for ${org.name}:`, err);
+          }
+        }
+      } // end org loop
+
+      return NextResponse.json({
+        success: true,
+        message: `Monthly email reports sent for ${monthLabel}`,
+      });
+    }
+
     return NextResponse.json({ success: true });
   } catch (err: any) {
     console.error('Telegram Report Error:', err);
