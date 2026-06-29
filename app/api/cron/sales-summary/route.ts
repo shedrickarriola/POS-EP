@@ -149,7 +149,8 @@ export async function GET(request: Request) {
       orgGroups[org.id].branches.push(b);
     });
 
-    // 4. MESSAGE LOOP (unchanged)
+    // 4. MESSAGE LOOP (Telegram only — skip for email-only types)
+    if (type !== 'DAILY_EMAIL' && type !== 'WEEKLY_EMAIL') {
     for (const group of Object.values(orgGroups) as any[]) {
       let message = '';
       if (type === 'STOCK_ADVISORY') {
@@ -521,18 +522,9 @@ export async function GET(request: Request) {
             parse_mode: 'HTML',
           }),
         });
-      }
-
-      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: group.chatId,
-          text: message,
-          parse_mode: 'HTML',
-        }),
-      });
-    }
+      } // end else (regular reports)
+    } // end for loop
+    } // end Telegram-only type guard
 
     // ==================== DAILY EMAIL REPORT (8PM) - ONLY OFFICE BRANCHES ====================
     if (type === 'DAILY_EMAIL') {
