@@ -1801,11 +1801,6 @@ export async function GET(request: Request) {
           const monthActualCash = monthCashTotal - totalExpenses;
 
           // ── Purchase Orders ──
-          const poRows = (purchaseOrdersData || []).sort((a: any, b: any) => {
-            if (a.created_date_pht !== b.created_date_pht)
-              return a.created_date_pht.localeCompare(b.created_date_pht);
-            return (a.supplier_name || '').localeCompare(b.supplier_name || '');
-          });
           const poTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.total_amount || 0), 0);
           const poGenTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.generic_amt || 0), 0);
           const poBrdTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.branded_amt || 0), 0);
