@@ -546,7 +546,7 @@ export async function GET(request: Request) {
           .select('*')
           .eq('org_id', org.id)
           .eq('is_office_use', true)
-          .or('test_env.is.null,test_env.eq.false');
+          .not('test_env', 'eq', true);
 
         if (!branches || branches.length === 0) {
           console.log(`⏭️ ${org.name} has no office branches`);
@@ -666,7 +666,7 @@ export async function GET(request: Request) {
           .select('*')
           .eq('org_id', org.id)
           .eq('is_office_use', true)
-          .or('test_env.is.null,test_env.eq.false');
+          .not('test_env', 'eq', true);
 
         if (!officeBranches || officeBranches.length === 0) {
           console.log(
