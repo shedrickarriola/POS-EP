@@ -541,12 +541,15 @@ export async function GET(request: Request) {
         if (!org.owner_email) continue;
 
         // ONLY office branches, exclude test environments
-        const { data: branches } = await supabaseAdmin
+        const { data: branchesRaw } = await supabaseAdmin
           .from('branches')
           .select('*')
           .eq('org_id', org.id)
-          .eq('is_office_use', true)
-          .not('test_env', 'eq', true);
+          .eq('is_office_use', true);
+
+        const branches = (branchesRaw || []).filter(
+          (b: any) => b.test_env !== true
+        );
 
         if (!branches || branches.length === 0) {
           console.log(`⏭️ ${org.name} has no office branches`);
@@ -660,13 +663,16 @@ export async function GET(request: Request) {
       for (const org of weeklyOrgs || []) {
         if (!org.owner_email) continue;
 
-        // Only office branches
-        const { data: officeBranches } = await supabaseAdmin
+        // Only office branches, exclude test environments
+        const { data: officeBranchesRaw } = await supabaseAdmin
           .from('branches')
           .select('*')
           .eq('org_id', org.id)
-          .eq('is_office_use', true)
-          .not('test_env', 'eq', true);
+          .eq('is_office_use', true);
+
+        const officeBranches = (officeBranchesRaw || []).filter(
+          (b: any) => b.test_env !== true
+        );
 
         if (!officeBranches || officeBranches.length === 0) {
           console.log(
