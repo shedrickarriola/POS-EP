@@ -1176,6 +1176,7 @@ export async function GET(request: Request) {
       }
 
       return NextResponse.json({ success: true, message: 'Daily email sent' });
+    }
 
     // ==================== WEEKLY EMAIL REPORT (8:30PM SAT) - OFFICE BRANCHES ====================
     if (type === 'WEEKLY_EMAIL') {
