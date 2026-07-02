@@ -553,11 +553,15 @@ export async function GET(request: Request) {
           continue;
         }
 
-        const { data: officeBranches } = await supabaseAdmin
+        const { data: officeBranchesRaw } = await supabaseAdmin
           .from('branches')
           .select('*')
           .eq('org_id', org.id)
           .eq('is_office_use', true);
+
+        const officeBranches = (officeBranchesRaw || []).filter(
+          (b: any) => b.test_env !== true
+        );
 
         if (!officeBranches || officeBranches.length === 0) continue;
 
