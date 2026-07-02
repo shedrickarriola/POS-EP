@@ -618,14 +618,16 @@ export async function GET(request: Request) {
         emailHtml += `</div>`;
 
         // Send email
-        await resend.emails.send({
-          from: 'Econo Drugstore <stock@alerts.econo-pos.com>',
-          to: org.owner_email,
-          subject: `📊 Daily Report - ${yesterdayStr} | ${org.name} (Office)`,
-          html: emailHtml,
-        });
-
-        console.log(`✅ Daily email sent to ${org.owner_email}`);
+        const dailyEmailList = org.owner_email.split(',').map((e: string) => e.trim()).filter(Boolean);
+        if (dailyEmailList.length > 0) {
+          await resend.emails.send({
+            from: 'Econo Drugstore <stock@alerts.econo-pos.com>',
+            to: dailyEmailList,
+            subject: `📊 Daily Report - ${yesterdayStr} | ${org.name} (Office)`,
+            html: emailHtml,
+          });
+          console.log(`✅ Daily email sent to ${org.owner_email}`);
+        }
       }
 
       return NextResponse.json({
@@ -739,7 +741,7 @@ export async function GET(request: Request) {
 
             supabaseAdmin
               .from('purchase_orders')
-              .select('id, supplier_name, po_number, invoice_id, total_amount, generic_amt, branded_amt, created_date_pht, status, is_checked, notes, created_by, profiles!purchase_orders_created_by_fkey(full_name)')
+              .select('id, supplier_name, po_number, invoice_id, total_amount, generic_amt, branded_amt, created_date_pht, status, is_checked, notes, created_by')
               .eq('branch_id', b.id)
               .in('created_date_pht', weekDates)
               .order('created_date_pht', { ascending: true }),
@@ -866,12 +868,25 @@ export async function GET(request: Request) {
           const poGenTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.generic_amt || 0), 0);
           const poBrdTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.branded_amt || 0), 0);
 
+          // Resolve created_by UUIDs to full names
+          const poUserIds = [...new Set((purchaseOrdersData || []).map((p: any) => p.created_by).filter(Boolean))];
+          const poUserNameMap: Record<string, string> = {};
+          if (poUserIds.length > 0) {
+            const { data: poProfiles } = await supabaseAdmin
+              .from('profiles')
+              .select('id, full_name')
+              .in('id', poUserIds);
+            (poProfiles || []).forEach((pr: any) => {
+              if (pr.id && pr.full_name) poUserNameMap[pr.id] = pr.full_name.trim();
+            });
+          }
+
           // Group POs by supplier, sorted by total desc
           const poBySupplier = new Map<string, { generic: number; branded: number; total: number; count: number; allChecked: boolean; hasReceived: boolean; inputBy: Set<string> }>();
           (purchaseOrdersData || []).forEach((p: any) => {
             const supplier = p.supplier_name || 'UNKNOWN';
             const ex = poBySupplier.get(supplier) || { generic: 0, branded: 0, total: 0, count: 0, allChecked: true, hasReceived: false, inputBy: new Set<string>() };
-            const inputName = (p.profiles as any)?.full_name?.trim() || p.created_by || 'UNKNOWN';
+            const inputName = poUserNameMap[p.created_by] || p.created_by || 'UNKNOWN';
             ex.inputBy.add(inputName);
             poBySupplier.set(supplier, {
               generic: ex.generic + Number(p.generic_amt || 0),
@@ -1739,7 +1754,7 @@ export async function GET(request: Request) {
 
             supabaseAdmin
               .from('purchase_orders')
-              .select('id, supplier_name, po_number, invoice_id, total_amount, generic_amt, branded_amt, created_date_pht, status, is_checked, notes, created_by, profiles!purchase_orders_created_by_fkey(full_name)')
+              .select('id, supplier_name, po_number, invoice_id, total_amount, generic_amt, branded_amt, created_date_pht, status, is_checked, notes, created_by')
               .eq('branch_id', b.id)
               .in('created_date_pht', monthDates)
               .order('created_date_pht', { ascending: true }),
@@ -1813,12 +1828,25 @@ export async function GET(request: Request) {
           const poGenTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.generic_amt || 0), 0);
           const poBrdTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.branded_amt || 0), 0);
 
+          // Resolve created_by UUIDs to full names
+          const poUserIds = [...new Set((purchaseOrdersData || []).map((p: any) => p.created_by).filter(Boolean))];
+          const poUserNameMap: Record<string, string> = {};
+          if (poUserIds.length > 0) {
+            const { data: poProfiles } = await supabaseAdmin
+              .from('profiles')
+              .select('id, full_name')
+              .in('id', poUserIds);
+            (poProfiles || []).forEach((pr: any) => {
+              if (pr.id && pr.full_name) poUserNameMap[pr.id] = pr.full_name.trim();
+            });
+          }
+
           // Group POs by supplier, sorted by total desc
           const poBySupplier = new Map<string, { generic: number; branded: number; total: number; count: number; allChecked: boolean; hasReceived: boolean; inputBy: Set<string> }>();
           (purchaseOrdersData || []).forEach((p: any) => {
             const supplier = p.supplier_name || 'UNKNOWN';
             const ex = poBySupplier.get(supplier) || { generic: 0, branded: 0, total: 0, count: 0, allChecked: true, hasReceived: false, inputBy: new Set<string>() };
-            const inputName = (p.profiles as any)?.full_name?.trim() || p.created_by || 'UNKNOWN';
+            const inputName = poUserNameMap[p.created_by] || p.created_by || 'UNKNOWN';
             ex.inputBy.add(inputName);
             poBySupplier.set(supplier, {
               generic: ex.generic + Number(p.generic_amt || 0),
