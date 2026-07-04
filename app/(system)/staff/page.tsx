@@ -131,6 +131,12 @@ export default function StaffDashboard() {
   const [showDayReverseModal, setShowDayReverseModal] = useState(false);
   const [dayPaymentsList, setDayPaymentsList] = useState<any[]>([]);
   const [selectedDayPayment, setSelectedDayPayment] = useState<any>(null);
+  const [isChangingPaymentMethod, setIsChangingPaymentMethod] = useState(false);
+  const [pendingPaymentMethod, setPendingPaymentMethod] = useState<
+    'CASH' | 'CHEQUE' | 'ONLINE' | null
+  >(null);
+  const [pendingChequeDate, setPendingChequeDate] = useState<string>('');
+  const [pendingPaymentNotes, setPendingPaymentNotes] = useState<string>('');
 
   const [isSubmittingPayment, setIsSubmittingPayment] = useState(false);
   // === UPDATE CLIENTS MODAL ===
@@ -1962,6 +1968,7 @@ export default function StaffDashboard() {
           id,
           amount,
           payment_method,
+          cheque_date,
           pr_number,
           customer_name,
           notes,
@@ -1984,6 +1991,10 @@ export default function StaffDashboard() {
 
       setDayPaymentsList(payments || []);
       setSelectedDayPayment(null);
+      setIsChangingPaymentMethod(false);
+      setPendingPaymentMethod(null);
+      setPendingChequeDate('');
+      setPendingPaymentNotes('');
       setShowDayReverseModal(true);
     } catch (err: any) {
       triggerToast("Failed to load today's payments: " + err.message, 'error');
@@ -2069,6 +2080,77 @@ export default function StaffDashboard() {
     } catch (err: any) {
       console.error('Reverse payment error:', err);
       triggerToast('Failed to reverse: ' + err.message, 'error');
+    }
+  };
+
+  // === CHANGE PAYMENT METHOD (for a payment selected in the Reverse modal) ===
+  const handleChangePaymentMethod = async () => {
+    if (!selectedDayPayment || !pendingPaymentMethod) return;
+
+    // Same rule as standalone + collection payments: ONLINE needs a reference
+    if (
+      pendingPaymentMethod === 'ONLINE' &&
+      (!pendingPaymentNotes || pendingPaymentNotes.trim() === '')
+    ) {
+      triggerToast(
+        'Reference number / Notes is REQUIRED for ONLINE payments',
+        'error'
+      );
+      return;
+    }
+
+    const noChange =
+      pendingPaymentMethod === selectedDayPayment.payment_method &&
+      (pendingPaymentMethod !== 'CHEQUE' ||
+        pendingChequeDate === (selectedDayPayment.cheque_date || '')) &&
+      (pendingPaymentMethod !== 'ONLINE' ||
+        pendingPaymentNotes === (selectedDayPayment.notes || ''));
+    if (noChange) {
+      setIsChangingPaymentMethod(false);
+      return;
+    }
+
+    try {
+      const updatePayload: any = { payment_method: pendingPaymentMethod };
+      if (pendingPaymentMethod === 'CHEQUE') {
+        updatePayload.cheque_date = pendingChequeDate || null;
+      }
+      if (pendingPaymentMethod === 'ONLINE') {
+        updatePayload.notes = pendingPaymentNotes.trim();
+      }
+
+      const { error } = await supabase
+        .from('daily_payments')
+        .update(updatePayload)
+        .eq('id', selectedDayPayment.id);
+      if (error) throw error;
+
+      // Reflect the change in the list + current selection immediately
+      setDayPaymentsList((prev: any[]) =>
+        prev.map((p: any) =>
+          p.id === selectedDayPayment.id ? { ...p, ...updatePayload } : p
+        )
+      );
+      setSelectedDayPayment((prev: any) =>
+        prev ? { ...prev, ...updatePayload } : prev
+      );
+      setIsChangingPaymentMethod(false);
+
+      triggerToast(
+        `✅ Payment method changed to ${pendingPaymentMethod}`,
+        'success'
+      );
+
+      // Refresh views that depend on payment_method (cash/cheque totals, etc.)
+      if (selectedBranch?.is_office_use) {
+        await fetchOfficeOrders(selectedBranch.id);
+      }
+      if (selectedDay?.dateStr) {
+        await fetchDayDetails(selectedDay.dateStr);
+      }
+    } catch (err: any) {
+      console.error('Change payment method error:', err);
+      triggerToast('Failed to change payment method: ' + err.message, 'error');
     }
   };
 
@@ -9147,6 +9229,7 @@ export default function StaffDashboard() {
                     setShowDayReverseModal(false);
                     setDayPaymentsList([]);
                     setSelectedDayPayment(null);
+                    setIsChangingPaymentMethod(false);
                   }}
                   className="text-slate-400 hover:text-white"
                 >
@@ -9168,7 +9251,10 @@ export default function StaffDashboard() {
                   dayPaymentsList.map((payment) => (
                     <div
                       key={payment.id}
-                      onClick={() => setSelectedDayPayment(payment)}
+                      onClick={() => {
+                        setSelectedDayPayment(payment);
+                        setIsChangingPaymentMethod(false);
+                      }}
                       className={`p-4 rounded-2xl border cursor-pointer transition-all ${
                         selectedDayPayment?.id === payment.id
                           ? 'bg-red-500/10 border-red-500'
@@ -9211,16 +9297,105 @@ export default function StaffDashboard() {
                 )}
               </div>
 
+              {isChangingPaymentMethod && selectedDayPayment && (
+                <div className="mb-4 p-4 bg-slate-950 border border-amber-500/30 rounded-2xl">
+                  <label className="text-xs font-black text-amber-400 mb-2 block">
+                    CHANGE PAYMENT METHOD (current:{' '}
+                    {selectedDayPayment.payment_method})
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(['CASH', 'CHEQUE', 'ONLINE'] as const).map((method) => (
+                      <button
+                        key={method}
+                        onClick={() => setPendingPaymentMethod(method)}
+                        className={`py-3 rounded-xl font-bold text-sm ${
+                          pendingPaymentMethod === method
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+                        }`}
+                      >
+                        {method}
+                      </button>
+                    ))}
+                  </div>
+
+                  {pendingPaymentMethod === 'CHEQUE' && (
+                    <div className="mt-3">
+                      <label className="text-xs font-black text-slate-400 mb-2 block">
+                        CHEQUE DATE
+                      </label>
+                      <input
+                        type="date"
+                        value={pendingChequeDate}
+                        onChange={(e) => setPendingChequeDate(e.target.value)}
+                        className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-amber-400/50"
+                      />
+                    </div>
+                  )}
+
+                  {pendingPaymentMethod === 'ONLINE' && (
+                    <div className="mt-3">
+                      <label className="text-xs font-black text-slate-400 mb-2 block">
+                        REFERENCE NUMBER / NOTES{' '}
+                        <span className="text-red-400">*required</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={pendingPaymentNotes}
+                        onChange={(e) => setPendingPaymentNotes(e.target.value)}
+                        placeholder="Enter reference number or notes"
+                        className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-amber-400/50"
+                      />
+                    </div>
+                  )}
+
+                  <div className="flex gap-2 mt-4">
+                    <button
+                      onClick={() => setIsChangingPaymentMethod(false)}
+                      className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-black rounded-xl"
+                    >
+                      CANCEL
+                    </button>
+                    <button
+                      onClick={handleChangePaymentMethod}
+                      className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black rounded-xl"
+                    >
+                      CONFIRM CHANGE
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="flex gap-3 pt-4 border-t border-white/10">
                 <button
                   onClick={() => {
                     setShowDayReverseModal(false);
                     setDayPaymentsList([]);
                     setSelectedDayPayment(null);
+                    setIsChangingPaymentMethod(false);
                   }}
                   className="flex-1 py-4 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-2xl"
                 >
                   CANCEL
+                </button>
+                <button
+                  onClick={() => {
+                    const next = !isChangingPaymentMethod;
+                    if (next && selectedDayPayment) {
+                      setPendingPaymentMethod(
+                        selectedDayPayment.payment_method
+                      );
+                      setPendingChequeDate(
+                        selectedDayPayment.cheque_date || ''
+                      );
+                      setPendingPaymentNotes(selectedDayPayment.notes || '');
+                    }
+                    setIsChangingPaymentMethod(next);
+                  }}
+                  disabled={!selectedDayPayment}
+                  className="flex-1 py-4 bg-amber-500 hover:bg-amber-400 disabled:bg-slate-700 disabled:text-slate-500 text-white font-black rounded-2xl"
+                >
+                  {isChangingPaymentMethod ? 'CLOSE' : 'CHANGE METHOD'}
                 </button>
                 <button
                   onClick={handleReverseDayPayment}
