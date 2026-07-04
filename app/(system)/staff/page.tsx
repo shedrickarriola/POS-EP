@@ -3996,7 +3996,13 @@ export default function StaffDashboard() {
                         !deliveryFilter.agent ||
                         (order.agent || 'MAIN OFFICE').toLowerCase() ===
                           deliveryFilter.agent.toLowerCase();
-                      return matchesDate && matchesClient && matchesAgent;
+                      const hasAmount = Number(order.total_amount) !== 0;
+                      return (
+                        matchesDate &&
+                        matchesClient &&
+                        matchesAgent &&
+                        hasAmount
+                      );
                     })
                     .map((order: any) => (
                       <div
