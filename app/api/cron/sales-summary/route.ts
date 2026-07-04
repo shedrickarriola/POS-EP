@@ -1401,7 +1401,7 @@ export async function GET(request: Request) {
           branch: any;
           gen: number; brd: number; disc: number; totalSales: number;
           totalExp: number; actual: number; quota: number;
-          poTotal: number;
+          poTotal: number; poBrd: number;
           poBySupplier: Map<string, { generic: number; branded: number; total: number; count: number }>;
           users: string[];
           paRows: Array<{ pa: string; total: number; orders: number; pct: number }>;
@@ -1433,6 +1433,7 @@ export async function GET(request: Request) {
             .in('created_date_pht', weekDates);
 
           const poTotal = (posData || []).reduce((s: number, p: any) => s + Number(p.total_amount || 0), 0);
+          const poBrd = (posData || []).reduce((s: number, p: any) => s + Number(p.branded_amt || 0), 0);
 
           // Group POs by supplier
           const poBySupplier = new Map<string, { generic: number; branded: number; total: number; count: number }>();
@@ -1473,7 +1474,7 @@ export async function GET(request: Request) {
             .map(([pa, v]) => ({ pa, total: v.total, orders: v.orders, pct: branchSalesTotal > 0 ? (v.total / branchSalesTotal) * 100 : 0 }))
             .sort((a, b) => b.total - a.total);
 
-          branchDataList.push({ branch: b, gen, brd, disc, totalSales, totalExp, actual, quota, poTotal, poBySupplier, users: uniqueUsers, paRows });
+          branchDataList.push({ branch: b, gen, brd, disc, totalSales, totalExp, actual, quota, poTotal, poBrd, poBySupplier, users: uniqueUsers, paRows });
         } // end per-branch loop
 
         // ── Grand totals ──
@@ -1485,7 +1486,9 @@ export async function GET(request: Request) {
         const grandActual = branchDataList.reduce((s, d) => s + d.actual, 0);
         const grandQuota = branchDataList.reduce((s, d) => s + d.quota, 0);
         const grandPO = branchDataList.reduce((s, d) => s + d.poTotal, 0);
+        const grandPoBrd = branchDataList.reduce((s, d) => s + d.poBrd, 0);
         const grandNet = grandActual - grandPO;
+        const grandNetNoBrd = grandActual - grandPoBrd;
         const grandGenNet = grandGen - grandDisc;
         const grandPct = grandQuota > 0 ? (grandGenNet / grandQuota) * 100 : 0;
 
@@ -1532,6 +1535,11 @@ export async function GET(request: Request) {
                     <div style="font-size:22px;font-weight:900;color:${grandNet >= 0 ? '#14532d' : '#991b1b'};font-family:monospace;">${fmt(grandNet)}</div>
                     <div style="font-size:10px;color:#64748b;margin-top:4px;">Cash − Stock Spending</div>
                   </div>
+                  <div style="flex:1;min-width:140px;background:#eff6ff;border:2px solid #93c5fd;border-radius:10px;padding:16px;text-align:center;">
+                    <div style="font-size:10px;font-weight:700;color:#2563eb;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">💊 Net (w/o Generic)</div>
+                    <div style="font-size:22px;font-weight:900;color:${grandNetNoBrd >= 0 ? '#1d4ed8' : '#991b1b'};font-family:monospace;">${fmt(grandNetNoBrd)}</div>
+                    <div style="font-size:10px;color:#64748b;margin-top:4px;">Actual − Branded POs</div>
+                  </div>
                 </div>
                 <!-- per-branch cash vs PO breakdown -->
                 <div style="overflow-x:auto;border-radius:10px;border:1px solid #e2e8f0;">
@@ -1542,17 +1550,22 @@ export async function GET(request: Request) {
                         <th style="padding:9px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;background:#064e3b;color:#34d399;">Actual Cash</th>
                         <th style="padding:9px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Purchase Orders</th>
                         <th style="padding:9px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Net</th>
+                        <th style="padding:9px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;background:#1e3a5f;color:#93c5fd;">Branded POs</th>
+                        <th style="padding:9px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;background:#1e3a5f;color:#93c5fd;">Net (w/o Generic)</th>
                       </tr>
                     </thead>
                     <tbody>
                       ${branchDataList.map((d, i) => {
                         const net = d.actual - d.poTotal;
+                        const netNoBrd = d.actual - d.poBrd;
                         const rowBg = i % 2 === 0 ? '#ffffff' : '#f8fafc';
                         return `<tr style="background:${rowBg};border-bottom:1px solid #f1f5f9;">
                           <td style="padding:9px 12px;font-weight:700;color:#1e293b;">${d.branch.branch_name}</td>
                           <td style="padding:9px 12px;text-align:right;font-family:monospace;font-weight:800;color:#16a34a;background:#f0fdf4;">${fmt(d.actual)}</td>
                           <td style="padding:9px 12px;text-align:right;font-family:monospace;color:#dc2626;">${d.poTotal > 0 ? fmt(d.poTotal) : '—'}</td>
                           <td style="padding:9px 12px;text-align:right;font-family:monospace;font-weight:700;color:${net >= 0 ? '#16a34a' : '#dc2626'};">${fmt(net)}</td>
+                          <td style="padding:9px 12px;text-align:right;font-family:monospace;color:#93c5fd;">${d.poBrd > 0 ? fmt(d.poBrd) : '—'}</td>
+                          <td style="padding:9px 12px;text-align:right;font-family:monospace;font-weight:800;color:${netNoBrd >= 0 ? '#60a5fa' : '#dc2626'};background:#eff6ff;">${fmt(netNoBrd)}</td>
                         </tr>`;
                       }).join('')}
                       <tr style="background:#1e293b;">
@@ -1560,6 +1573,8 @@ export async function GET(request: Request) {
                         <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:900;color:#34d399;background:#064e3b;">${fmt(grandActual)}</td>
                         <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:800;color:#fca5a5;">${grandPO > 0 ? fmt(grandPO) : '—'}</td>
                         <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:900;color:${grandNet >= 0 ? '#34d399' : '#fca5a5'};">${fmt(grandNet)}</td>
+                        <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:800;color:#93c5fd;">${grandPoBrd > 0 ? fmt(grandPoBrd) : '—'}</td>
+                        <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:900;color:${grandNetNoBrd >= 0 ? '#60a5fa' : '#fca5a5'};background:#1e3a5f;">${fmt(grandNetNoBrd)}</td>
                       </tr>
                     </tbody>
                   </table>
@@ -1698,39 +1713,39 @@ export async function GET(request: Request) {
                       </tr>
                     </thead>
                     <tbody>
-                      \${branchDataList.map((d) => {
-                        if (!d.paRows || d.paRows.length === 0) return \`
+                      ${branchDataList.map((d) => {
+                        if (!d.paRows || d.paRows.length === 0) return `
                           <tr style="background:#faf5ff;border-bottom:1px solid #e9d5ff;">
-                            <td style="padding:9px 12px;font-weight:700;color:#1e293b;">\${d.branch.branch_name}</td>
+                            <td style="padding:9px 12px;font-weight:700;color:#1e293b;">${d.branch.branch_name}</td>
                             <td colspan="5" style="padding:9px 12px;color:#94a3b8;font-style:italic;">No orders recorded</td>
-                          </tr>\`;
+                          </tr>`;
                         return d.paRows.map((r, i) => {
                           const barPct = Math.min(r.pct, 100);
-                          const rankEmoji = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : \`#\${i + 1}\`;
+                          const rankEmoji = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `#${i + 1}`;
                           const rowBg = i % 2 === 0 ? '#faf5ff' : '#ffffff';
-                          return \`<tr style="background:\${rowBg};border-bottom:1px solid #e9d5ff;">
-                            <td style="padding:9px 12px;font-weight:\${i === 0 ? '700' : '400'};color:\${i === 0 ? '#1e293b' : '#94a3b8'};">\${i === 0 ? d.branch.branch_name : ''}</td>
-                            <td style="padding:9px 12px;font-weight:600;color:#111827;">\${r.pa}</td>
-                            <td style="padding:9px 12px;text-align:center;color:#64748b;">\${r.orders}</td>
-                            <td style="padding:9px 12px;text-align:right;font-family:monospace;font-weight:700;color:#7c3aed;">\${fmt(r.total)}</td>
+                          return `<tr style="background:${rowBg};border-bottom:1px solid #e9d5ff;">
+                            <td style="padding:9px 12px;font-weight:${i === 0 ? '700' : '400'};color:${i === 0 ? '#1e293b' : '#94a3b8'};">${i === 0 ? d.branch.branch_name : ''}</td>
+                            <td style="padding:9px 12px;font-weight:600;color:#111827;">${r.pa}</td>
+                            <td style="padding:9px 12px;text-align:center;color:#64748b;">${r.orders}</td>
+                            <td style="padding:9px 12px;text-align:right;font-family:monospace;font-weight:700;color:#7c3aed;">${fmt(r.total)}</td>
                             <td style="padding:9px 12px;text-align:center;">
                               <div style="display:flex;align-items:center;gap:6px;">
                                 <div style="flex:1;background:#ede9fe;border-radius:99px;height:6px;min-width:60px;">
-                                  <div style="background:#7c3aed;height:6px;border-radius:99px;width:\${barPct}%;"></div>
+                                  <div style="background:#7c3aed;height:6px;border-radius:99px;width:${barPct}%;"></div>
                                 </div>
-                                <span style="font-weight:700;color:#7c3aed;font-size:11px;white-space:nowrap;">\${r.pct.toFixed(1)}%</span>
+                                <span style="font-weight:700;color:#7c3aed;font-size:11px;white-space:nowrap;">${r.pct.toFixed(1)}%</span>
                               </div>
                             </td>
-                            <td style="padding:9px 12px;text-align:center;font-size:14px;">\${rankEmoji}</td>
-                          </tr>\`;
-                        }).join('') + \`
+                            <td style="padding:9px 12px;text-align:center;font-size:14px;">${rankEmoji}</td>
+                          </tr>`;
+                        }).join('') + `
                           <tr style="background:#ede9fe;border-bottom:2px solid #c4b5fd;">
-                            <td style="padding:8px 12px;font-weight:800;color:#6d28d9;font-size:10px;text-transform:uppercase;" colspan="2">\${d.branch.branch_name} — Branch Total</td>
-                            <td style="padding:8px 12px;text-align:center;font-weight:700;color:#6d28d9;">\${d.paRows.reduce((s, r) => s + r.orders, 0)}</td>
-                            <td style="padding:8px 12px;text-align:right;font-family:monospace;font-weight:800;color:#6d28d9;">\${fmt(d.paRows.reduce((s, r) => s + r.total, 0))}</td>
+                            <td style="padding:8px 12px;font-weight:800;color:#6d28d9;font-size:10px;text-transform:uppercase;" colspan="2">${d.branch.branch_name} — Branch Total</td>
+                            <td style="padding:8px 12px;text-align:center;font-weight:700;color:#6d28d9;">${d.paRows.reduce((s, r) => s + r.orders, 0)}</td>
+                            <td style="padding:8px 12px;text-align:right;font-family:monospace;font-weight:800;color:#6d28d9;">${fmt(d.paRows.reduce((s, r) => s + r.total, 0))}</td>
                             <td style="padding:8px 12px;text-align:center;font-weight:700;color:#6d28d9;">100%</td>
                             <td></td>
-                          </tr>\`;
+                          </tr>`;
                       }).join('')}
                     </tbody>
                   </table>
