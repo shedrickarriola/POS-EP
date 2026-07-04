@@ -1456,16 +1456,29 @@ export async function GET(request: Request) {
 
           const quota = Number(b.daily_generic_quota || 0) * 7; // weekly quota = daily * 7 (open 7 days)
 
-          // PA performance — group orders by agent for the week
+          // PA performance — group orders by created_by UUID, then resolve to full_name from profiles
           const { data: weekOrders } = await supabaseAdmin
             .from('orders')
-            .select('agent, total_amount')
+            .select('created_by, total_amount')
             .eq('branch_id', b.id)
             .in('created_date_pht', weekDates);
 
+          // Collect unique created_by UUIDs and resolve to names
+          const paUserIds = [...new Set((weekOrders || []).map((o: any) => o.created_by).filter(Boolean))];
+          const paNameMap = new Map<string, string>();
+          if (paUserIds.length > 0) {
+            const { data: paProfiles } = await supabaseAdmin
+              .from('profiles')
+              .select('id, full_name')
+              .in('id', paUserIds);
+            (paProfiles || []).forEach((p: any) => {
+              if (p.id && p.full_name) paNameMap.set(p.id, p.full_name.trim());
+            });
+          }
+
           const paMap = new Map<string, { total: number; orders: number }>();
           (weekOrders || []).forEach((o: any) => {
-            const pa = (o.agent || 'UNASSIGNED').trim();
+            const pa = paNameMap.get(o.created_by) || o.created_by || 'UNASSIGNED';
             const ex = paMap.get(pa) || { total: 0, orders: 0 };
             paMap.set(pa, { total: ex.total + Number(o.total_amount || 0), orders: ex.orders + 1 });
           });
