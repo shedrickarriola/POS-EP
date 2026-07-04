@@ -1463,11 +1463,12 @@ export async function GET(request: Request) {
           const disc = (reports || []).reduce((s, r: any) => s + Number(r.discount_total || 0), 0);
           const totalSales = gen + brd - disc;
 
-          const { data: expensesW } = await supabaseAdmin
+          const { data: expensesW, error: expErr } = await supabaseAdmin
             .from('daily_expenses')
             .select('amount')
             .eq('branch_id', b.id)
             .in('report_date', weekDates);
+          console.log(`[${b.branch_name}] expenses:`, expensesW, 'error:', expErr);
           const totalExp = (expensesW || []).reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
           const actual = totalSales - totalExp;
 
@@ -1496,13 +1497,15 @@ export async function GET(request: Request) {
           // Unique users — query system_logs using created_at timestamp range for the whole week
           const weekStartUTC = new Date(weekDates[0] + 'T00:00:00+08:00');
           const weekEndUTC = new Date(weekDates[6] + 'T23:59:59+08:00');
-          const { data: weekLogs } = await supabaseAdmin
+          console.log(`[${b.branch_name}] logs range: ${weekStartUTC.toISOString()} to ${weekEndUTC.toISOString()}`);
+          const { data: weekLogs, error: logsErr } = await supabaseAdmin
             .from('system_logs')
             .select('user_name, user_email')
             .eq('branch_id', b.id)
             .eq('event_type', 'LOGIN')
             .gte('created_at', weekStartUTC.toISOString())
             .lte('created_at', weekEndUTC.toISOString());
+          console.log(`[${b.branch_name}] logs:`, weekLogs, 'error:', logsErr);
 
           const uniqueUsers = [...new Set((weekLogs || []).map((l: any) => (l.user_name || l.user_email || '').trim()).filter(Boolean))];
 
