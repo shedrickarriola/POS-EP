@@ -150,7 +150,7 @@ export async function GET(request: Request) {
     });
 
     // 4. MESSAGE LOOP (Telegram only — skip for email-only types)
-    if (type !== 'DAILY_EMAIL' && type !== 'WEEKLY_EMAIL' && type !== 'MONTHLY_EMAIL' && type !== 'DRUGSTORE_EMAIL') {
+    if (type !== 'DAILY_EMAIL' && type !== 'WEEKLY_EMAIL' && type !== 'MONTHLY_EMAIL' && type !== 'DRUGSTORE_EMAIL' && type !== 'DRUGSTORE_EMAIL_WEEKLY') {
     for (const group of Object.values(orgGroups) as any[]) {
       let message = '';
       if (type === 'STOCK_ADVISORY') {
@@ -1396,6 +1396,345 @@ export async function GET(request: Request) {
       } // end non-office org loop
 
       return NextResponse.json({ success: true, message: 'Drugstore daily email sent' });
+    }
+
+      return NextResponse.json({ success: true, message: 'Drugstore daily email sent' });
+    }
+
+    // ==================== DRUGSTORE WEEKLY EMAIL (11PM SAT PHT) - NON-OFFICE BRANCHES ====================
+    if (type === 'DRUGSTORE_EMAIL_WEEKLY') {
+      console.log('📧 Starting Drugstore Weekly Email (11PM SAT PHT) - Non-Office Branches');
+
+      const { data: orgsW } = await supabaseAdmin
+        .from('organizations')
+        .select('id, name, owner_email')
+        .not('owner_email', 'is', null);
+
+      // Week range: Sunday–Saturday ending today (PHT)
+      const todayW = new Date(todayPHT + 'T00:00:00+08:00');
+      const sunday = new Date(todayW);
+      sunday.setDate(todayW.getDate() - todayW.getDay());
+      const weekDates: string[] = [];
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(sunday);
+        d.setDate(sunday.getDate() + i);
+        weekDates.push(d.toISOString().split('T')[0]);
+      }
+      const weekStart = weekDates[0];
+      const weekEnd = weekDates[6];
+      const fmt = (n: number) => `₱${n.toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
+
+      for (const org of orgsW || []) {
+        if (!org.owner_email) continue;
+        const emailList = org.owner_email.split(',').map((e: string) => e.trim()).filter((e: string) => e.includes('@'));
+        if (emailList.length === 0) continue;
+
+        const { data: nonOfficeBranchesRaw } = await supabaseAdmin
+          .from('branches')
+          .select('*')
+          .eq('org_id', org.id)
+          .eq('is_office_use', false);
+
+        const nonOfficeBranches = (nonOfficeBranchesRaw || []).filter(
+          (b: any) => b.test_env !== true && b.is_office_use === false
+        );
+        if (!nonOfficeBranches || nonOfficeBranches.length === 0) continue;
+
+        // ── Per-branch data ──
+        // For TABLE 1 (cash vs PO) and TABLE 2 (branch summary) and TABLE 3 (PO per branch per supplier)
+        type BranchWeekData = {
+          branch: any;
+          gen: number; brd: number; disc: number; totalSales: number;
+          totalExp: number; actual: number; quota: number;
+          poTotal: number;
+          poBySupplier: Map<string, { generic: number; branded: number; total: number; count: number }>;
+          users: string[];
+        };
+
+        const branchDataList: BranchWeekData[] = [];
+
+        for (const b of nonOfficeBranches) {
+          // Daily reports for the week
+          const { data: reports } = await supabaseAdmin
+            .from('daily_reports')
+            .select('generic_sales, branded_sales, discount_total, expenses')
+            .eq('branch_id', b.id)
+            .in('report_date', weekDates);
+
+          const gen = (reports || []).reduce((s, r: any) => s + Number(r.generic_sales || 0), 0);
+          const brd = (reports || []).reduce((s, r: any) => s + Number(r.branded_sales || 0), 0);
+          const disc = (reports || []).reduce((s, r: any) => s + Number(r.discount_total || 0), 0);
+          const totalSales = gen + brd - disc;
+
+          const { data: expensesW } = await supabaseAdmin
+            .from('daily_expenses')
+            .select('amount')
+            .eq('branch_id', b.id)
+            .in('report_date', weekDates);
+          const totalExp = (expensesW || []).reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
+          const actual = totalSales - totalExp;
+
+          // Purchase orders for the week
+          const { data: posData } = await supabaseAdmin
+            .from('purchase_orders')
+            .select('supplier_name, total_amount, generic_amt, branded_amt, created_by')
+            .eq('branch_id', b.id)
+            .in('created_date_pht', weekDates);
+
+          const poTotal = (posData || []).reduce((s: number, p: any) => s + Number(p.total_amount || 0), 0);
+
+          // Group POs by supplier
+          const poBySupplier = new Map<string, { generic: number; branded: number; total: number; count: number }>();
+          (posData || []).forEach((p: any) => {
+            const sup = p.supplier_name || 'UNKNOWN';
+            const ex = poBySupplier.get(sup) || { generic: 0, branded: 0, total: 0, count: 0 };
+            poBySupplier.set(sup, {
+              generic: ex.generic + Number(p.generic_amt || 0),
+              branded: ex.branded + Number(p.branded_amt || 0),
+              total: ex.total + Number(p.total_amount || 0),
+              count: ex.count + 1,
+            });
+          });
+
+          // Unique users (system_logs logins for the week)
+          const { data: weekLogs } = await supabaseAdmin
+            .from('system_logs')
+            .select('user_name, user_email')
+            .eq('branch_id', b.id)
+            .eq('event_type', 'LOGIN')
+            .in('created_date_pht', weekDates);
+
+          const uniqueUsers = [...new Set((weekLogs || []).map((l: any) => l.user_name || l.user_email).filter(Boolean))];
+
+          const quota = Number(b.daily_generic_quota || 0) * 6; // weekly quota = daily * 6 working days
+
+          branchDataList.push({ branch: b, gen, brd, disc, totalSales, totalExp, actual, quota, poTotal, poBySupplier, users: uniqueUsers });
+        } // end per-branch loop
+
+        // ── Grand totals ──
+        const grandGen = branchDataList.reduce((s, d) => s + d.gen, 0);
+        const grandBrd = branchDataList.reduce((s, d) => s + d.brd, 0);
+        const grandDisc = branchDataList.reduce((s, d) => s + d.disc, 0);
+        const grandTotal = branchDataList.reduce((s, d) => s + d.totalSales, 0);
+        const grandExp = branchDataList.reduce((s, d) => s + d.totalExp, 0);
+        const grandActual = branchDataList.reduce((s, d) => s + d.actual, 0);
+        const grandQuota = branchDataList.reduce((s, d) => s + d.quota, 0);
+        const grandPO = branchDataList.reduce((s, d) => s + d.poTotal, 0);
+        const grandNet = grandActual - grandPO;
+        const grandGenNet = grandGen - grandDisc;
+        const grandPct = grandQuota > 0 ? (grandGenNet / grandQuota) * 100 : 0;
+
+        // ════════════════════════════════════
+        // BUILD EMAIL HTML
+        // ════════════════════════════════════
+        let html = `
+          <!DOCTYPE html>
+          <html lang="en">
+          <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+          <body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;">
+          <div style="max-width:1100px;margin:24px auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.10);">
+
+            <!-- HEADER -->
+            <div style="background:linear-gradient(135deg,#0f172a 0%,#1e293b 60%,#0f4c75 100%);padding:36px 32px 28px 32px;text-align:center;">
+              <div style="display:inline-block;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);border-radius:8px;padding:6px 18px;margin-bottom:16px;">
+                <span style="color:#94a3b8;font-size:11px;font-weight:700;letter-spacing:3px;text-transform:uppercase;">WEEKLY CONSOLIDATED REPORT</span>
+              </div>
+              <h1 style="margin:0 0 6px 0;color:#ffffff;font-size:26px;font-weight:800;">${org.name.toUpperCase()}</h1>
+              <p style="margin:0;color:#64748b;font-size:14px;">${weekStart} — ${weekEnd}</p>
+            </div>
+
+            <div style="padding:28px 32px;">
+
+              <!-- ══════ TABLE 1: CASH vs PURCHASE ORDERS ══════ -->
+              <div style="margin-bottom:32px;">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+                  <div style="width:4px;height:20px;background:#10b981;border-radius:2px;"></div>
+                  <span style="font-size:11px;font-weight:800;letter-spacing:3px;color:#64748b;text-transform:uppercase;">Cash vs Stock Spending</span>
+                </div>
+                <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
+                  <div style="flex:1;min-width:140px;background:#f0fdf4;border:2px solid #86efac;border-radius:10px;padding:16px;text-align:center;">
+                    <div style="font-size:10px;font-weight:700;color:#16a34a;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">💰 Actual Cash</div>
+                    <div style="font-size:22px;font-weight:900;color:#14532d;font-family:monospace;">${fmt(grandActual)}</div>
+                    <div style="font-size:10px;color:#64748b;margin-top:4px;">Total Sales − Expenses</div>
+                  </div>
+                  <div style="flex:1;min-width:140px;background:#fef2f2;border:2px solid #fca5a5;border-radius:10px;padding:16px;text-align:center;">
+                    <div style="font-size:10px;font-weight:700;color:#dc2626;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">📦 Purchase Orders</div>
+                    <div style="font-size:22px;font-weight:900;color:#991b1b;font-family:monospace;">${fmt(grandPO)}</div>
+                    <div style="font-size:10px;color:#64748b;margin-top:4px;">Total Stock Spending</div>
+                  </div>
+                  <div style="flex:1;min-width:140px;background:${grandNet >= 0 ? '#f0fdf4' : '#fef2f2'};border:2px solid ${grandNet >= 0 ? '#10b981' : '#ef4444'};border-radius:10px;padding:16px;text-align:center;">
+                    <div style="font-size:10px;font-weight:700;color:${grandNet >= 0 ? '#16a34a' : '#dc2626'};letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">📊 Net Position</div>
+                    <div style="font-size:22px;font-weight:900;color:${grandNet >= 0 ? '#14532d' : '#991b1b'};font-family:monospace;">${fmt(grandNet)}</div>
+                    <div style="font-size:10px;color:#64748b;margin-top:4px;">Cash − Stock Spending</div>
+                  </div>
+                </div>
+                <!-- per-branch cash vs PO breakdown -->
+                <div style="overflow-x:auto;border-radius:10px;border:1px solid #e2e8f0;">
+                  <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                    <thead>
+                      <tr style="background:#1e293b;color:#94a3b8;text-align:left;">
+                        <th style="padding:9px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Branch</th>
+                        <th style="padding:9px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;background:#064e3b;color:#34d399;">Actual Cash</th>
+                        <th style="padding:9px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Purchase Orders</th>
+                        <th style="padding:9px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Net</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${branchDataList.map((d, i) => {
+                        const net = d.actual - d.poTotal;
+                        const rowBg = i % 2 === 0 ? '#ffffff' : '#f8fafc';
+                        return `<tr style="background:${rowBg};border-bottom:1px solid #f1f5f9;">
+                          <td style="padding:9px 12px;font-weight:700;color:#1e293b;">${d.branch.branch_name}</td>
+                          <td style="padding:9px 12px;text-align:right;font-family:monospace;font-weight:800;color:#16a34a;background:#f0fdf4;">${fmt(d.actual)}</td>
+                          <td style="padding:9px 12px;text-align:right;font-family:monospace;color:#dc2626;">${d.poTotal > 0 ? fmt(d.poTotal) : '—'}</td>
+                          <td style="padding:9px 12px;text-align:right;font-family:monospace;font-weight:700;color:${net >= 0 ? '#16a34a' : '#dc2626'};">${fmt(net)}</td>
+                        </tr>`;
+                      }).join('')}
+                      <tr style="background:#1e293b;">
+                        <td style="padding:10px 12px;font-weight:900;color:#fff;font-size:11px;text-transform:uppercase;letter-spacing:1px;">TOTAL</td>
+                        <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:900;color:#34d399;background:#064e3b;">${fmt(grandActual)}</td>
+                        <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:800;color:#fca5a5;">${grandPO > 0 ? fmt(grandPO) : '—'}</td>
+                        <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:900;color:${grandNet >= 0 ? '#34d399' : '#fca5a5'};">${fmt(grandNet)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- ══════ TABLE 2: BRANCH WEEKLY SUMMARY ══════ -->
+              <div style="margin-bottom:32px;">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+                  <div style="width:4px;height:20px;background:#6366f1;border-radius:2px;"></div>
+                  <span style="font-size:11px;font-weight:800;letter-spacing:3px;color:#64748b;text-transform:uppercase;">Weekly Branch Summary</span>
+                </div>
+                <div style="overflow-x:auto;border-radius:10px;border:1px solid #e2e8f0;">
+                  <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:900px;">
+                    <thead>
+                      <tr style="background:#1e293b;color:#94a3b8;text-align:left;">
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Branch</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Generic</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Branded</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Discount</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Total Sales</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Expenses</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;background:#064e3b;color:#34d399;">Actual</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Generic Quota</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">Generic %</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Users</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${branchDataList.map((d, i) => {
+                        const genericNet = d.gen - d.disc;
+                        const pct = d.quota > 0 ? (genericNet / d.quota) * 100 : 0;
+                        const pctColor = pct >= 100 ? '#16a34a' : pct >= 75 ? '#d97706' : '#dc2626';
+                        const rowBg = i % 2 === 0 ? '#ffffff' : '#f8fafc';
+                        return `<tr style="background:${rowBg};border-bottom:1px solid #f1f5f9;">
+                          <td style="padding:10px 12px;font-weight:700;color:#1e293b;">${d.branch.branch_name}</td>
+                          <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#3b82f6;">${fmt(d.gen)}</td>
+                          <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#9333ea;">${fmt(d.brd)}</td>
+                          <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#e11d48;">${d.disc > 0 ? '- ' + fmt(d.disc) : '—'}</td>
+                          <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:700;color:#111827;">${fmt(d.totalSales)}</td>
+                          <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#dc2626;">${d.totalExp > 0 ? '- ' + fmt(d.totalExp) : '—'}</td>
+                          <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:900;color:#16a34a;background:#f0fdf4;">${fmt(d.actual)}</td>
+                          <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#64748b;">${d.quota > 0 ? fmt(d.quota) : '—'}</td>
+                          <td style="padding:10px 12px;text-align:center;font-weight:700;color:${d.quota > 0 ? pctColor : '#94a3b8'};">${d.quota > 0 ? pct.toFixed(1) + '%' : '—'}</td>
+                          <td style="padding:10px 12px;color:#374151;font-size:11px;">${d.users.length > 0 ? d.users.join(', ') : '—'}</td>
+                        </tr>`;
+                      }).join('')}
+                      <tr style="background:#1e293b;border-top:2px solid #475569;">
+                        <td style="padding:11px 12px;font-weight:900;color:#fff;font-size:11px;text-transform:uppercase;letter-spacing:1px;">TOTAL</td>
+                        <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#93c5fd;">${fmt(grandGen)}</td>
+                        <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#c4b5fd;">${fmt(grandBrd)}</td>
+                        <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#fca5a5;">${grandDisc > 0 ? '- ' + fmt(grandDisc) : '—'}</td>
+                        <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#fff;">${fmt(grandTotal)}</td>
+                        <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#fca5a5;">${grandExp > 0 ? '- ' + fmt(grandExp) : '—'}</td>
+                        <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:900;color:#34d399;background:#064e3b;">${fmt(grandActual)}</td>
+                        <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#94a3b8;">${grandQuota > 0 ? fmt(grandQuota) : '—'}</td>
+                        <td style="padding:11px 12px;text-align:center;font-weight:800;color:${grandQuota > 0 ? (grandPct >= 100 ? '#34d399' : grandPct >= 75 ? '#fcd34d' : '#fca5a5') : '#94a3b8'};">${grandQuota > 0 ? grandPct.toFixed(1) + '%' : '—'}</td>
+                        <td></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- ══════ TABLE 3: PURCHASE ORDERS PER BRANCH PER SUPPLIER ══════ -->
+              <div style="margin-bottom:16px;">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+                  <div style="width:4px;height:20px;background:#f97316;border-radius:2px;"></div>
+                  <span style="font-size:11px;font-weight:800;letter-spacing:3px;color:#64748b;text-transform:uppercase;">Purchase Orders by Branch & Supplier</span>
+                </div>
+                <div style="overflow-x:auto;border-radius:10px;border:1px solid #fed7aa;">
+                  <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                    <thead>
+                      <tr style="background:#1e293b;color:#94a3b8;text-align:left;">
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Branch</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Supplier</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;"># POs</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Generic</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Branded</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${branchDataList.map((d) => {
+                        if (d.poBySupplier.size === 0) return '';
+                        const suppliers = Array.from(d.poBySupplier.entries())
+                          .map(([sup, v]) => ({ sup, ...v }))
+                          .sort((a, b) => b.total - a.total);
+                        const branchPOTotal = suppliers.reduce((s, r) => s + r.total, 0);
+                        return suppliers.map((s, i) => `
+                          <tr style="background:${i % 2 === 0 ? '#fff7ed' : '#ffffff'};border-bottom:1px solid #fed7aa;">
+                            <td style="padding:9px 12px;font-weight:${i === 0 ? '700' : '400'};color:${i === 0 ? '#1e293b' : '#94a3b8'};">${i === 0 ? d.branch.branch_name : ''}</td>
+                            <td style="padding:9px 12px;font-weight:600;color:#111827;">${s.sup}</td>
+                            <td style="padding:9px 12px;text-align:center;color:#64748b;">${s.count}</td>
+                            <td style="padding:9px 12px;text-align:right;font-family:monospace;color:#3b82f6;">${s.generic > 0 ? fmt(s.generic) : '—'}</td>
+                            <td style="padding:9px 12px;text-align:right;font-family:monospace;color:#9333ea;">${s.branded > 0 ? fmt(s.branded) : '—'}</td>
+                            <td style="padding:9px 12px;text-align:right;font-family:monospace;font-weight:700;color:#f97316;">${fmt(s.total)}</td>
+                          </tr>
+                        `).join('') + `
+                          <tr style="background:#fff3e0;border-bottom:2px solid #fdba74;">
+                            <td style="padding:8px 12px;font-weight:800;color:#ea580c;font-size:10px;text-transform:uppercase;" colspan="2">${d.branch.branch_name} — Subtotal</td>
+                            <td style="padding:8px 12px;text-align:center;color:#64748b;font-weight:700;">${suppliers.reduce((s, r) => s + r.count, 0)}</td>
+                            <td style="padding:8px 12px;text-align:right;font-family:monospace;font-weight:700;color:#3b82f6;">${fmt(suppliers.reduce((s, r) => s + r.generic, 0))}</td>
+                            <td style="padding:8px 12px;text-align:right;font-family:monospace;font-weight:700;color:#9333ea;">${fmt(suppliers.reduce((s, r) => s + r.branded, 0))}</td>
+                            <td style="padding:8px 12px;text-align:right;font-family:monospace;font-weight:800;color:#ea580c;">${fmt(branchPOTotal)}</td>
+                          </tr>
+                        `;
+                      }).join('')}
+                      <tr style="background:#1e293b;">
+                        <td colspan="5" style="padding:10px 12px;font-weight:900;color:#fff;font-size:11px;text-transform:uppercase;letter-spacing:1px;">GRAND TOTAL</td>
+                        <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:900;color:#fb923c;">${fmt(grandPO)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            </div>
+
+            <div style="padding:24px 32px;text-align:center;border-top:1px solid #e2e8f0;">
+              <p style="margin:0 0 4px 0;color:#94a3b8;font-size:11px;font-weight:600;letter-spacing:1px;">ECONO PHARMA TRADING</p>
+              <p style="margin:0;color:#cbd5e1;font-size:10px;">Generated automatically • ${new Date().toLocaleString('en-PH', { timeZone: 'Asia/Manila' })}</p>
+            </div>
+          </div></body></html>
+        `;
+
+        try {
+          await resend.emails.send({
+            from: 'Econo Drugstore <stock@alerts.econo-pos.com>',
+            to: emailList,
+            subject: `📦 Weekly Branch Report - ${weekStart} to ${weekEnd} | ${org.name}`,
+            html,
+          });
+          console.log(`✅ Drugstore weekly email sent to ${emailList.join(', ')} (${org.name})`);
+        } catch (err: any) {
+          console.error(`❌ Drugstore weekly email failed for ${org.name}:`, err);
+        }
+      } // end org loop
+
+      return NextResponse.json({ success: true, message: `Drugstore weekly email sent for ${weekStart} to ${weekEnd}` });
     }
 
     // ==================== WEEKLY EMAIL REPORT (8:30PM SAT) - OFFICE BRANCHES ====================
