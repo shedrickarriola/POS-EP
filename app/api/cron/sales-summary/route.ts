@@ -1179,9 +1179,9 @@ export async function GET(request: Request) {
         }
       }
 
-      return NextResponse.json({ success: true, message: 'Daily email sent' });
+      console.log('✅ Office branch emails done, now sending non-office...');
 
-            // ── NON-OFFICE BRANCHES — CONSOLIDATED DAILY EMAIL ──
+      // ── NON-OFFICE BRANCHES — CONSOLIDATED DAILY EMAIL ──
       for (const org of orgsForEmail || []) {
         const rawEmail = org.owner_email?.trim();
         if (!rawEmail) continue;
