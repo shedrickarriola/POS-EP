@@ -1398,9 +1398,6 @@ export async function GET(request: Request) {
       return NextResponse.json({ success: true, message: 'Drugstore daily email sent' });
     }
 
-      return NextResponse.json({ success: true, message: 'Drugstore daily email sent' });
-    }
-
     // ==================== DRUGSTORE WEEKLY EMAIL (11PM SAT PHT) - NON-OFFICE BRANCHES ====================
     if (type === 'DRUGSTORE_EMAIL_WEEKLY') {
       console.log('📧 Starting Drugstore Weekly Email (11PM SAT PHT) - Non-Office Branches');
