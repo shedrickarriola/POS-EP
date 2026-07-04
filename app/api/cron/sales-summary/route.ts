@@ -150,7 +150,7 @@ export async function GET(request: Request) {
     });
 
     // 4. MESSAGE LOOP (Telegram only — skip for email-only types)
-    if (type !== 'DAILY_EMAIL' && type !== 'WEEKLY_EMAIL' && type !== 'MONTHLY_EMAIL') {
+    if (type !== 'DAILY_EMAIL' && type !== 'WEEKLY_EMAIL' && type !== 'MONTHLY_EMAIL' && type !== 'DRUGSTORE_EMAIL') {
     for (const group of Object.values(orgGroups) as any[]) {
       let message = '';
       if (type === 'STOCK_ADVISORY') {
@@ -527,7 +527,7 @@ export async function GET(request: Request) {
     } // end Telegram-only type guard
 
     if (type === 'DAILY_EMAIL') {
-      console.log('📧 Starting Daily Email Report (8PM) - Full version');
+      console.log('📧 Starting Daily Email Report (8PM PHT) - Office Branches Only');
 
       const { data: orgsForEmail } = await supabaseAdmin
         .from('organizations')
@@ -1179,7 +1179,18 @@ export async function GET(request: Request) {
         }
       }
 
-      console.log('✅ Office branch emails done, now sending non-office...');
+      console.log('✅ Office branch emails done.');
+      return NextResponse.json({ success: true, message: 'Office daily email sent' });
+    }
+
+    // ==================== DRUGSTORE EMAIL (11PM PHT) - NON-OFFICE BRANCHES ====================
+    if (type === 'DRUGSTORE_EMAIL') {
+      console.log('📧 Starting Drugstore Email Report (11PM PHT) - Non-Office Branches');
+
+      const { data: orgsForEmail } = await supabaseAdmin
+        .from('organizations')
+        .select('id, name, owner_email')
+        .not('owner_email', 'is', null);
 
       // ── NON-OFFICE BRANCHES — CONSOLIDATED DAILY EMAIL ──
       for (const org of orgsForEmail || []) {
@@ -1384,7 +1395,7 @@ export async function GET(request: Request) {
         }
       } // end non-office org loop
 
-      return NextResponse.json({ success: true, message: 'Daily email sent' });
+      return NextResponse.json({ success: true, message: 'Drugstore daily email sent' });
     }
 
     // ==================== WEEKLY EMAIL REPORT (8:30PM SAT) - OFFICE BRANCHES ====================
