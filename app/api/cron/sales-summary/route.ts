@@ -1289,8 +1289,6 @@ export async function GET(request: Request) {
           grandTotal += totalSales; grandExp += totalExp; grandActual += actual;
           grandQuota += branchQuota;
 
-          const reportedBy = branchReport?.reported_by?.trim() || null;
-
           const userCell = reportedBy
             ? `<span style="font-weight:600;color:#111827;">${reportedBy}</span>`
             : '<span style="color:#94a3b8;">—</span>';
