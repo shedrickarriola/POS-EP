@@ -1456,23 +1456,23 @@ export async function GET(request: Request) {
 
           const quota = Number(b.daily_generic_quota || 0) * 7; // weekly quota = daily * 7 (open 7 days)
 
-          // PA performance — group orders by created_by UUID, then resolve to full_name from profiles
+          // PA performance — group orders by created_by email, resolve to full_name from profiles
           const { data: weekOrders } = await supabaseAdmin
             .from('orders')
             .select('created_by, total_amount')
             .eq('branch_id', b.id)
             .in('created_date_pht', weekDates);
 
-          // Collect unique created_by UUIDs and resolve to names
-          const paUserIds = [...new Set((weekOrders || []).map((o: any) => o.created_by).filter(Boolean))];
+          // Collect unique emails and resolve to full_name via profiles.email
+          const paEmails = [...new Set((weekOrders || []).map((o: any) => o.created_by).filter(Boolean))];
           const paNameMap = new Map<string, string>();
-          if (paUserIds.length > 0) {
+          if (paEmails.length > 0) {
             const { data: paProfiles } = await supabaseAdmin
               .from('profiles')
-              .select('id, full_name')
-              .in('id', paUserIds);
+              .select('email, full_name')
+              .in('email', paEmails);
             (paProfiles || []).forEach((p: any) => {
-              if (p.id && p.full_name) paNameMap.set(p.id, p.full_name.trim());
+              if (p.email && p.full_name) paNameMap.set(p.email, p.full_name.trim());
             });
           }
 
