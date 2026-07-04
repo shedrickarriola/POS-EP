@@ -1265,49 +1265,18 @@ export async function GET(request: Request) {
 
           const { data: branchReport } = await supabaseAdmin
             .from('daily_reports')
-            .select('generic_sales, branded_sales, discount_total, reported_by')
+            .select('generic_sales, branded_sales, discount_total, expenses, reported_by')
             .eq('branch_id', b.id)
             .eq('report_date', reportDate)
             .single();
-
-          const { data: branchExpenses } = await supabaseAdmin
-            .from('daily_expenses')
-            .select('amount')
-            .eq('branch_id', b.id)
-            .eq('report_date', reportDate);
-
-          // Fetch earliest login per user after 4AM PHT
-          const reportDateObj = new Date(reportDate + 'T00:00:00+08:00');
-          const after4amUTC = new Date(reportDateObj.getTime() - 4 * 60 * 60 * 1000);
-          const endOfDayUTC = new Date(reportDateObj.getTime() + 16 * 60 * 60 * 1000);
-
-          const { data: branchLogs } = await supabaseAdmin
-            .from('system_logs')
-            .select('user_email, user_name, created_at')
-            .eq('branch_id', b.id)
-            .eq('event_type', 'LOGIN')
-            .gte('created_at', after4amUTC.toISOString())
-            .lte('created_at', endOfDayUTC.toISOString())
-            .order('created_at', { ascending: true });
-
-          const userLoginMap = new Map<string, { name: string; loginTime: string }>();
-          (branchLogs || []).forEach((log: any) => {
-            const email = log.user_email || '';
-            if (!userLoginMap.has(email)) {
-              const localTime = new Date(log.created_at).toLocaleString('en-PH', {
-                timeZone: 'Asia/Manila', hour: '2-digit', minute: '2-digit', hour12: true,
-              });
-              userLoginMap.set(email, { name: log.user_name || email, loginTime: localTime });
-            }
-          });
-          const userLogins = Array.from(userLoginMap.values());
 
           const gen = Number(branchReport?.generic_sales || 0);
           const brd = Number(branchReport?.branded_sales || 0);
           const disc = Number(branchReport?.discount_total || 0);
           const totalSales = gen + brd - disc;
-          const totalExp = (branchExpenses || []).reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
+          const totalExp = Number(branchReport?.expenses || 0);
           const actual = totalSales - totalExp;
+          const reportedBy = branchReport?.reported_by?.trim() || null;
 
           // Quota = branch daily_generic_quota from branches table
           const branchQuota = Number(b.daily_generic_quota || 0);
@@ -1322,18 +1291,9 @@ export async function GET(request: Request) {
 
           const reportedBy = branchReport?.reported_by?.trim() || null;
 
-          const userCell = (() => {
-            const parts: string[] = [];
-            // Login entries from system_logs
-            userLogins.forEach(u => {
-              parts.push(`<div style="white-space:nowrap;"><span style="color:#6366f1;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-right:4px;">LOGIN</span><span style="font-weight:600;color:#111827;">${u.name}</span> <span style="color:#94a3b8;font-size:10px;">(${u.loginTime})</span></div>`);
-            });
-            // Reported by from daily_reports
-            if (reportedBy) {
-              parts.push(`<div style="white-space:nowrap;margin-top:${parts.length > 0 ? '4px' : '0'};"><span style="color:#10b981;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-right:4px;">REPORT</span><span style="font-weight:600;color:#111827;">${reportedBy}</span></div>`);
-            }
-            return parts.length > 0 ? parts.join('') : '<span style="color:#94a3b8;">—</span>';
-          })();
+          const userCell = reportedBy
+            ? `<span style="font-weight:600;color:#111827;">${reportedBy}</span>`
+            : '<span style="color:#94a3b8;">—</span>';
 
           consolidatedHtml += `
                     <tr style="border-bottom:1px solid #f1f5f9;">
@@ -1451,10 +1411,10 @@ export async function GET(request: Request) {
         const branchDataList: BranchWeekData[] = [];
 
         for (const b of nonOfficeBranches) {
-          // Daily reports for the week
+          // Daily reports for the week — get expenses and reported_by directly from here
           const { data: reports } = await supabaseAdmin
             .from('daily_reports')
-            .select('generic_sales, branded_sales, discount_total, expenses')
+            .select('generic_sales, branded_sales, discount_total, expenses, reported_by')
             .eq('branch_id', b.id)
             .in('report_date', weekDates);
 
@@ -1463,13 +1423,7 @@ export async function GET(request: Request) {
           const disc = (reports || []).reduce((s, r: any) => s + Number(r.discount_total || 0), 0);
           const totalSales = gen + brd - disc;
 
-          const { data: expensesW, error: expErr } = await supabaseAdmin
-            .from('daily_expenses')
-            .select('amount')
-            .eq('branch_id', b.id)
-            .in('report_date', weekDates);
-          console.log(`[${b.branch_name}] expenses:`, expensesW, 'error:', expErr);
-          const totalExp = (expensesW || []).reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
+          const totalExp = (reports || []).reduce((s: number, r: any) => s + Number(r.expenses || 0), 0);
           const actual = totalSales - totalExp;
 
           // Purchase orders for the week
@@ -1494,20 +1448,11 @@ export async function GET(request: Request) {
             });
           });
 
-          // Unique users — query system_logs using created_at timestamp range for the whole week
-          const weekStartUTC = new Date(weekDates[0] + 'T00:00:00+08:00');
-          const weekEndUTC = new Date(weekDates[6] + 'T23:59:59+08:00');
-          console.log(`[${b.branch_name}] logs range: ${weekStartUTC.toISOString()} to ${weekEndUTC.toISOString()}`);
-          const { data: weekLogs, error: logsErr } = await supabaseAdmin
-            .from('system_logs')
-            .select('user_name, user_email')
-            .eq('branch_id', b.id)
-            .eq('event_type', 'LOGIN')
-            .gte('created_at', weekStartUTC.toISOString())
-            .lte('created_at', weekEndUTC.toISOString());
-          console.log(`[${b.branch_name}] logs:`, weekLogs, 'error:', logsErr);
-
-          const uniqueUsers = [...new Set((weekLogs || []).map((l: any) => (l.user_name || l.user_email || '').trim()).filter(Boolean))];
+          // Unique users from reported_by across the week's daily_reports
+          const uniqueUsers = [...new Set((reports || [])
+            .map((r: any) => r.reported_by?.trim())
+            .filter(Boolean)
+          )];
 
           const quota = Number(b.daily_generic_quota || 0) * 7; // weekly quota = daily * 7 (open 7 days)
 
