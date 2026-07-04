@@ -1210,7 +1210,7 @@ export async function GET(request: Request) {
           .eq('is_office_use', false);
 
         const nonOfficeBranches = (nonOfficeBranchesRaw || []).filter(
-          (b: any) => b.test_env !== true
+          (b: any) => b.test_env !== true && b.is_office_use === false
         );
 
         if (!nonOfficeBranches || nonOfficeBranches.length === 0) continue;
