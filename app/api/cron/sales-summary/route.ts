@@ -1206,18 +1206,6 @@ export async function GET(request: Request) {
 
         const reportDate = todayPHT;
 
-        // Fetch agent daily quotas
-        const { data: agentProfiles } = await supabaseAdmin
-          .from('profiles')
-          .select('id, full_name, agent_daily_quota')
-          .not('agent_daily_quota', 'is', null)
-          .gt('agent_daily_quota', 0);
-
-        const dailyQuotaMap = new Map<string, number>();
-        (agentProfiles || []).forEach((p: any) => {
-          if (p.full_name) dailyQuotaMap.set(p.full_name.trim().toUpperCase(), Number(p.agent_daily_quota || 0));
-        });
-
         const fmt = (n: number) => `₱${n.toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
 
         let consolidatedHtml = `
@@ -1246,8 +1234,8 @@ export async function GET(request: Request) {
                       <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Total Sales</th>
                       <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Expenses</th>
                       <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;background:#064e3b;color:#34d399;">Actual</th>
-                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Quota</th>
-                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">% Hit</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Generic Quota</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">Generic %</th>
                       <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">User (Login)</th>
                     </tr>
                   </thead>
@@ -1266,7 +1254,7 @@ export async function GET(request: Request) {
 
           const { data: branchReport } = await supabaseAdmin
             .from('daily_reports')
-            .select('generic_sales, branded_sales, discount_total')
+            .select('generic_sales, branded_sales, discount_total, reported_by')
             .eq('branch_id', b.id)
             .eq('report_date', reportDate)
             .single();
@@ -1310,36 +1298,50 @@ export async function GET(request: Request) {
           const totalExp = (branchExpenses || []).reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
           const actual = totalSales - totalExp;
 
-          // Branch quota = sum of all agent daily quotas assigned to this branch
-          const branchQuota = Array.from(dailyQuotaMap.values()).reduce((s, q) => s + q, 0);
-          const pct = branchQuota > 0 ? (totalSales / branchQuota) * 100 : 0;
+          // Quota = branch daily_generic_quota from branches table
+          const branchQuota = Number(b.daily_generic_quota || 0);
+          // % = generic net (generic_sales - discount) vs generic quota
+          const genericNet = gen - disc;
+          const pct = branchQuota > 0 ? (genericNet / branchQuota) * 100 : 0;
           const pctColor = pct >= 100 ? '#16a34a' : pct >= 75 ? '#d97706' : '#dc2626';
 
           grandGen += gen; grandBrd += brd; grandDisc += disc;
           grandTotal += totalSales; grandExp += totalExp; grandActual += actual;
           grandQuota += branchQuota;
 
-          const userCell = userLogins.length > 0
-            ? userLogins.map(u => `<div style="white-space:nowrap;"><span style="font-weight:600;color:#111827;">${u.name}</span> <span style="color:#94a3b8;font-size:10px;">(${u.loginTime})</span></div>`).join('')
-            : '<span style="color:#94a3b8;">—</span>';
+          const reportedBy = branchReport?.reported_by?.trim() || null;
+
+          const userCell = (() => {
+            const parts: string[] = [];
+            // Login entries from system_logs
+            userLogins.forEach(u => {
+              parts.push(`<div style="white-space:nowrap;"><span style="color:#6366f1;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-right:4px;">LOGIN</span><span style="font-weight:600;color:#111827;">${u.name}</span> <span style="color:#94a3b8;font-size:10px;">(${u.loginTime})</span></div>`);
+            });
+            // Reported by from daily_reports
+            if (reportedBy) {
+              parts.push(`<div style="white-space:nowrap;margin-top:${parts.length > 0 ? '4px' : '0'};"><span style="color:#10b981;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-right:4px;">REPORT</span><span style="font-weight:600;color:#111827;">${reportedBy}</span></div>`);
+            }
+            return parts.length > 0 ? parts.join('') : '<span style="color:#94a3b8;">—</span>';
+          })();
 
           consolidatedHtml += `
                     <tr style="border-bottom:1px solid #f1f5f9;">
                       <td style="padding:10px 12px;font-weight:700;color:#1e293b;">${b.branch_name}</td>
                       <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#3b82f6;">${fmt(gen)}</td>
                       <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#9333ea;">${fmt(brd)}</td>
-                      <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#e11d48;">- ${fmt(disc)}</td>
+                      <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#e11d48;">${disc > 0 ? '- ' + fmt(disc) : '—'}</td>
                       <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:700;color:#111827;">${fmt(totalSales)}</td>
                       <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#dc2626;">${totalExp > 0 ? '- ' + fmt(totalExp) : '—'}</td>
                       <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:900;color:#16a34a;background:#f0fdf4;">${fmt(actual)}</td>
                       <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#64748b;">${branchQuota > 0 ? fmt(branchQuota) : '—'}</td>
-                      <td style="padding:10px 12px;text-align:center;font-weight:700;color:${pctColor};">${branchQuota > 0 ? pct.toFixed(1) + '%' : '—'}</td>
+                      <td style="padding:10px 12px;text-align:center;font-weight:700;color:${branchQuota > 0 ? pctColor : '#94a3b8'};">${branchQuota > 0 ? pct.toFixed(1) + '%' : '—'}</td>
                       <td style="padding:10px 12px;">${userCell}</td>
                     </tr>
           `;
         } // end branch loop
 
-        const grandPct = grandQuota > 0 ? (grandTotal / grandQuota) * 100 : 0;
+        const grandGenericNet = grandGen - grandDisc;
+        const grandPct = grandQuota > 0 ? (grandGenericNet / grandQuota) * 100 : 0;
 
         consolidatedHtml += `
                     <!-- GRAND TOTAL ROW -->
