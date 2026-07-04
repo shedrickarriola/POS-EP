@@ -1404,6 +1404,7 @@ export async function GET(request: Request) {
           poTotal: number;
           poBySupplier: Map<string, { generic: number; branded: number; total: number; count: number }>;
           users: string[];
+          paRows: Array<{ pa: string; total: number; orders: number; pct: number }>;
         };
 
         const branchDataList: BranchWeekData[] = [];
@@ -1454,7 +1455,25 @@ export async function GET(request: Request) {
 
           const quota = Number(b.daily_generic_quota || 0) * 7; // weekly quota = daily * 7 (open 7 days)
 
-          branchDataList.push({ branch: b, gen, brd, disc, totalSales, totalExp, actual, quota, poTotal, poBySupplier, users: uniqueUsers });
+          // PA performance — group orders by agent for the week
+          const { data: weekOrders } = await supabaseAdmin
+            .from('orders')
+            .select('agent, total_amount')
+            .eq('branch_id', b.id)
+            .in('created_date_pht', weekDates);
+
+          const paMap = new Map<string, { total: number; orders: number }>();
+          (weekOrders || []).forEach((o: any) => {
+            const pa = (o.agent || 'UNASSIGNED').trim();
+            const ex = paMap.get(pa) || { total: 0, orders: 0 };
+            paMap.set(pa, { total: ex.total + Number(o.total_amount || 0), orders: ex.orders + 1 });
+          });
+          const branchSalesTotal = Array.from(paMap.values()).reduce((s, v) => s + v.total, 0);
+          const paRows = Array.from(paMap.entries())
+            .map(([pa, v]) => ({ pa, total: v.total, orders: v.orders, pct: branchSalesTotal > 0 ? (v.total / branchSalesTotal) * 100 : 0 }))
+            .sort((a, b) => b.total - a.total);
+
+          branchDataList.push({ branch: b, gen, brd, disc, totalSales, totalExp, actual, quota, poTotal, poBySupplier, users: uniqueUsers, paRows });
         } // end per-branch loop
 
         // ── Grand totals ──
@@ -1653,6 +1672,66 @@ export async function GET(request: Request) {
                         <td colspan="5" style="padding:10px 12px;font-weight:900;color:#fff;font-size:11px;text-transform:uppercase;letter-spacing:1px;">GRAND TOTAL</td>
                         <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:900;color:#fb923c;">${fmt(grandPO)}</td>
                       </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            </div>
+
+              <!-- ══════ TABLE 4: PHARMACY ASSISTANT PERFORMANCE ══════ -->
+              <div style="margin-bottom:16px;">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+                  <div style="width:4px;height:20px;background:#8b5cf6;border-radius:2px;"></div>
+                  <span style="font-size:11px;font-weight:800;letter-spacing:3px;color:#64748b;text-transform:uppercase;">Pharmacy Assistant Performance</span>
+                </div>
+                <div style="overflow-x:auto;border-radius:10px;border:1px solid #e9d5ff;">
+                  <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                    <thead>
+                      <tr style="background:#1e293b;color:#94a3b8;text-align:left;">
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Branch</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Pharmacy Assistant</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;"># Orders</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Total Sales</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">% of Branch</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">Rank</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      \${branchDataList.map((d) => {
+                        if (!d.paRows || d.paRows.length === 0) return \`
+                          <tr style="background:#faf5ff;border-bottom:1px solid #e9d5ff;">
+                            <td style="padding:9px 12px;font-weight:700;color:#1e293b;">\${d.branch.branch_name}</td>
+                            <td colspan="5" style="padding:9px 12px;color:#94a3b8;font-style:italic;">No orders recorded</td>
+                          </tr>\`;
+                        return d.paRows.map((r, i) => {
+                          const barPct = Math.min(r.pct, 100);
+                          const rankEmoji = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : \`#\${i + 1}\`;
+                          const rowBg = i % 2 === 0 ? '#faf5ff' : '#ffffff';
+                          return \`<tr style="background:\${rowBg};border-bottom:1px solid #e9d5ff;">
+                            <td style="padding:9px 12px;font-weight:\${i === 0 ? '700' : '400'};color:\${i === 0 ? '#1e293b' : '#94a3b8'};">\${i === 0 ? d.branch.branch_name : ''}</td>
+                            <td style="padding:9px 12px;font-weight:600;color:#111827;">\${r.pa}</td>
+                            <td style="padding:9px 12px;text-align:center;color:#64748b;">\${r.orders}</td>
+                            <td style="padding:9px 12px;text-align:right;font-family:monospace;font-weight:700;color:#7c3aed;">\${fmt(r.total)}</td>
+                            <td style="padding:9px 12px;text-align:center;">
+                              <div style="display:flex;align-items:center;gap:6px;">
+                                <div style="flex:1;background:#ede9fe;border-radius:99px;height:6px;min-width:60px;">
+                                  <div style="background:#7c3aed;height:6px;border-radius:99px;width:\${barPct}%;"></div>
+                                </div>
+                                <span style="font-weight:700;color:#7c3aed;font-size:11px;white-space:nowrap;">\${r.pct.toFixed(1)}%</span>
+                              </div>
+                            </td>
+                            <td style="padding:9px 12px;text-align:center;font-size:14px;">\${rankEmoji}</td>
+                          </tr>\`;
+                        }).join('') + \`
+                          <tr style="background:#ede9fe;border-bottom:2px solid #c4b5fd;">
+                            <td style="padding:8px 12px;font-weight:800;color:#6d28d9;font-size:10px;text-transform:uppercase;" colspan="2">\${d.branch.branch_name} — Branch Total</td>
+                            <td style="padding:8px 12px;text-align:center;font-weight:700;color:#6d28d9;">\${d.paRows.reduce((s, r) => s + r.orders, 0)}</td>
+                            <td style="padding:8px 12px;text-align:right;font-family:monospace;font-weight:800;color:#6d28d9;">\${fmt(d.paRows.reduce((s, r) => s + r.total, 0))}</td>
+                            <td style="padding:8px 12px;text-align:center;font-weight:700;color:#6d28d9;">100%</td>
+                            <td></td>
+                          </tr>\`;
+                      }).join('')}
                     </tbody>
                   </table>
                 </div>
