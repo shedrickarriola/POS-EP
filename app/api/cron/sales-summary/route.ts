@@ -1493,17 +1493,20 @@ export async function GET(request: Request) {
             });
           });
 
-          // Unique users (system_logs logins for the week)
+          // Unique users — query system_logs using created_at timestamp range for the whole week
+          const weekStartUTC = new Date(weekDates[0] + 'T00:00:00+08:00');
+          const weekEndUTC = new Date(weekDates[6] + 'T23:59:59+08:00');
           const { data: weekLogs } = await supabaseAdmin
             .from('system_logs')
             .select('user_name, user_email')
             .eq('branch_id', b.id)
             .eq('event_type', 'LOGIN')
-            .in('created_date_pht', weekDates);
+            .gte('created_at', weekStartUTC.toISOString())
+            .lte('created_at', weekEndUTC.toISOString());
 
-          const uniqueUsers = [...new Set((weekLogs || []).map((l: any) => l.user_name || l.user_email).filter(Boolean))];
+          const uniqueUsers = [...new Set((weekLogs || []).map((l: any) => (l.user_name || l.user_email || '').trim()).filter(Boolean))];
 
-          const quota = Number(b.daily_generic_quota || 0) * 6; // weekly quota = daily * 6 working days
+          const quota = Number(b.daily_generic_quota || 0) * 7; // weekly quota = daily * 7 (open 7 days)
 
           branchDataList.push({ branch: b, gen, brd, disc, totalSales, totalExp, actual, quota, poTotal, poBySupplier, users: uniqueUsers });
         } // end per-branch loop
