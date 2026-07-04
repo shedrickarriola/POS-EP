@@ -1225,7 +1225,7 @@ export async function GET(request: Request) {
           <html lang="en">
           <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
           <body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;">
-          <div style="max-width:900px;margin:24px auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.10);">
+          <div style="max-width:1100px;margin:24px auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.10);">
             <div style="background:linear-gradient(135deg,#0f172a 0%,#1e293b 60%,#0f4c75 100%);padding:36px 32px 28px 32px;text-align:center;">
               <div style="display:inline-block;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);border-radius:8px;padding:6px 18px;margin-bottom:16px;">
                 <span style="color:#94a3b8;font-size:11px;font-weight:700;letter-spacing:3px;text-transform:uppercase;">DAILY CONSOLIDATED REPORT</span>
@@ -1233,6 +1233,138 @@ export async function GET(request: Request) {
               <h1 style="margin:0 0 6px 0;color:#ffffff;font-size:26px;font-weight:800;">${org.name.toUpperCase()}</h1>
               <p style="margin:0;color:#64748b;font-size:14px;">${reportDate}</p>
             </div>
+
+            <div style="padding:28px 32px;">
+              <div style="overflow-x:auto;border-radius:10px;border:1px solid #e2e8f0;">
+                <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:900px;">
+                  <thead>
+                    <tr style="background:#1e293b;color:#94a3b8;text-align:left;">
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Branch</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Generic</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Branded</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Discount</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Total Sales</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Expenses</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;background:#064e3b;color:#34d399;">Actual</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Quota</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">% Hit</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">User (Login)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+        `;
+
+        // Accumulate totals across all branches
+        let grandGen = 0, grandBrd = 0, grandDisc = 0, grandTotal = 0, grandExp = 0, grandActual = 0, grandQuota = 0;
+
+        for (const b of nonOfficeBranches) {
+          const { data: branchOrders } = await supabaseAdmin
+            .from('orders')
+            .select('id, total_amount, client_name, agent, order_number, dr_number')
+            .eq('branch_id', b.id)
+            .eq('created_date_pht', reportDate);
+
+          const { data: branchReport } = await supabaseAdmin
+            .from('daily_reports')
+            .select('generic_sales, branded_sales, discount_total')
+            .eq('branch_id', b.id)
+            .eq('report_date', reportDate)
+            .single();
+
+          const { data: branchExpenses } = await supabaseAdmin
+            .from('daily_expenses')
+            .select('amount')
+            .eq('branch_id', b.id)
+            .eq('report_date', reportDate);
+
+          // Fetch earliest login per user after 4AM PHT
+          const reportDateObj = new Date(reportDate + 'T00:00:00+08:00');
+          const after4amUTC = new Date(reportDateObj.getTime() - 4 * 60 * 60 * 1000);
+          const endOfDayUTC = new Date(reportDateObj.getTime() + 16 * 60 * 60 * 1000);
+
+          const { data: branchLogs } = await supabaseAdmin
+            .from('system_logs')
+            .select('user_email, user_name, created_at')
+            .eq('branch_id', b.id)
+            .eq('event_type', 'LOGIN')
+            .gte('created_at', after4amUTC.toISOString())
+            .lte('created_at', endOfDayUTC.toISOString())
+            .order('created_at', { ascending: true });
+
+          const userLoginMap = new Map<string, { name: string; loginTime: string }>();
+          (branchLogs || []).forEach((log: any) => {
+            const email = log.user_email || '';
+            if (!userLoginMap.has(email)) {
+              const localTime = new Date(log.created_at).toLocaleString('en-PH', {
+                timeZone: 'Asia/Manila', hour: '2-digit', minute: '2-digit', hour12: true,
+              });
+              userLoginMap.set(email, { name: log.user_name || email, loginTime: localTime });
+            }
+          });
+          const userLogins = Array.from(userLoginMap.values());
+
+          const gen = Number(branchReport?.generic_sales || 0);
+          const brd = Number(branchReport?.branded_sales || 0);
+          const disc = Number(branchReport?.discount_total || 0);
+          const totalSales = gen + brd - disc;
+          const totalExp = (branchExpenses || []).reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
+          const actual = totalSales - totalExp;
+
+          // Branch quota = sum of all agent daily quotas assigned to this branch
+          const branchQuota = Array.from(dailyQuotaMap.values()).reduce((s, q) => s + q, 0);
+          const pct = branchQuota > 0 ? (totalSales / branchQuota) * 100 : 0;
+          const pctColor = pct >= 100 ? '#16a34a' : pct >= 75 ? '#d97706' : '#dc2626';
+
+          grandGen += gen; grandBrd += brd; grandDisc += disc;
+          grandTotal += totalSales; grandExp += totalExp; grandActual += actual;
+          grandQuota += branchQuota;
+
+          const userCell = userLogins.length > 0
+            ? userLogins.map(u => `<div style="white-space:nowrap;"><span style="font-weight:600;color:#111827;">${u.name}</span> <span style="color:#94a3b8;font-size:10px;">(${u.loginTime})</span></div>`).join('')
+            : '<span style="color:#94a3b8;">—</span>';
+
+          consolidatedHtml += `
+                    <tr style="border-bottom:1px solid #f1f5f9;">
+                      <td style="padding:10px 12px;font-weight:700;color:#1e293b;">${b.branch_name}</td>
+                      <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#3b82f6;">${fmt(gen)}</td>
+                      <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#9333ea;">${fmt(brd)}</td>
+                      <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#e11d48;">- ${fmt(disc)}</td>
+                      <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:700;color:#111827;">${fmt(totalSales)}</td>
+                      <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#dc2626;">${totalExp > 0 ? '- ' + fmt(totalExp) : '—'}</td>
+                      <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:900;color:#16a34a;background:#f0fdf4;">${fmt(actual)}</td>
+                      <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#64748b;">${branchQuota > 0 ? fmt(branchQuota) : '—'}</td>
+                      <td style="padding:10px 12px;text-align:center;font-weight:700;color:${pctColor};">${branchQuota > 0 ? pct.toFixed(1) + '%' : '—'}</td>
+                      <td style="padding:10px 12px;">${userCell}</td>
+                    </tr>
+          `;
+        } // end branch loop
+
+        const grandPct = grandQuota > 0 ? (grandTotal / grandQuota) * 100 : 0;
+
+        consolidatedHtml += `
+                    <!-- GRAND TOTAL ROW -->
+                    <tr style="background:#1e293b;border-top:2px solid #475569;">
+                      <td style="padding:11px 12px;font-weight:900;color:#ffffff;font-size:11px;text-transform:uppercase;letter-spacing:1px;">TOTAL</td>
+                      <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#93c5fd;">${fmt(grandGen)}</td>
+                      <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#c4b5fd;">${fmt(grandBrd)}</td>
+                      <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#fca5a5;">- ${fmt(grandDisc)}</td>
+                      <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#ffffff;">${fmt(grandTotal)}</td>
+                      <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#fca5a5;">${grandExp > 0 ? '- ' + fmt(grandExp) : '—'}</td>
+                      <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:900;color:#34d399;background:#064e3b;">${fmt(grandActual)}</td>
+                      <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#94a3b8;">${grandQuota > 0 ? fmt(grandQuota) : '—'}</td>
+                      <td style="padding:11px 12px;text-align:center;font-weight:800;color:${grandQuota > 0 ? (grandPct >= 100 ? '#34d399' : grandPct >= 75 ? '#fcd34d' : '#fca5a5') : '#94a3b8'};">${grandQuota > 0 ? grandPct.toFixed(1) + '%' : '—'}</td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div style="padding:24px 32px;text-align:center;border-top:1px solid #e2e8f0;">
+              <p style="margin:0 0 4px 0;color:#94a3b8;font-size:11px;font-weight:600;letter-spacing:1px;">ECONO PHARMA TRADING</p>
+              <p style="margin:0;color:#cbd5e1;font-size:10px;">Generated automatically • ${new Date().toLocaleString('en-PH', { timeZone: 'Asia/Manila' })}</p>
+            </div>
+          </div></body></html>
         `;
 
         for (const b of nonOfficeBranches) {
@@ -1426,14 +1558,6 @@ export async function GET(request: Request) {
             </div>
           `;
         } // end branch loop
-
-        consolidatedHtml += `
-            <div style="padding:24px 32px;text-align:center;border-top:1px solid #e2e8f0;">
-              <p style="margin:0 0 4px 0;color:#94a3b8;font-size:11px;font-weight:600;letter-spacing:1px;">ECONO PHARMA TRADING</p>
-              <p style="margin:0;color:#cbd5e1;font-size:10px;">Generated automatically • ${new Date().toLocaleString('en-PH', { timeZone: 'Asia/Manila' })}</p>
-            </div>
-          </div></body></html>
-        `;
 
         try {
           await resend.emails.send({
