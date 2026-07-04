@@ -1179,6 +1179,191 @@ export async function GET(request: Request) {
         }
       }
 
+      // ── NON-OFFICE BRANCHES — CONSOLIDATED DAILY EMAIL ──
+      for (const org of orgsForEmail || []) {
+        const rawEmail = org.owner_email?.trim();
+        if (!rawEmail) continue;
+
+        const emailList: string[] = rawEmail
+          .split(',')
+          .map((e: string) => e.trim())
+          .filter((e: string) => e.includes('@'));
+        if (emailList.length === 0) continue;
+
+        const { data: nonOfficeBranchesRaw } = await supabaseAdmin
+          .from('branches')
+          .select('*')
+          .eq('org_id', org.id)
+          .eq('is_office_use', false);
+
+        const nonOfficeBranches = (nonOfficeBranchesRaw || []).filter(
+          (b: any) => b.test_env !== true
+        );
+
+        if (!nonOfficeBranches || nonOfficeBranches.length === 0) continue;
+
+        const reportDate = todayPHT;
+
+        // Fetch agent daily quotas
+        const { data: agentProfiles } = await supabaseAdmin
+          .from('profiles')
+          .select('id, full_name, agent_daily_quota')
+          .not('agent_daily_quota', 'is', null)
+          .gt('agent_daily_quota', 0);
+
+        const dailyQuotaMap = new Map<string, number>();
+        (agentProfiles || []).forEach((p: any) => {
+          if (p.full_name) dailyQuotaMap.set(p.full_name.trim().toUpperCase(), Number(p.agent_daily_quota || 0));
+        });
+
+        const fmt = (n: number) => `₱${n.toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
+
+        let consolidatedHtml = `
+          <!DOCTYPE html>
+          <html lang="en">
+          <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+          <body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;">
+          <div style="max-width:900px;margin:24px auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.10);">
+            <div style="background:linear-gradient(135deg,#0f172a 0%,#1e293b 60%,#0f4c75 100%);padding:36px 32px 28px 32px;text-align:center;">
+              <div style="display:inline-block;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);border-radius:8px;padding:6px 18px;margin-bottom:16px;">
+                <span style="color:#94a3b8;font-size:11px;font-weight:700;letter-spacing:3px;text-transform:uppercase;">DAILY CONSOLIDATED REPORT</span>
+              </div>
+              <h1 style="margin:0 0 6px 0;color:#ffffff;font-size:26px;font-weight:800;">${org.name.toUpperCase()}</h1>
+              <p style="margin:0;color:#64748b;font-size:14px;">${reportDate}</p>
+            </div>
+        `;
+
+        for (const b of nonOfficeBranches) {
+          const { data: branchOrders } = await supabaseAdmin
+            .from('orders')
+            .select('id, total_amount, client_name, agent, order_number, dr_number')
+            .eq('branch_id', b.id)
+            .eq('created_date_pht', reportDate);
+
+          const { data: branchReport } = await supabaseAdmin
+            .from('daily_reports')
+            .select('generic_sales, branded_sales, discount_total')
+            .eq('branch_id', b.id)
+            .eq('report_date', reportDate)
+            .single();
+
+          const gen = Number(branchReport?.generic_sales || 0);
+          const brd = Number(branchReport?.branded_sales || 0);
+          const disc = Number(branchReport?.discount_total || 0);
+          const netSales = gen + brd - disc;
+
+          // Group by agent
+          const agentMap = new Map<string, { total: number; orders: number; names: Set<string> }>();
+          (branchOrders || []).forEach((o: any) => {
+            const agentKey = (o.agent || 'UNASSIGNED').trim().toUpperCase();
+            const ex = agentMap.get(agentKey) || { total: 0, orders: 0, names: new Set<string>() };
+            ex.total += Number(o.total_amount || 0);
+            ex.orders += 1;
+            if (o.agent) ex.names.add(o.agent.trim());
+            agentMap.set(agentKey, ex);
+          });
+
+          const agentRows = Array.from(agentMap.entries())
+            .map(([key, v]) => ({
+              agent: v.names.size > 0 ? [...v.names].join(', ') : key,
+              key,
+              total: v.total,
+              orders: v.orders,
+              quota: dailyQuotaMap.get(key) || 0,
+            }))
+            .sort((a, b) => b.total - a.total);
+
+          consolidatedHtml += `
+            <div style="padding:28px 32px;border-bottom:2px solid #e2e8f0;">
+              <h2 style="margin:0 0 20px 0;color:#1e293b;font-size:18px;font-weight:800;border-left:4px solid #3b82f6;padding-left:12px;">${b.branch_name}</h2>
+              <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;">
+                <div style="flex:1;min-width:110px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:14px 16px;">
+                  <div style="font-size:10px;font-weight:700;color:#3b82f6;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">Generic</div>
+                  <div style="font-size:17px;font-weight:800;color:#1e3a8a;">${fmt(gen)}</div>
+                </div>
+                <div style="flex:1;min-width:110px;background:#faf5ff;border:1px solid #e9d5ff;border-radius:10px;padding:14px 16px;">
+                  <div style="font-size:10px;font-weight:700;color:#9333ea;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">Branded</div>
+                  <div style="font-size:17px;font-weight:800;color:#581c87;">${fmt(brd)}</div>
+                </div>
+                <div style="flex:1;min-width:110px;background:#fff1f2;border:1px solid #fecdd3;border-radius:10px;padding:14px 16px;">
+                  <div style="font-size:10px;font-weight:700;color:#e11d48;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">Discount</div>
+                  <div style="font-size:17px;font-weight:800;color:#9f1239;">- ${fmt(disc)}</div>
+                </div>
+                <div style="flex:1;min-width:110px;background:#f0fdf4;border:2px solid #86efac;border-radius:10px;padding:14px 16px;">
+                  <div style="font-size:10px;font-weight:700;color:#16a34a;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">Net Sales</div>
+                  <div style="font-size:17px;font-weight:800;color:#14532d;">${fmt(netSales)}</div>
+                </div>
+              </div>
+
+              ${agentRows.length > 0 ? `
+              <div style="overflow-x:auto;border-radius:10px;border:1px solid #e2e8f0;">
+                <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                  <thead>
+                    <tr style="background:#1e293b;color:#94a3b8;text-align:left;">
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Agent / User</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;"># Orders</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Total Sales</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Daily Quota</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">% Hit</th>
+                      <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${agentRows.map((r, i) => {
+                      const pct = r.quota > 0 ? (r.total / r.quota) * 100 : 0;
+                      const hit = r.quota > 0 && r.total >= r.quota;
+                      const pctColor = pct >= 100 ? '#16a34a' : pct >= 75 ? '#d97706' : '#dc2626';
+                      const statusBadge = r.quota === 0
+                        ? '<span style="color:#94a3b8;font-size:10px;">No quota</span>'
+                        : hit
+                        ? '<span style="background:#dcfce7;color:#16a34a;font-size:10px;font-weight:700;padding:2px 8px;border-radius:99px;">✓ MET</span>'
+                        : '<span style="background:#fee2e2;color:#dc2626;font-size:10px;font-weight:700;padding:2px 8px;border-radius:99px;">NOT MET</span>';
+                      const rowBg = i % 2 === 0 ? '#ffffff' : '#f8fafc';
+                      return `<tr style="background:${rowBg};border-bottom:1px solid #f1f5f9;">
+                        <td style="padding:10px 12px;font-weight:600;color:#111827;">${r.agent}</td>
+                        <td style="padding:10px 12px;text-align:center;color:#64748b;">${r.orders}</td>
+                        <td style="padding:10px 12px;text-align:right;font-weight:800;color:#111827;font-family:monospace;">${fmt(r.total)}</td>
+                        <td style="padding:10px 12px;text-align:right;color:#64748b;font-family:monospace;">${r.quota > 0 ? fmt(r.quota) : '—'}</td>
+                        <td style="padding:10px 12px;text-align:center;font-weight:700;color:${pctColor};">${r.quota > 0 ? pct.toFixed(1) + '%' : '—'}</td>
+                        <td style="padding:10px 12px;text-align:center;">${statusBadge}</td>
+                      </tr>`;
+                    }).join('')}
+                    <tr style="background:#f1f5f9;border-top:2px solid #cbd5e1;">
+                      <td style="padding:10px 12px;font-weight:800;color:#1e293b;font-size:11px;text-transform:uppercase;letter-spacing:1px;">TOTAL</td>
+                      <td style="padding:10px 12px;text-align:center;font-weight:800;color:#64748b;">${agentRows.reduce((s, r) => s + r.orders, 0)}</td>
+                      <td style="padding:10px 12px;text-align:right;font-weight:800;color:#111827;font-family:monospace;">${fmt(agentRows.reduce((s, r) => s + r.total, 0))}</td>
+                      <td style="padding:10px 12px;text-align:right;font-weight:800;color:#64748b;font-family:monospace;">${fmt(agentRows.reduce((s, r) => s + r.quota, 0))}</td>
+                      <td></td><td></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              ` : '<p style="color:#94a3b8;font-size:13px;margin:0;">No orders recorded today.</p>'}
+            </div>
+          `;
+        } // end branch loop
+
+        consolidatedHtml += `
+            <div style="padding:24px 32px;text-align:center;border-top:1px solid #e2e8f0;">
+              <p style="margin:0 0 4px 0;color:#94a3b8;font-size:11px;font-weight:600;letter-spacing:1px;">ECONO PHARMA TRADING</p>
+              <p style="margin:0;color:#cbd5e1;font-size:10px;">Generated automatically • ${new Date().toLocaleString('en-PH', { timeZone: 'Asia/Manila' })}</p>
+            </div>
+          </div></body></html>
+        `;
+
+        try {
+          await resend.emails.send({
+            from: 'Econo Drugstore <stock@alerts.econo-pos.com>',
+            to: emailList,
+            subject: `📦 Daily Branch Report - ${reportDate} | ${org.name}`,
+            html: consolidatedHtml,
+          });
+          console.log(`✅ Non-office consolidated email sent to ${emailList.join(', ')} (${org.name})`);
+        } catch (err: any) {
+          console.error(`❌ Non-office email failed for ${org.name}:`, err);
+        }
+      } // end non-office org loop
+
       return NextResponse.json({ success: true, message: 'Daily email sent' });
     }
 
