@@ -24,6 +24,7 @@ export default function ReturnOrder() {
   const [loading, setLoading] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [activeOrder, setActiveOrder] = useState<any>(null);
   const [items, setItems] = useState<any[]>([]);
   const [returnedItems, setReturnedItems] = useState<any[]>([]);
@@ -133,6 +134,45 @@ export default function ReturnOrder() {
 
   const handleProcessReturn = async () => {
     if (isProcessing || returnedItems.length === 0) return;
+
+    // Figure out up front whether this return needs the office-branch /
+    // paid-order treatment — both for the confirmation prompt below and for
+    // the daily_payments entry inside executeReturn, so we only check once.
+    const orderStatus = (activeOrder.status || '').toLowerCase();
+    const isOrderPaidOrCompleted =
+      orderStatus === 'paid' || orderStatus === 'completed';
+
+    let isOfficeBranch = false;
+    if (isOrderPaidOrCompleted && currentBranchId) {
+      setIsProcessing(true); // brief lock while we verify branch type
+      const { data: branchData, error: branchError } = await supabase
+        .from('branches')
+        .select('*')
+        .eq('id', currentBranchId)
+        .single();
+      setIsProcessing(false);
+
+      if (branchError) {
+        console.warn('⚠️ Could not verify branch type:', branchError.message);
+      }
+
+      console.log('[Return] Branch check →', branchData);
+
+      // Confirmed against your branches schema: is_office_use (bool)
+      isOfficeBranch = branchData?.is_office_use === true;
+    }
+
+    if (isOfficeBranch && isOrderPaidOrCompleted) {
+      // Order is already settled — surface a confirmation before touching anything
+      setShowConfirmModal(true);
+      return;
+    }
+
+    await executeReturn(false);
+  };
+
+  const executeReturn = async (logToDailyPayments: boolean) => {
+    setShowConfirmModal(false);
     setIsProcessing(true);
 
     try {
@@ -272,6 +312,35 @@ export default function ReturnOrder() {
           );
         } else {
           console.log('✅ heal_inventory_buy_cost completed successfully');
+        }
+      }
+
+      // 5. OFFICE BRANCH — LOG RETURN AS A CASH DEDUCTION IN DAILY_PAYMENTS
+      // Only reached when the order was already paid/completed at an office
+      // branch, and only after the user confirmed it in the modal — the
+      // office/status check itself already ran once in handleProcessReturn.
+      if (logToDailyPayments) {
+        const { error: paymentError } = await supabase
+          .from('daily_payments')
+          .insert({
+            branch_id: currentBranchId,
+            order_id: activeOrder.id,
+            report_date: new Date().toISOString().split('T')[0],
+            customer_name: activeOrder.customer_name || null,
+            amount: -Math.abs(round2(totalAdjustment)),
+            payment_method: 'cash',
+            pr_number: 'RETURN',
+            notes: `Return - Order #${activeOrder.order_number}`,
+          });
+
+        if (paymentError) {
+          // Non-blocking — the return itself already succeeded above
+          console.warn(
+            '⚠️ daily_payments insert warning:',
+            paymentError.message
+          );
+        } else {
+          console.log('✅ daily_payments entry created for return');
         }
       }
 
@@ -579,6 +648,38 @@ export default function ReturnOrder() {
           </div>
         )}
       </div>
+
+      {/* CONFIRM DIALOG — order already paid in full */}
+      {showConfirmModal && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-6 bg-slate-950/95 backdrop-blur-xl">
+          <div className="bg-slate-900 border border-amber-500/30 p-12 rounded-[3.5rem] max-w-md w-full text-center shadow-2xl">
+            <div className="w-20 h-20 bg-amber-500/10 rounded-full flex items-center justify-center text-amber-500 mx-auto mb-6 shadow-inner">
+              <AlertTriangle size={48} />
+            </div>
+            <h2 className="text-2xl font-black uppercase italic tracking-tighter mb-2">
+              Order_Already_Settled
+            </h2>
+            <p className="text-xs text-slate-500 mb-8 font-mono uppercase tracking-widest leading-relaxed">
+              This order is already paid in full. Shall we proceed with this
+              return?
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowConfirmModal(false)}
+                className="flex-1 bg-white/5 hover:bg-white/10 py-5 rounded-2xl font-black uppercase text-[10px] tracking-widest transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => executeReturn(true)}
+                className="flex-1 bg-red-600 hover:bg-red-500 py-5 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-2xl shadow-red-500/40 transition-all"
+              >
+                Proceed
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* SUCCESS DIALOG */}
       {showSuccessModal && (
