@@ -1179,7 +1179,9 @@ export async function GET(request: Request) {
         }
       }
 
-      // ── NON-OFFICE BRANCHES — CONSOLIDATED DAILY EMAIL ──
+      return NextResponse.json({ success: true, message: 'Daily email sent' });
+
+            // ── NON-OFFICE BRANCHES — CONSOLIDATED DAILY EMAIL ──
       for (const org of orgsForEmail || []) {
         const rawEmail = org.owner_email?.trim();
         if (!rawEmail) continue;
@@ -1247,10 +1249,46 @@ export async function GET(request: Request) {
             .eq('report_date', reportDate)
             .single();
 
+          const { data: branchExpenses } = await supabaseAdmin
+            .from('daily_expenses')
+            .select('*')
+            .eq('branch_id', b.id)
+            .eq('report_date', reportDate);
+
+          // Fetch earliest login per user after 4AM PHT from system_logs
+          const reportDateObj = new Date(reportDate + 'T00:00:00+08:00');
+          const after4amUTC = new Date(reportDateObj.getTime() - 4 * 60 * 60 * 1000);
+          const endOfDayUTC = new Date(reportDateObj.getTime() + 16 * 60 * 60 * 1000);
+
+          const { data: branchLogs } = await supabaseAdmin
+            .from('system_logs')
+            .select('user_email, user_name, created_at')
+            .eq('branch_id', b.id)
+            .eq('event_type', 'LOGIN')
+            .gte('created_at', after4amUTC.toISOString())
+            .lte('created_at', endOfDayUTC.toISOString())
+            .order('created_at', { ascending: true });
+
+          const userLoginMap = new Map<string, { name: string; loginTime: string }>();
+          (branchLogs || []).forEach((log: any) => {
+            const email = log.user_email || '';
+            if (!userLoginMap.has(email)) {
+              const localTime = new Date(log.created_at).toLocaleString('en-PH', {
+                timeZone: 'Asia/Manila',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: true,
+              });
+              userLoginMap.set(email, { name: log.user_name || email, loginTime: localTime });
+            }
+          });
+          const branchUserLogins = Array.from(userLoginMap.values());
+
           const gen = Number(branchReport?.generic_sales || 0);
           const brd = Number(branchReport?.branded_sales || 0);
           const disc = Number(branchReport?.discount_total || 0);
           const netSales = gen + brd - disc;
+          const totalExpensesBranch = (branchExpenses || []).reduce((s, e: any) => s + Number(e.amount || 0), 0);
 
           // Group by agent
           const agentMap = new Map<string, { total: number; orders: number; names: Set<string> }>();
@@ -1275,7 +1313,22 @@ export async function GET(request: Request) {
 
           consolidatedHtml += `
             <div style="padding:28px 32px;border-bottom:2px solid #e2e8f0;">
-              <h2 style="margin:0 0 20px 0;color:#1e293b;font-size:18px;font-weight:800;border-left:4px solid #3b82f6;padding-left:12px;">${b.branch_name}</h2>
+              <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px;">
+                <h2 style="margin:0;color:#1e293b;font-size:18px;font-weight:800;border-left:4px solid #3b82f6;padding-left:12px;">${b.branch_name}</h2>
+                ${branchUserLogins.length > 0 ? `
+                <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                  ${branchUserLogins.map(u => `
+                    <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:99px;padding:4px 12px;display:inline-flex;align-items:center;gap:5px;">
+                      <span style="color:#16a34a;font-size:10px;">●</span>
+                      <span style="color:#14532d;font-size:11px;font-weight:600;">${u.name}</span>
+                      <span style="color:#64748b;font-size:10px;">in ${u.loginTime}</span>
+                    </div>
+                  `).join('')}
+                </div>
+                ` : ''}
+              </div>
+
+              <!-- TOTALS CARDS -->
               <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;">
                 <div style="flex:1;min-width:110px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:14px 16px;">
                   <div style="font-size:10px;font-weight:700;color:#3b82f6;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">Generic</div>
@@ -1293,10 +1346,16 @@ export async function GET(request: Request) {
                   <div style="font-size:10px;font-weight:700;color:#16a34a;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">Net Sales</div>
                   <div style="font-size:17px;font-weight:800;color:#14532d;">${fmt(netSales)}</div>
                 </div>
+                ${totalExpensesBranch > 0 ? `
+                <div style="flex:1;min-width:110px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:14px 16px;">
+                  <div style="font-size:10px;font-weight:700;color:#dc2626;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">Expenses</div>
+                  <div style="font-size:17px;font-weight:800;color:#991b1b;">- ${fmt(totalExpensesBranch)}</div>
+                </div>` : ''}
               </div>
 
+              <!-- AGENT TABLE -->
               ${agentRows.length > 0 ? `
-              <div style="overflow-x:auto;border-radius:10px;border:1px solid #e2e8f0;">
+              <div style="overflow-x:auto;border-radius:10px;border:1px solid #e2e8f0;margin-bottom:${(branchExpenses || []).length > 0 ? '16px' : '0'};">
                 <table style="width:100%;border-collapse:collapse;font-size:12px;">
                   <thead>
                     <tr style="background:#1e293b;color:#94a3b8;text-align:left;">
@@ -1338,7 +1397,32 @@ export async function GET(request: Request) {
                   </tbody>
                 </table>
               </div>
-              ` : '<p style="color:#94a3b8;font-size:13px;margin:0;">No orders recorded today.</p>'}
+              ` : '<p style="color:#94a3b8;font-size:13px;margin:0 0 16px 0;">No orders recorded today.</p>'}
+
+              <!-- EXPENSES TABLE -->
+              ${(branchExpenses || []).length > 0 ? `
+              <div style="overflow-x:auto;border-radius:10px;border:1px solid #fecaca;">
+                <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                  <thead>
+                    <tr style="background:#fef2f2;text-align:left;">
+                      <th style="padding:9px 12px;font-size:10px;font-weight:700;color:#dc2626;letter-spacing:1px;text-transform:uppercase;">💸 Expense</th>
+                      <th style="padding:9px 12px;font-size:10px;font-weight:700;color:#dc2626;letter-spacing:1px;text-transform:uppercase;text-align:right;">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${(branchExpenses || []).map((e: any, i: number) => `
+                      <tr style="background:${i % 2 === 0 ? '#fff5f5' : '#ffffff'};border-bottom:1px solid #fee2e2;">
+                        <td style="padding:9px 12px;color:#374151;">${e.expense_name || '—'}</td>
+                        <td style="padding:9px 12px;text-align:right;font-weight:700;color:#dc2626;">- ${fmt(Number(e.amount || 0))}</td>
+                      </tr>
+                    `).join('')}
+                    <tr style="background:#fef2f2;border-top:1px solid #fecaca;">
+                      <td style="padding:9px 12px;font-weight:800;color:#991b1b;font-size:11px;text-transform:uppercase;">TOTAL EXPENSES</td>
+                      <td style="padding:9px 12px;text-align:right;font-weight:800;color:#dc2626;">- ${fmt(totalExpensesBranch)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>` : ''}
             </div>
           `;
         } // end branch loop
