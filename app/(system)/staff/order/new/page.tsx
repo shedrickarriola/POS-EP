@@ -20,6 +20,8 @@ import {
   X,
   Plus,
   AlertCircle,
+  Search,
+  Users,
 } from 'lucide-react';
 
 // Import the AI action from your actions file
@@ -60,6 +62,31 @@ interface OrderLineItem {
   }>;
   selected_lot_stock?: number;
   lot_locked?: boolean;
+}
+
+// === "Looking for Orders?" client overview row ===
+interface ClientOverviewRow {
+  id: string;
+  client_name: string;
+  agent: string;
+  phone: string | null;
+  owner: string | null;
+  birthday: string | null;
+  notes: string | null;
+  orderCount: number;
+  averageOrder: number;
+  lastOrderDate: string | null;
+  daysSinceLastOrder: number | null;
+  // Average days between this client's own orders (needs 2+ orders to compute)
+  avgGapDays: number | null;
+  // Rough estimate of order value likely missed by going quiet this long,
+  // based on THEIR OWN normal pace — used to prioritize outreach by revenue.
+  potentialRecovery: number;
+  // Projected next-order date = last order + their own average gap.
+  // Only computable with 2+ orders (needs avgGapDays).
+  nextExpectedDate: string | null;
+  // Negative = overdue by this many days, positive = still X days out.
+  daysUntilExpected: number | null;
 }
 
 // --- LEVENSHTEIN DISTANCE UTILITY ---
@@ -174,6 +201,175 @@ const mmyyyyToFullDate = (input: string): string => {
   return `${year}-${mm}-${dd}`;
 };
 
+// === "Looking for Orders?" HELPERS ===
+// Fallback thresholds for clients with fewer than 2 orders, where we can't
+// yet tell what "normal" looks like for them.
+const REACH_OUT_AFTER_DAYS = 30;
+const CHECK_IN_AFTER_DAYS = 14;
+
+// Once we know a client's own average gap between orders, we compare their
+// current silence to THAT instead of a flat number. 2x their normal gap =
+// clearly overdue; 1.2x = starting to run late.
+const REACH_OUT_RATIO = 2.0;
+const CHECK_IN_RATIO = 1.2;
+
+// Average days between a client's own orders. Needs 2+ orders — with just
+// one, there's no pattern to compare against yet.
+const computeAvgGapDays = (orderDates: string[]): number | null => {
+  if (orderDates.length < 2) return null;
+  const times = orderDates
+    .map((d) => new Date(d).getTime())
+    .sort((a, b) => a - b);
+  let totalGapMs = 0;
+  for (let i = 1; i < times.length; i++) {
+    totalGapMs += times[i] - times[i - 1];
+  }
+  return totalGapMs / (times.length - 1) / (1000 * 60 * 60 * 24);
+};
+
+// Picks whichever cadence (weekly or monthly) reads more naturally.
+// Plain-word cadence instead of a rate — "0.3x/week" is technically correct
+// but nobody thinks in fractional weekly rates. Words read faster.
+const describeFrequency = (avgGapDays: number | null): string => {
+  if (avgGapDays === null) return 'New Client';
+  if (avgGapDays < 2) return 'Daily';
+  if (avgGapDays < 5) return 'A Few Times a Week';
+  if (avgGapDays < 10) return 'Weekly';
+  if (avgGapDays < 20) return 'Every 2 Weeks';
+  if (avgGapDays < 45) return 'Monthly';
+  if (avgGapDays < 100) return 'Every 2-3 Months';
+  if (avgGapDays < 200) return 'A Few Times a Year';
+  return 'Rarely';
+};
+
+// Rough estimate of order value likely missed by staying quiet this long,
+// based on the client's own pace and average order size. Only counts the
+// time BEYOND their normal gap, so it's ~0 for anyone still on schedule.
+// Caps how many "missed cycles" we'll count. Without this, a client who
+// orders often but small (e.g. every 2 days) and goes quiet for a month
+// can rack up 15+ "missed" cycles — mathematically consistent, but not a
+// believable amount of pent-up demand. Capping keeps the estimate honest.
+// "Potential" is just this client's own average order — the realistic
+// value of getting them to place one more, not a multiplied cycle count.
+// It only counts once they're actually behind their own pace (or, for
+// clients without enough history for a pace yet, past the flat fallback).
+const computePotentialRecovery = (
+  daysSinceLastOrder: number | null,
+  avgGapDays: number | null,
+  averageOrder: number
+): number => {
+  if (!daysSinceLastOrder || averageOrder <= 0) return 0;
+  const isOverdue =
+    avgGapDays && avgGapDays > 0
+      ? daysSinceLastOrder > avgGapDays
+      : daysSinceLastOrder > CHECK_IN_AFTER_DAYS;
+  return isOverdue ? averageOrder : 0;
+};
+
+// Turns "days until their projected next order" into a plain, glanceable
+// label — this is the "high chance they order soon" signal.
+const describeNextExpected = (
+  daysUntilExpected: number | null
+): { label: string; colorClass: string } => {
+  if (daysUntilExpected === null) {
+    return { label: 'Not Enough Data', colorClass: 'text-slate-600' };
+  }
+  if (daysUntilExpected > 3) {
+    return {
+      label: `Due In ~${daysUntilExpected}d`,
+      colorClass: 'text-slate-300',
+    };
+  }
+  if (daysUntilExpected === 1) {
+    return { label: 'Due Tomorrow', colorClass: 'text-emerald-400 font-bold' };
+  }
+  if (daysUntilExpected >= 0) {
+    return { label: 'Due Today', colorClass: 'text-emerald-400 font-bold' };
+  }
+  const overdueBy = Math.abs(daysUntilExpected);
+  return {
+    label: `${overdueBy}d Overdue`,
+    colorClass:
+      overdueBy <= 7 ? 'text-amber-400 font-bold' : 'text-red-400 font-bold',
+  };
+};
+
+const getClientStatus = (
+  daysSinceLastOrder: number | null,
+  avgGapDays: number | null
+): { label: string; badgeClass: string; dotClass: string } => {
+  if (daysSinceLastOrder === null) {
+    return {
+      label: 'No Orders Yet',
+      badgeClass: 'bg-slate-600/10 text-slate-400 border-slate-500/30',
+      dotClass: 'bg-slate-500',
+    };
+  }
+
+  // Enough history to judge them against their own normal pace.
+  if (avgGapDays && avgGapDays > 0) {
+    const ratio = daysSinceLastOrder / avgGapDays;
+    if (ratio > REACH_OUT_RATIO) {
+      return {
+        label: 'Reach Out',
+        badgeClass: 'bg-red-500/10 text-red-400 border-red-500/30',
+        dotClass: 'bg-red-500',
+      };
+    }
+    if (ratio > CHECK_IN_RATIO) {
+      return {
+        label: 'Check In',
+        badgeClass: 'bg-amber-500/10 text-amber-400 border-amber-500/30',
+        dotClass: 'bg-amber-500',
+      };
+    }
+    return {
+      label: 'Active',
+      badgeClass: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
+      dotClass: 'bg-emerald-500',
+    };
+  }
+
+  // Fewer than 2 orders on file — fall back to flat day counts.
+  if (daysSinceLastOrder > REACH_OUT_AFTER_DAYS) {
+    return {
+      label: 'Reach Out',
+      badgeClass: 'bg-red-500/10 text-red-400 border-red-500/30',
+      dotClass: 'bg-red-500',
+    };
+  }
+  if (daysSinceLastOrder > CHECK_IN_AFTER_DAYS) {
+    return {
+      label: 'Check In',
+      badgeClass: 'bg-amber-500/10 text-amber-400 border-amber-500/30',
+      dotClass: 'bg-amber-500',
+    };
+  }
+  return {
+    label: 'Active',
+    badgeClass: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
+    dotClass: 'bg-emerald-500',
+  };
+};
+
+// Formats a stored date/timestamp into "Jul 3, 2026"
+const formatDisplayDate = (iso: string | null): string => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
+};
+
+// <input type="date"> needs an exact "YYYY-MM-DD" value or it won't populate.
+const toDateInputValue = (raw: string | null): string => {
+  if (!raw) return '';
+  return raw.substring(0, 10);
+};
+
 export default function NewOrderPOS() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
@@ -212,6 +408,33 @@ export default function NewOrderPOS() {
     }[]
   >([]);
   const [showNewClientModal, setShowNewClientModal] = useState(false);
+
+  // === CLIENT ORDERS OVERVIEW ("Looking for Orders?") ===
+  const [showOrdersOverviewModal, setShowOrdersOverviewModal] =
+    useState(false);
+  const [loadingOrderStats, setLoadingOrderStats] = useState(false);
+  const [clientOrderStats, setClientOrderStats] = useState<
+    ClientOverviewRow[]
+  >([]);
+  const [clientOverviewSearch, setClientOverviewSearch] = useState('');
+  const [clientOverviewAgentFilter, setClientOverviewAgentFilter] =
+    useState('ALL');
+  const [clientOverviewSort, setClientOverviewSort] = useState<{
+    key: keyof ClientOverviewRow;
+    dir: 'asc' | 'desc';
+  }>({ key: 'potentialRecovery', dir: 'desc' });
+  // Tracks inline-edit save status per cell (key = `${clientId}-${field}`)
+  const [savingCell, setSavingCell] = useState<string | null>(null);
+  const [savedCell, setSavedCell] = useState<string | null>(null);
+  const [errorCell, setErrorCell] = useState<{
+    key: string;
+    message: string;
+  } | null>(null);
+  // A row's Number/Owner/Birthday fields stay read-only until its lock icon
+  // is clicked, so nothing gets edited by accident.
+  const [unlockedClientIds, setUnlockedClientIds] = useState<Set<string>>(
+    new Set()
+  );
   const [newClientName, setNewClientName] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<
     'CASH' | 'CHEQUE' | 'TERMS'
@@ -495,6 +718,188 @@ export default function NewOrderPOS() {
     }
   };
 
+  // === CLIENT ORDERS OVERVIEW FETCH ("Looking for Orders?") ===
+  // Pulls every client + every order for this branch, then groups the orders
+  // client-side into last-order-date / average-order-size per client.
+  const fetchClientOrderOverview = async () => {
+    if (!isOfficeUse || !currentBranchId) return;
+    setLoadingOrderStats(true);
+    try {
+      const { data: clientRows, error: clientErr } = await supabase
+        .from('clients')
+        .select('id, client_name, agent, phone, owner, birthday, notes')
+        .eq('branch_id', currentBranchId);
+      if (clientErr) throw clientErr;
+
+      const { data: orderRows, error: orderErr } = await supabase
+        .from('orders')
+        .select('client_name, total_amount, created_at, agent')
+        .eq('branch_id', currentBranchId)
+        .order('created_at', { ascending: false });
+      if (orderErr) throw orderErr;
+
+      type Agg = {
+        count: number;
+        total: number;
+        last: string | null;
+        dates: string[];
+      };
+      const statsByClient: Record<string, Agg> = {};
+
+      (orderRows || []).forEach((o: any) => {
+        const key = (o.client_name || '').trim().toUpperCase();
+        if (!key || key === 'WALK-IN') return;
+        if (!statsByClient[key]) {
+          statsByClient[key] = { count: 0, total: 0, last: null, dates: [] };
+        }
+        statsByClient[key].count += 1;
+        statsByClient[key].total += Number(o.total_amount) || 0;
+        statsByClient[key].dates.push(o.created_at);
+        if (
+          !statsByClient[key].last ||
+          o.created_at > (statsByClient[key].last as string)
+        ) {
+          statsByClient[key].last = o.created_at;
+        }
+      });
+
+      const merged: ClientOverviewRow[] = (clientRows || []).map((c: any) => {
+        const stat = statsByClient[(c.client_name || '').trim().toUpperCase()];
+        const lastOrderDate = stat?.last || null;
+        const daysSinceLastOrder = lastOrderDate
+          ? Math.floor(
+              (Date.now() - new Date(lastOrderDate).getTime()) /
+                (1000 * 60 * 60 * 24)
+            )
+          : null;
+        const averageOrder = stat ? stat.total / stat.count : 0;
+        const avgGapDays = stat ? computeAvgGapDays(stat.dates) : null;
+        const potentialRecovery = computePotentialRecovery(
+          daysSinceLastOrder,
+          avgGapDays,
+          averageOrder
+        );
+
+        let nextExpectedDate: string | null = null;
+        let daysUntilExpected: number | null = null;
+        if (lastOrderDate && avgGapDays !== null) {
+          const nextTime =
+            new Date(lastOrderDate).getTime() +
+            avgGapDays * 24 * 60 * 60 * 1000;
+          nextExpectedDate = new Date(nextTime).toISOString();
+          daysUntilExpected = Math.round(
+            (nextTime - Date.now()) / (1000 * 60 * 60 * 24)
+          );
+        }
+
+        return {
+          id: c.id,
+          client_name: c.client_name || 'Unnamed Client',
+          agent: (c.agent && c.agent.trim()) || 'MAIN OFFICE',
+          phone: c.phone ?? null,
+          owner: c.owner ?? null,
+          birthday: c.birthday ?? null,
+          notes: c.notes ?? null,
+          orderCount: stat?.count || 0,
+          averageOrder,
+          lastOrderDate,
+          daysSinceLastOrder,
+          avgGapDays,
+          potentialRecovery,
+          nextExpectedDate,
+          daysUntilExpected,
+        };
+      });
+
+      setClientOrderStats(merged);
+    } catch (err: any) {
+      console.error('Fetch client overview error:', err);
+    } finally {
+      setLoadingOrderStats(false);
+    }
+  };
+
+  // Reflects a keystroke immediately in the table (no DB round trip yet).
+  const updateLocalClientField = (
+    clientId: string,
+    field: 'phone' | 'owner' | 'birthday' | 'notes',
+    value: string
+  ) => {
+    setClientOrderStats((prev) =>
+      prev.map((c) => (c.id === clientId ? { ...c, [field]: value } : c))
+    );
+  };
+
+  // Persists an edited number/owner/birthday/notes back to the `clients` table.
+  const saveClientField = async (
+    clientId: string,
+    field: 'phone' | 'owner' | 'birthday' | 'notes',
+    value: string
+  ) => {
+    const cellKey = `${clientId}-${field}`;
+    setSavingCell(cellKey);
+    setErrorCell((prev) => (prev?.key === cellKey ? null : prev));
+
+    try {
+      const { error } = await supabase
+        .from('clients')
+        .update({ [field]: value.trim() ? value.trim() : null })
+        .eq('id', clientId);
+
+      if (error) throw error;
+
+      setSavedCell(cellKey);
+      setTimeout(() => {
+        setSavedCell((prev) => (prev === cellKey ? null : prev));
+      }, 1500);
+    } catch (err: any) {
+      console.error(`Failed to update client ${field}:`, err);
+      setErrorCell({ key: cellKey, message: err.message || 'Save failed' });
+    } finally {
+      setSavingCell((prev) => (prev === cellKey ? null : prev));
+    }
+  };
+
+  // Small inline spinner / checkmark / error icon shown beside an edited cell.
+  const renderCellStatus = (cellKey: string) => {
+    if (savingCell === cellKey) {
+      return <Loader2 size={12} className="animate-spin text-slate-500" />;
+    }
+    if (savedCell === cellKey) {
+      return <CheckCircle2 size={12} className="text-emerald-500" />;
+    }
+    if (errorCell?.key === cellKey) {
+      return (
+        <span title={errorCell.message}>
+          <AlertCircle size={12} className="text-red-500" />
+        </span>
+      );
+    }
+    return null;
+  };
+
+  // Unlocks (or re-locks) a single client row's editable fields.
+  const toggleClientEditUnlock = (clientId: string) => {
+    setUnlockedClientIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(clientId)) {
+        next.delete(clientId);
+      } else {
+        next.add(clientId);
+      }
+      return next;
+    });
+  };
+
+  // Closing the modal always re-locks every row, so it opens safely next time.
+  const closeOrdersOverviewModal = () => {
+    setShowOrdersOverviewModal(false);
+    setUnlockedClientIds(new Set());
+    setSavingCell(null);
+    setSavedCell(null);
+    setErrorCell(null);
+  };
+
   // --- CREATE NEW CLIENT ---
   const handleCreateNewClient = async () => {
     if (!newClientName.trim() || !currentBranchId) return;
@@ -664,6 +1069,84 @@ export default function NewOrderPOS() {
       termsAllowed,
     };
   }, [items, cashReceived, paymentMethod, isOfficeUse, clientName]);
+
+  // === CLIENT ORDERS OVERVIEW: search, sort, and status helpers ===
+  // For most columns, the "interesting" values are highest (most overdue
+  // days, most revenue). daysUntilExpected is the opposite — its most
+  // urgent rows are the smallest (most negative) numbers — so it gets an
+  // ascending first click instead.
+  const ASCENDING_FIRST_KEYS = new Set<keyof ClientOverviewRow>([
+    'daysUntilExpected',
+  ]);
+
+  const toggleOverviewSort = (key: keyof ClientOverviewRow) => {
+    setClientOverviewSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+        : { key, dir: ASCENDING_FIRST_KEYS.has(key) ? 'asc' : 'desc' }
+    );
+  };
+
+  const sortIndicator = (key: keyof ClientOverviewRow) => {
+    if (clientOverviewSort.key !== key) return '';
+    return clientOverviewSort.dir === 'asc' ? ' ↑' : ' ↓';
+  };
+
+  const filteredClientStats = useMemo(() => {
+    let list = [...clientOrderStats];
+
+    if (clientOverviewAgentFilter !== 'ALL') {
+      list = list.filter((c) => c.agent === clientOverviewAgentFilter);
+    }
+
+    if (clientOverviewSearch.trim()) {
+      const q = clientOverviewSearch.trim().toLowerCase();
+      list = list.filter(
+        (c) =>
+          c.client_name.toLowerCase().includes(q) ||
+          c.agent.toLowerCase().includes(q)
+      );
+    }
+
+    const { key, dir } = clientOverviewSort;
+    const sign = dir === 'asc' ? 1 : -1;
+
+    list.sort((a, b) => {
+      const aVal = a[key];
+      const bVal = b[key];
+
+      // Missing values (never ordered, no owner/birthday on file) always
+      // sink to the bottom regardless of direction, so they don't drown out
+      // the rows that actually have something to compare.
+      const aEmpty = aVal === null || aVal === undefined || aVal === '';
+      const bEmpty = bVal === null || bVal === undefined || bVal === '';
+      if (aEmpty && bEmpty) return 0;
+      if (aEmpty) return 1;
+      if (bEmpty) return -1;
+
+      if (typeof aVal === 'string' && typeof bVal === 'string') {
+        return aVal.localeCompare(bVal) * sign;
+      }
+      return ((Number(aVal) || 0) - (Number(bVal) || 0)) * sign;
+    });
+
+    return list;
+  }, [
+    clientOrderStats,
+    clientOverviewAgentFilter,
+    clientOverviewSearch,
+    clientOverviewSort,
+  ]);
+
+  // Rolled up only when one agent is selected — sums whatever's currently
+  // visible in the table (agent filter + search combined).
+  const agentPotentialTotal =
+    clientOverviewAgentFilter !== 'ALL'
+      ? filteredClientStats.reduce((sum, c) => sum + c.potentialRecovery, 0)
+      : 0;
+  const agentClientsWithPotential = filteredClientStats.filter(
+    (c) => c.potentialRecovery > 0
+  ).length;
 
   // --- EXPIRY DATE VALIDATION ---
   const validateExpiryDates = (): boolean => {
@@ -1135,6 +1618,478 @@ export default function NewOrderPOS() {
         </div>
       )}
 
+      {/* CLIENT ORDERS OVERVIEW MODAL ("Looking for Orders?") */}
+      {showOrdersOverviewModal && (
+        <div className="fixed inset-0 z-[2000] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 border border-white/10 rounded-2xl w-full max-w-7xl max-h-[88vh] flex flex-col shadow-2xl">
+            {/* Modal Header */}
+            <div className="flex justify-between items-start p-6 border-b border-white/10">
+              <div>
+                <h2 className="text-lg font-black text-white uppercase tracking-tight flex items-center gap-2">
+                  <Users size={18} className="text-amber-400" />
+                  Looking For Orders?
+                </h2>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Sorted by ₱ opportunity — each client is judged against{' '}
+                  <span className="text-slate-400">their own</span> normal
+                  ordering pace, not a flat day count.
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={fetchClientOrderOverview}
+                  title="Refresh"
+                  className="text-slate-500 hover:text-blue-400"
+                >
+                  <RefreshCcw
+                    size={16}
+                    className={loadingOrderStats ? 'animate-spin' : ''}
+                  />
+                </button>
+                <button
+                  onClick={closeOrdersOverviewModal}
+                  className="text-slate-500 hover:text-white"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+            </div>
+
+            {/* Search + Filter + Legend */}
+            <div className="p-4 border-b border-white/5 flex flex-wrap items-center gap-4">
+              <div className="relative flex-1 min-w-[200px] max-w-xs">
+                <Search
+                  size={13}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600"
+                />
+                <input
+                  className="w-full bg-slate-950 border border-white/10 rounded-lg pl-8 pr-3 py-2 text-white outline-none focus:border-blue-500 text-xs"
+                  placeholder="Search client or agent..."
+                  value={clientOverviewSearch}
+                  onChange={(e) => setClientOverviewSearch(e.target.value)}
+                />
+              </div>
+
+              <select
+                value={clientOverviewAgentFilter}
+                onChange={(e) => {
+                  const nextAgent = e.target.value;
+                  setClientOverviewAgentFilter(nextAgent);
+                  if (nextAgent !== 'ALL') {
+                    setClientOverviewSort({
+                      key: 'potentialRecovery',
+                      dir: 'desc',
+                    });
+                  }
+                }}
+                className="bg-slate-950 border border-white/10 rounded-lg px-3 py-2 text-white outline-none focus:border-blue-500 text-xs"
+              >
+                <option value="ALL">All Agents</option>
+                <option value="MAIN OFFICE">MAIN OFFICE</option>
+                {agents.map((a) => (
+                  <option key={a.id} value={a.full_name}>
+                    {a.full_name}
+                  </option>
+                ))}
+              </select>
+
+              <div className="flex items-center gap-3 text-[9px] font-black uppercase text-slate-500 ml-auto">
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-red-500" /> Reach
+                  Out
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-amber-500" /> Check
+                  In
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500" />{' '}
+                  Active
+                </span>
+              </div>
+            </div>
+
+            {/* Agent Potential Total - only when one agent is selected */}
+            {clientOverviewAgentFilter !== 'ALL' && (
+              <div className="px-4 py-3 bg-amber-500/5 border-b border-amber-500/10 flex items-center justify-between">
+                <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">
+                  {clientOverviewAgentFilter} — Total Potential
+                </span>
+                <span className="text-sm font-black text-amber-400 font-mono">
+                  ~₱
+                  {agentPotentialTotal.toLocaleString(undefined, {
+                    maximumFractionDigits: 0,
+                  })}
+                  <span className="text-[9px] text-slate-500 font-normal uppercase ml-2 tracking-wider">
+                    across {agentClientsWithPotential} client
+                    {agentClientsWithPotential === 1 ? '' : 's'}
+                  </span>
+                </span>
+              </div>
+            )}
+
+            {/* Table */}
+            <div className="flex-1 overflow-auto">
+              {loadingOrderStats ? (
+                <div className="p-16 flex flex-col items-center justify-center gap-3 text-slate-500">
+                  <Loader2 className="animate-spin" size={28} />
+                  <p className="text-xs font-bold uppercase">
+                    Crunching order history...
+                  </p>
+                </div>
+              ) : filteredClientStats.length === 0 ? (
+                <div className="p-16 text-center text-slate-500 text-xs font-bold uppercase">
+                  No clients found for this branch yet.
+                </div>
+              ) : (
+                <table className="w-full text-left text-[12px]">
+                  <thead className="bg-white/5 text-[10px] font-black uppercase text-slate-500 sticky top-0 z-10">
+                    <tr>
+                      <th
+                        onClick={() => toggleOverviewSort('agent')}
+                        className="p-3 cursor-pointer select-none whitespace-nowrap"
+                      >
+                        Agent{sortIndicator('agent')}
+                      </th>
+                      <th
+                        onClick={() => toggleOverviewSort('client_name')}
+                        className="p-3 cursor-pointer select-none whitespace-nowrap"
+                      >
+                        Client{sortIndicator('client_name')}
+                      </th>
+                      <th className="p-3 text-center whitespace-nowrap">
+                        Edit
+                      </th>
+                      <th className="p-3 whitespace-nowrap">Number</th>
+                      <th
+                        onClick={() => toggleOverviewSort('owner')}
+                        className="p-3 cursor-pointer select-none whitespace-nowrap"
+                      >
+                        Owner{sortIndicator('owner')}
+                      </th>
+                      <th
+                        onClick={() => toggleOverviewSort('birthday')}
+                        className="p-3 cursor-pointer select-none whitespace-nowrap"
+                      >
+                        Birthday{sortIndicator('birthday')}
+                      </th>
+                      <th className="p-3 whitespace-nowrap">
+                        Manager Notes
+                      </th>
+                      <th
+                        onClick={() => toggleOverviewSort('daysSinceLastOrder')}
+                        className="p-3 text-center cursor-pointer select-none whitespace-nowrap"
+                      >
+                        Last Ordered{sortIndicator('daysSinceLastOrder')}
+                      </th>
+                      <th
+                        onClick={() => toggleOverviewSort('avgGapDays')}
+                        className="p-3 text-center cursor-pointer select-none whitespace-nowrap"
+                        title="Average days between this client's own orders"
+                      >
+                        Frequency{sortIndicator('avgGapDays')}
+                      </th>
+                      <th
+                        onClick={() => toggleOverviewSort('daysUntilExpected')}
+                        className="p-3 text-center cursor-pointer select-none whitespace-nowrap"
+                        title="Projected next order, based on this client's own pace — not a guarantee"
+                      >
+                        Next Expected{sortIndicator('daysUntilExpected')}
+                      </th>
+                      <th
+                        onClick={() => toggleOverviewSort('averageOrder')}
+                        className="p-3 text-right cursor-pointer select-none whitespace-nowrap"
+                      >
+                        Avg Order{sortIndicator('averageOrder')}
+                      </th>
+                      <th
+                        onClick={() => toggleOverviewSort('orderCount')}
+                        className="p-3 text-center cursor-pointer select-none whitespace-nowrap"
+                      >
+                        Orders{sortIndicator('orderCount')}
+                      </th>
+                      <th
+                        onClick={() => toggleOverviewSort('potentialRecovery')}
+                        className="p-3 text-center cursor-pointer select-none whitespace-nowrap"
+                        title="Sort by estimated ₱ opportunity"
+                      >
+                        Status{sortIndicator('potentialRecovery')}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {filteredClientStats.map((c) => {
+                      const status = getClientStatus(
+                        c.daysSinceLastOrder,
+                        c.avgGapDays
+                      );
+                      const nextExpected = describeNextExpected(
+                        c.daysUntilExpected
+                      );
+                      const isUnlocked = unlockedClientIds.has(c.id);
+
+                      return (
+                        <tr key={c.id} className="hover:bg-white/[0.02]">
+                          <td className="p-3 text-slate-400 whitespace-nowrap">
+                            {c.agent}
+                          </td>
+                          <td className="p-3 font-bold text-white whitespace-nowrap">
+                            {c.client_name}
+                          </td>
+                          <td className="p-3 text-center whitespace-nowrap">
+                            <button
+                              type="button"
+                              onClick={() => toggleClientEditUnlock(c.id)}
+                              title={
+                                isUnlocked
+                                  ? 'Lock this client\u2019s fields'
+                                  : 'Unlock to edit number, owner, and birthday'
+                              }
+                              className="shrink-0"
+                            >
+                              {isUnlocked ? (
+                                <Unlock size={14} className="text-orange-400" />
+                              ) : (
+                                <Lock size={14} className="text-slate-400" />
+                              )}
+                            </button>
+                          </td>
+                          <td className="p-3 whitespace-nowrap">
+                            {isUnlocked ? (
+                              <div className="flex items-center gap-1.5">
+                                <input
+                                  type="tel"
+                                  value={c.phone || ''}
+                                  placeholder="Add number"
+                                  onChange={(e) =>
+                                    updateLocalClientField(
+                                      c.id,
+                                      'phone',
+                                      e.target.value
+                                    )
+                                  }
+                                  onBlur={(e) =>
+                                    saveClientField(
+                                      c.id,
+                                      'phone',
+                                      e.target.value
+                                    )
+                                  }
+                                  className="w-28 bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500"
+                                />
+                                {renderCellStatus(`${c.id}-phone`)}
+                              </div>
+                            ) : (
+                              <span className="text-slate-300">
+                                {c.phone || (
+                                  <span className="text-slate-600">—</span>
+                                )}
+                              </span>
+                            )}
+                          </td>
+                          <td className="p-3 whitespace-nowrap">
+                            {isUnlocked ? (
+                              <div className="flex items-center gap-1.5">
+                                <input
+                                  type="text"
+                                  value={c.owner || ''}
+                                  placeholder="—"
+                                  onChange={(e) =>
+                                    updateLocalClientField(
+                                      c.id,
+                                      'owner',
+                                      e.target.value
+                                    )
+                                  }
+                                  onBlur={(e) =>
+                                    saveClientField(
+                                      c.id,
+                                      'owner',
+                                      e.target.value
+                                    )
+                                  }
+                                  className="w-28 bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500"
+                                />
+                                {renderCellStatus(`${c.id}-owner`)}
+                              </div>
+                            ) : (
+                              <span className="text-slate-300">
+                                {c.owner || (
+                                  <span className="text-slate-600">—</span>
+                                )}
+                              </span>
+                            )}
+                          </td>
+                          <td className="p-3 whitespace-nowrap">
+                            {isUnlocked ? (
+                              <div className="flex items-start gap-1.5">
+                                <input
+                                  type="date"
+                                  value={toDateInputValue(c.birthday)}
+                                  onChange={(e) =>
+                                    updateLocalClientField(
+                                      c.id,
+                                      'birthday',
+                                      e.target.value
+                                    )
+                                  }
+                                  onBlur={(e) =>
+                                    saveClientField(
+                                      c.id,
+                                      'birthday',
+                                      e.target.value
+                                    )
+                                  }
+                                  className="bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500"
+                                />
+                                {renderCellStatus(`${c.id}-birthday`)}
+                              </div>
+                            ) : (
+                              <span className="text-slate-300">
+                                {c.birthday ? (
+                                  formatDisplayDate(c.birthday)
+                                ) : (
+                                  <span className="text-slate-600">—</span>
+                                )}
+                              </span>
+                            )}
+                          </td>
+                          <td className="p-3">
+                            {isUnlocked ? (
+                              <div className="flex items-start gap-1.5">
+                                <textarea
+                                  rows={2}
+                                  value={c.notes || ''}
+                                  placeholder="Add a note..."
+                                  onChange={(e) =>
+                                    updateLocalClientField(
+                                      c.id,
+                                      'notes',
+                                      e.target.value
+                                    )
+                                  }
+                                  onBlur={(e) =>
+                                    saveClientField(
+                                      c.id,
+                                      'notes',
+                                      e.target.value
+                                    )
+                                  }
+                                  className="w-40 bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500 resize-y"
+                                />
+                                {renderCellStatus(`${c.id}-notes`)}
+                              </div>
+                            ) : (
+                              <span
+                                className="text-slate-300 block max-w-[180px] truncate"
+                                title={c.notes || ''}
+                              >
+                                {c.notes || (
+                                  <span className="text-slate-600">—</span>
+                                )}
+                              </span>
+                            )}
+                          </td>
+                          <td className="p-3 text-center whitespace-nowrap">
+                            {c.lastOrderDate ? (
+                              <div>
+                                <div className="text-slate-300">
+                                  {formatDisplayDate(c.lastOrderDate)}
+                                </div>
+                                <div className="text-[9px] text-slate-500">
+                                  {c.daysSinceLastOrder === 0
+                                    ? 'today'
+                                    : `${c.daysSinceLastOrder} day${
+                                        c.daysSinceLastOrder === 1 ? '' : 's'
+                                      } ago`}
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-slate-600">Never</span>
+                            )}
+                          </td>
+                          <td className="p-3 text-center whitespace-nowrap">
+                            {c.avgGapDays !== null ? (
+                              <div>
+                                <div className="text-slate-300">
+                                  {describeFrequency(c.avgGapDays)}
+                                </div>
+                                <div className="text-[9px] text-slate-500">
+                                  Every ~
+                                  {Math.max(1, Math.round(c.avgGapDays))}d
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-slate-600">New</span>
+                            )}
+                          </td>
+                          <td className="p-3 text-center whitespace-nowrap">
+                            <div className={nextExpected.colorClass}>
+                              {nextExpected.label}
+                            </div>
+                            {c.nextExpectedDate && (
+                              <div className="text-[9px] text-slate-500">
+                                {formatDisplayDate(c.nextExpectedDate)}
+                              </div>
+                            )}
+                          </td>
+                          <td className="p-3 text-right font-mono font-bold text-emerald-400 whitespace-nowrap">
+                            {c.orderCount > 0
+                              ? `₱${c.averageOrder.toLocaleString(undefined, {
+                                  maximumFractionDigits: 0,
+                                })}`
+                              : '—'}
+                          </td>
+                          <td className="p-3 text-center text-slate-400">
+                            {c.orderCount}
+                          </td>
+                          <td className="p-3 text-center">
+                            <span
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[9px] font-black uppercase whitespace-nowrap ${status.badgeClass}`}
+                            >
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full ${status.dotClass}`}
+                              />
+                              {status.label}
+                            </span>
+                            {c.potentialRecovery > 0 && (
+                              <div
+                                className="text-[9px] text-amber-400/80 mt-1 font-mono whitespace-nowrap"
+                                title="This client's own average order size — shown once they've gone past their usual ordering pace"
+                              >
+                                ~₱
+                                {c.potentialRecovery.toLocaleString(undefined, {
+                                  maximumFractionDigits: 0,
+                                })}{' '}
+                                potential
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 border-t border-white/10 flex justify-between items-center">
+              <span className="text-[10px] text-slate-500 font-bold uppercase">
+                {filteredClientStats.length} client
+                {filteredClientStats.length === 1 ? '' : 's'}
+              </span>
+              <button
+                onClick={closeOrdersOverviewModal}
+                className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-bold text-xs"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* TERMS ERROR MODAL */}
       {showTermsError && (
         <div className="fixed inset-0 z-[2500] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
@@ -1328,6 +2283,24 @@ export default function NewOrderPOS() {
               />
             )}
           </div>
+
+          {/* LOOKING FOR ORDERS? - OFFICE USE ONLY */}
+          {isOfficeUse && (
+            <button
+              type="button"
+              onClick={() => {
+                setShowOrdersOverviewModal(true);
+                fetchClientOrderOverview();
+              }}
+              title="See every client's last order, average order, and who to message"
+              className="shrink-0 flex items-center gap-2 px-4 py-2 rounded-lg border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 transition-all"
+            >
+              <Search size={14} />
+              <span className="text-[9px] font-black uppercase tracking-wider whitespace-nowrap">
+                Looking for Orders?
+              </span>
+            </button>
+          )}
 
           {/* AGENT DROPDOWN - OFFICE USE ONLY */}
           {isOfficeUse && (
