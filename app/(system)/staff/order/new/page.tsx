@@ -410,12 +410,11 @@ export default function NewOrderPOS() {
   const [showNewClientModal, setShowNewClientModal] = useState(false);
 
   // === CLIENT ORDERS OVERVIEW ("Looking for Orders?") ===
-  const [showOrdersOverviewModal, setShowOrdersOverviewModal] =
-    useState(false);
+  const [showOrdersOverviewModal, setShowOrdersOverviewModal] = useState(false);
   const [loadingOrderStats, setLoadingOrderStats] = useState(false);
-  const [clientOrderStats, setClientOrderStats] = useState<
-    ClientOverviewRow[]
-  >([]);
+  const [clientOrderStats, setClientOrderStats] = useState<ClientOverviewRow[]>(
+    []
+  );
   const [clientOverviewSearch, setClientOverviewSearch] = useState('');
   const [clientOverviewAgentFilter, setClientOverviewAgentFilter] =
     useState('ALL');
@@ -822,7 +821,7 @@ export default function NewOrderPOS() {
   // Reflects a keystroke immediately in the table (no DB round trip yet).
   const updateLocalClientField = (
     clientId: string,
-    field: 'phone' | 'owner' | 'birthday' | 'notes',
+    field: 'phone' | 'owner' | 'birthday' | 'notes' | 'agent',
     value: string
   ) => {
     setClientOrderStats((prev) =>
@@ -830,10 +829,10 @@ export default function NewOrderPOS() {
     );
   };
 
-  // Persists an edited number/owner/birthday/notes back to the `clients` table.
+  // Persists an edited number/owner/birthday/notes/agent back to the `clients` table.
   const saveClientField = async (
     clientId: string,
-    field: 'phone' | 'owner' | 'birthday' | 'notes',
+    field: 'phone' | 'owner' | 'birthday' | 'notes' | 'agent',
     value: string
   ) => {
     const cellKey = `${clientId}-${field}`;
@@ -1695,8 +1694,7 @@ export default function NewOrderPOS() {
 
               <div className="flex items-center gap-3 text-[9px] font-black uppercase text-slate-500 ml-auto">
                 <span className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-red-500" /> Reach
-                  Out
+                  <span className="w-2 h-2 rounded-full bg-red-500" /> Reach Out
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-amber-500" /> Check
@@ -1773,9 +1771,7 @@ export default function NewOrderPOS() {
                       >
                         Birthday{sortIndicator('birthday')}
                       </th>
-                      <th className="p-3 whitespace-nowrap">
-                        Manager Notes
-                      </th>
+                      <th className="p-3 whitespace-nowrap">Manager Notes</th>
                       <th
                         onClick={() => toggleOverviewSort('daysSinceLastOrder')}
                         className="p-3 text-center cursor-pointer select-none whitespace-nowrap"
@@ -1830,8 +1826,36 @@ export default function NewOrderPOS() {
 
                       return (
                         <tr key={c.id} className="hover:bg-white/[0.02]">
-                          <td className="p-3 text-slate-400 whitespace-nowrap">
-                            {c.agent}
+                          <td className="p-3 whitespace-nowrap">
+                            {isUnlocked ? (
+                              <div className="flex items-center gap-1.5">
+                                <select
+                                  value={c.agent}
+                                  onChange={(e) => {
+                                    const newAgent = e.target.value;
+                                    updateLocalClientField(
+                                      c.id,
+                                      'agent',
+                                      newAgent
+                                    );
+                                    saveClientField(c.id, 'agent', newAgent);
+                                  }}
+                                  className="bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500"
+                                >
+                                  <option value="MAIN OFFICE">
+                                    MAIN OFFICE
+                                  </option>
+                                  {agents.map((a) => (
+                                    <option key={a.id} value={a.full_name}>
+                                      {a.full_name}
+                                    </option>
+                                  ))}
+                                </select>
+                                {renderCellStatus(`${c.id}-agent`)}
+                              </div>
+                            ) : (
+                              <span className="text-slate-400">{c.agent}</span>
+                            )}
                           </td>
                           <td className="p-3 font-bold text-white whitespace-nowrap">
                             {c.client_name}
@@ -2015,8 +2039,8 @@ export default function NewOrderPOS() {
                                   {describeFrequency(c.avgGapDays)}
                                 </div>
                                 <div className="text-[9px] text-slate-500">
-                                  Every ~
-                                  {Math.max(1, Math.round(c.avgGapDays))}d
+                                  Every ~{Math.max(1, Math.round(c.avgGapDays))}
+                                  d
                                 </div>
                               </div>
                             ) : (
