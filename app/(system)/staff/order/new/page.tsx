@@ -410,11 +410,12 @@ export default function NewOrderPOS() {
   const [showNewClientModal, setShowNewClientModal] = useState(false);
 
   // === CLIENT ORDERS OVERVIEW ("Looking for Orders?") ===
-  const [showOrdersOverviewModal, setShowOrdersOverviewModal] = useState(false);
+  const [showOrdersOverviewModal, setShowOrdersOverviewModal] =
+    useState(false);
   const [loadingOrderStats, setLoadingOrderStats] = useState(false);
-  const [clientOrderStats, setClientOrderStats] = useState<ClientOverviewRow[]>(
-    []
-  );
+  const [clientOrderStats, setClientOrderStats] = useState<
+    ClientOverviewRow[]
+  >([]);
   const [clientOverviewSearch, setClientOverviewSearch] = useState('');
   const [clientOverviewAgentFilter, setClientOverviewAgentFilter] =
     useState('ALL');
@@ -1694,7 +1695,8 @@ export default function NewOrderPOS() {
 
               <div className="flex items-center gap-3 text-[9px] font-black uppercase text-slate-500 ml-auto">
                 <span className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-red-500" /> Reach Out
+                  <span className="w-2 h-2 rounded-full bg-red-500" /> Reach
+                  Out
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-amber-500" /> Check
@@ -1771,7 +1773,9 @@ export default function NewOrderPOS() {
                       >
                         Birthday{sortIndicator('birthday')}
                       </th>
-                      <th className="p-3 whitespace-nowrap">Manager Notes</th>
+                      <th className="p-3 whitespace-nowrap">
+                        Manager Notes
+                      </th>
                       <th
                         onClick={() => toggleOverviewSort('daysSinceLastOrder')}
                         className="p-3 text-center cursor-pointer select-none whitespace-nowrap"
@@ -1854,10 +1858,12 @@ export default function NewOrderPOS() {
                                 {renderCellStatus(`${c.id}-agent`)}
                               </div>
                             ) : (
-                              <span className="text-slate-400">{c.agent}</span>
+                              <span className="text-slate-400">
+                                {c.agent}
+                              </span>
                             )}
                           </td>
-                          <td className="p-3 font-bold text-white whitespace-nowrap">
+                          <td className="p-3 font-bold text-white max-w-[160px] break-words">
                             {c.client_name}
                           </td>
                           <td className="p-3 text-center whitespace-nowrap">
@@ -2039,8 +2045,8 @@ export default function NewOrderPOS() {
                                   {describeFrequency(c.avgGapDays)}
                                 </div>
                                 <div className="text-[9px] text-slate-500">
-                                  Every ~{Math.max(1, Math.round(c.avgGapDays))}
-                                  d
+                                  Every ~
+                                  {Math.max(1, Math.round(c.avgGapDays))}d
                                 </div>
                               </div>
                             ) : (
