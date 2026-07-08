@@ -2467,7 +2467,7 @@ export default function StaffDashboard() {
           1
         );
         const lineHeight = 6.5;
-        const rowHeight = lineHeight * numLines + 3;
+        const rowHeight = lineHeight * numLines;
 
         // === KEY FIX: Check if we need a new page before drawing this row ===
         addPageIfNeeded(rowHeight + 8);
