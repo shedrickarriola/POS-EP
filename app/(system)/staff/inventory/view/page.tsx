@@ -560,17 +560,32 @@ export default function InventoryProtocol() {
                                             key={i}
                                             className="flex items-center justify-between bg-white/5 hover:bg-white/10 px-3 py-1 rounded text-[10px] font-mono border border-white/5"
                                           >
-                                            <div className="flex items-center gap-3">
-                                              <span className="text-emerald-400 font-bold tabular-nums w-14">
-                                                {p.created_date_pht}
-                                              </span>
-                                              <span className="text-slate-200 font-semibold">
-                                                {p.doc_number}
-                                              </span>
+                                            <div className="flex-1">
+                                              <div className="flex items-center gap-3">
+                                                <span className="text-emerald-400 font-bold tabular-nums w-14">
+                                                  {p.created_date_pht}
+                                                </span>
+                                                <span className="text-slate-200 font-semibold">
+                                                  {p.doc_number}
+                                                </span>
+                                              </div>
+                                              {p.supplier_name && (
+                                                <span className="text-[8px] text-emerald-300/70">
+                                                  {p.supplier_name}
+                                                </span>
+                                              )}
                                             </div>
-                                            <span className="text-emerald-400 font-bold">
-                                              +{p.quantity}
-                                            </span>
+                                            <div className="text-right">
+                                              <span className="text-emerald-400 font-bold">
+                                                +{p.quantity}
+                                              </span>
+                                              <div className="text-[9px] text-slate-400">
+                                                ₱
+                                                {Number(
+                                                  p.buy_cost || 0
+                                                ).toFixed(2)}
+                                              </div>
+                                            </div>
                                           </div>
                                         ))}
                                     </div>
@@ -771,27 +786,25 @@ export default function InventoryProtocol() {
                       localStorage.getItem('active_branch') || '{}'
                     );
 
-                    const { error: healError } = await supabase.rpc(
-                      'heal_purchase_order_items',
+                    // 🔥 NEW: Single wrapper RPC with increased timeout
+                    const { error } = await supabase.rpc(
+                      'run_full_inventory_sync',
                       {
-                        target_branch_id: savedBranch.id,
+                        p_branch_id: savedBranch.id,
                       }
                     );
-                    if (healError) throw healError;
-
-                    const { error: syncError } = await supabase.rpc(
-                      'sync_all_inventory_stock',
-                      {
-                        target_branch_id: savedBranch.id,
-                      }
-                    );
-                    if (syncError) throw syncError;
+                    if (error) throw error;
 
                     await fetchAllInventory(savedBranch.id);
                     triggerToast('System Healed & Sync Complete!', 'success');
                   } catch (error: any) {
                     console.error('Full Sync Error:', error);
-                    triggerToast('Sync failed. Please check console.', 'error');
+                    triggerToast(
+                      error.message?.includes('timeout')
+                        ? 'Sync timed out. Try again or contact admin.'
+                        : 'Sync failed. Please check console.',
+                      'error'
+                    );
                   } finally {
                     setIsSyncing(false);
                   }
