@@ -296,15 +296,9 @@ export default function UpdatePurchaseOrder() {
           .update({ stock: appliedStock })
           .eq('id', item.inventory_id);
 
-        // === NEW: Update inventory.buy_cost ONLY IF HIGHER ===
-        const currentInvBuyCost = Number(inv?.buy_cost) || 0;
-        if (newBuyCost > currentInvBuyCost) {
-          await supabase
-            .from('inventory')
-            .update({ buy_cost: newBuyCost })
-            .eq('id', item.inventory_id);
-        }
-        // ====================================================
+        // inventory.buy_cost is now kept in sync automatically by the
+        // trg_purchase_order_items_buy_cost_sync trigger on purchase_order_items
+        // (recomputes MAX(buy_cost) for this item/branch on every insert/update/delete).
 
         syncLog.push({
           name: item.item_name,
