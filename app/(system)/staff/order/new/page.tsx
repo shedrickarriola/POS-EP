@@ -9,6 +9,7 @@ import {
   User as UserIcon,
   Loader2,
   Receipt,
+  FileText,
   RefreshCcw,
   Lock,
   Unlock,
@@ -410,12 +411,11 @@ export default function NewOrderPOS() {
   const [showNewClientModal, setShowNewClientModal] = useState(false);
 
   // === CLIENT ORDERS OVERVIEW ("Looking for Orders?") ===
-  const [showOrdersOverviewModal, setShowOrdersOverviewModal] =
-    useState(false);
+  const [showOrdersOverviewModal, setShowOrdersOverviewModal] = useState(false);
   const [loadingOrderStats, setLoadingOrderStats] = useState(false);
-  const [clientOrderStats, setClientOrderStats] = useState<
-    ClientOverviewRow[]
-  >([]);
+  const [clientOrderStats, setClientOrderStats] = useState<ClientOverviewRow[]>(
+    []
+  );
   const [clientOverviewSearch, setClientOverviewSearch] = useState('');
   const [clientOverviewAgentFilter, setClientOverviewAgentFilter] =
     useState('ALL');
@@ -1207,6 +1207,7 @@ export default function NewOrderPOS() {
   };
 
   const [confirmedSONumber, setConfirmedSONumber] = useState<string>('');
+  const [loadingQuotation, setLoadingQuotation] = useState(false);
 
   const handleSubmit = async () => {
     if (!metrics.isValid || loading) return;
@@ -1497,6 +1498,230 @@ export default function NewOrderPOS() {
     }
   };
 
+  // === QUOTATION PDF (office branches only) ===
+  // Reuses the same layout/engine as StaffHub's handlePrintOrder, but:
+  //  - always renders the WITH HEADERS layout
+  //  - "SALES ORDER #:" line is replaced with "FOR QUOTATION"
+  //  - client name (and address, which has no meaning without a client) is omitted
+  //  - pulls products/total straight from this in-progress order (no DB read/write)
+  const handleGenerateQuotation = async () => {
+    const validItems = items.filter((i) => i.product_id);
+    if (validItems.length === 0) {
+      alert('Add at least one product before generating a quotation.');
+      return;
+    }
+
+    setLoadingQuotation(true);
+    try {
+      // Resolve current staff's name for "PROCESSED BY" (same pattern as StaffHub)
+      let processedBy = 'Staff';
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        if (session?.user?.email) {
+          processedBy = session.user.email;
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('full_name')
+            .eq('email', session.user.email)
+            .single();
+          if (profile?.full_name) processedBy = profile.full_name;
+        }
+      } catch (profileErr) {
+        console.warn('Could not resolve staff name for quotation:', profileErr);
+      }
+
+      const { jsPDF } = await import('jspdf');
+      const doc = new jsPDF('p', 'mm', 'a4');
+
+      const PAGE_HEIGHT = 278; // Safe bottom margin for A4
+      let y = 18;
+
+      // ==================== HEADER (quotation is always WITH HEADERS) ====================
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(16);
+      doc.text('ECONO PHARMA TRADING', 105, y, { align: 'center' });
+      y += 6;
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.text(
+        'Unit A-3 Regalena Bldg., 9049 National Highway, Brgy. Turbina, Calamba Laguna',
+        105,
+        y,
+        { align: 'center' }
+      );
+      y += 5;
+      doc.text('Frederick SJ Arriola - (Proprietor)', 105, y, {
+        align: 'center',
+      });
+      y += 5;
+      doc.text('NON VAT TIN# 110-194-523-000', 105, y, { align: 'center' });
+      y += 12;
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(14);
+      doc.text('FOR QUOTATION PURPOSES ONLY', 105, y, { align: 'center' });
+      y += 10;
+
+      // Date only — "FOR QUOTATION" now lives in the title above; client name/address omitted entirely
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.text(`DATE: ${new Date().toLocaleDateString('en-US')}`, 145, y);
+      y += 10;
+
+      // Table header
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.text('Qty', 18, y);
+      doc.text('Unit', 25, y);
+      doc.text('Lot No.', 33, y);
+      doc.text('Expiry', 52, y);
+      doc.text('Particulars', 78, y);
+      doc.text('Amount', 160, y, { align: 'right' });
+      doc.text('Discount', 177, y, { align: 'right' });
+      doc.text('Total', 195, y, { align: 'right' });
+
+      y += 4;
+      doc.setLineWidth(0.3);
+      doc.line(18, y, 195, y);
+      y += 6;
+
+      // ==================== ITEM ROWS (WITH MULTI-PAGE SUPPORT) ====================
+      let itemCount = 0;
+      let grandTotal = 0;
+      let currentY = y;
+
+      const addPageIfNeeded = (spaceNeeded: number = 12) => {
+        if (currentY + spaceNeeded > PAGE_HEIGHT) {
+          doc.addPage();
+          currentY = 20;
+
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(9);
+          doc.text('FOR QUOTATION PURPOSES ONLY (continued)', 105, currentY, {
+            align: 'center',
+          });
+          currentY += 7;
+
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(8);
+          doc.text('Qty', 18, currentY);
+          doc.text('Unit', 25, currentY);
+          doc.text('Lot No.', 33, currentY);
+          doc.text('Expiry', 52, currentY);
+          doc.text('Particulars', 78, currentY);
+          doc.text('Amount', 160, currentY, { align: 'right' });
+          doc.text('Discount', 177, currentY, { align: 'right' });
+          doc.text('Total', 195, currentY, { align: 'right' });
+
+          currentY += 4;
+          doc.setLineWidth(0.2);
+          doc.line(18, currentY, 195, currentY);
+          currentY += 5;
+        }
+      };
+
+      const formatExpiryMMYYYY = (dateStr: string): string => {
+        if (!dateStr) return '';
+        const parts = dateStr.split('-');
+        if (parts.length >= 2) {
+          return `${parts[1]}/${parts[0]}`; // MM/YYYY
+        }
+        return dateStr;
+      };
+
+      validItems.forEach((item) => {
+        const qty = Number(item.qty || 1);
+        const unitPrice = Number(item.price_piece || 0);
+        const gross = qty * unitPrice;
+        const discountAmount =
+          gross * (Number(item.discount_percent || 0) / 100);
+        const lineTotal = gross - discountAmount;
+        const itemName = (item.item_name || '').trim();
+        const lotNumber = (item.lot_number || '').trim().toUpperCase();
+        const expiryDate = item.expiry_date || '';
+        const expiryDisplay = formatExpiryMMYYYY(expiryDate);
+
+        const lotMaxWidth = 32;
+        const expiryMaxWidth = 38;
+        const particularsMaxWidth = 68;
+
+        const itemNameLines = itemName
+          ? doc.splitTextToSize(itemName, particularsMaxWidth)
+          : [''];
+        const lotLines = lotNumber
+          ? doc.splitTextToSize(lotNumber, lotMaxWidth)
+          : [''];
+        const expiryLines = expiryDisplay
+          ? doc.splitTextToSize(expiryDisplay, expiryMaxWidth)
+          : [''];
+
+        const numLines = Math.max(
+          itemNameLines.length,
+          lotLines.length,
+          expiryLines.length,
+          1
+        );
+        const lineHeight = 6.5;
+        const rowHeight = lineHeight * numLines; // single (1x) spacing — matches the updated StaffHub print function
+
+        addPageIfNeeded(rowHeight + 8);
+
+        let rowY = currentY;
+
+        for (let i = 0; i < numLines; i++) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(9);
+
+          if (i === 0) {
+            doc.text(String(qty), 18, rowY);
+            doc.text('1s', 25, rowY);
+            if (expiryDisplay)
+              doc.text(expiryLines[i] || expiryDisplay, 46, rowY);
+          }
+          if (lotLines[i]) doc.text(lotLines[i], 30, rowY);
+          if (itemNameLines[i]) doc.text(itemNameLines[i], 67, rowY);
+
+          rowY += lineHeight;
+        }
+
+        doc.text(unitPrice.toFixed(2), 160, currentY, { align: 'right' });
+        doc.text('0.00', 177, currentY, { align: 'right' });
+        doc.text(lineTotal.toFixed(2), 195, currentY, { align: 'right' });
+
+        grandTotal += lineTotal;
+        itemCount += qty;
+        currentY += rowHeight;
+      });
+
+      y = currentY;
+
+      // Summary + Footer (also protected from overflow)
+      addPageIfNeeded(55);
+
+      y += 8;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.text('ITEMS', 20, y);
+      doc.text(String(itemCount), 48, y);
+      doc.text('TOTAL', 160, y, { align: 'right' });
+      doc.text(grandTotal.toFixed(2), 195, y, { align: 'right' });
+
+      y += 12;
+      doc.setFontSize(10);
+      doc.text(`PROCESSED BY: ${processedBy}`, 20, y);
+
+      const fileName = `${new Date().toISOString().slice(0, 10)}_QUOTATION.pdf`;
+      doc.save(fileName);
+    } catch (err: any) {
+      console.error(err);
+      alert('Failed to generate quotation: ' + err.message);
+    } finally {
+      setLoadingQuotation(false);
+    }
+  };
+
   const resetForm = () => {
     setClientName('WALK-IN');
     setCashReceived(0);
@@ -1695,8 +1920,7 @@ export default function NewOrderPOS() {
 
               <div className="flex items-center gap-3 text-[9px] font-black uppercase text-slate-500 ml-auto">
                 <span className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-red-500" /> Reach
-                  Out
+                  <span className="w-2 h-2 rounded-full bg-red-500" /> Reach Out
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-amber-500" /> Check
@@ -1773,9 +1997,7 @@ export default function NewOrderPOS() {
                       >
                         Birthday{sortIndicator('birthday')}
                       </th>
-                      <th className="p-3 whitespace-nowrap">
-                        Manager Notes
-                      </th>
+                      <th className="p-3 whitespace-nowrap">Manager Notes</th>
                       <th
                         onClick={() => toggleOverviewSort('daysSinceLastOrder')}
                         className="p-3 text-center cursor-pointer select-none whitespace-nowrap"
@@ -1858,9 +2080,7 @@ export default function NewOrderPOS() {
                                 {renderCellStatus(`${c.id}-agent`)}
                               </div>
                             ) : (
-                              <span className="text-slate-400">
-                                {c.agent}
-                              </span>
+                              <span className="text-slate-400">{c.agent}</span>
                             )}
                           </td>
                           <td className="p-3 font-bold text-white max-w-[160px] break-words">
@@ -2045,8 +2265,8 @@ export default function NewOrderPOS() {
                                   {describeFrequency(c.avgGapDays)}
                                 </div>
                                 <div className="text-[9px] text-slate-500">
-                                  Every ~
-                                  {Math.max(1, Math.round(c.avgGapDays))}d
+                                  Every ~{Math.max(1, Math.round(c.avgGapDays))}
+                                  d
                                 </div>
                               </div>
                             ) : (
@@ -2314,22 +2534,45 @@ export default function NewOrderPOS() {
             )}
           </div>
 
-          {/* LOOKING FOR ORDERS? - OFFICE USE ONLY */}
+          {/* LOOKING FOR ORDERS? + QUOTATION - OFFICE USE ONLY */}
           {isOfficeUse && (
-            <button
-              type="button"
-              onClick={() => {
-                setShowOrdersOverviewModal(true);
-                fetchClientOrderOverview();
-              }}
-              title="See every client's last order, average order, and who to message"
-              className="shrink-0 flex items-center gap-2 px-4 py-2 rounded-lg border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 transition-all"
-            >
-              <Search size={14} />
-              <span className="text-[9px] font-black uppercase tracking-wider whitespace-nowrap">
-                Looking for Orders?
-              </span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowOrdersOverviewModal(true);
+                  fetchClientOrderOverview();
+                }}
+                title="See every client's last order, average order, and who to message"
+                className="shrink-0 flex items-center gap-2 px-4 py-2 rounded-lg border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 transition-all"
+              >
+                <Search size={14} />
+                <span className="text-[9px] font-black uppercase tracking-wider whitespace-nowrap">
+                  Looking for Orders?
+                </span>
+              </button>
+
+              <button
+                type="button"
+                disabled={!items.some((i) => i.product_id) || loadingQuotation}
+                onClick={handleGenerateQuotation}
+                title="Generate a price quotation PDF from the current items"
+                className={`shrink-0 flex items-center gap-2 px-4 py-2 rounded-lg border transition-all ${
+                  items.some((i) => i.product_id)
+                    ? 'border-blue-500/30 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400'
+                    : 'border-white/5 bg-slate-900/50 text-slate-600'
+                }`}
+              >
+                {loadingQuotation ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <FileText size={14} />
+                )}
+                <span className="text-[9px] font-black uppercase tracking-wider whitespace-nowrap">
+                  {loadingQuotation ? 'Generating...' : 'Quotation'}
+                </span>
+              </button>
+            </div>
           )}
 
           {/* AGENT DROPDOWN - OFFICE USE ONLY */}
