@@ -74,6 +74,16 @@ interface ClientOverviewRow {
   owner: string | null;
   birthday: string | null;
   notes: string | null;
+  // Client's allowed payment terms, in days (0 = cash/cheque only).
+  allowed_terms: number | null;
+  // Sum of remaining_balance across this client's orders that aren't
+  // status = 'completed' yet — what they still owe.
+  receivables: number;
+  // Sum of remaining_balance for this client's orders that are already
+  // past their due_date (a subset of `receivables`).
+  overdueReceivables: number;
+  // Sum of remaining_balance for orders whose due_date is today.
+  dueTodayReceivables: number;
   orderCount: number;
   averageOrder: number;
   lastOrderDate: string | null;
@@ -88,6 +98,21 @@ interface ClientOverviewRow {
   nextExpectedDate: string | null;
   // Negative = overdue by this many days, positive = still X days out.
   daysUntilExpected: number | null;
+}
+
+// One order that still counts toward a client's receivables total — i.e.
+// its status isn't 'completed' yet. Powers the click-through breakdown on
+// the Receivables column; this list always sums to that client's own
+// `receivables` value, since both are derived from the same query.
+interface ReceivableOrderDetail {
+  id: string;
+  order_number: string;
+  total_amount: number;
+  remaining_balance: number;
+  status: string;
+  created_at: string;
+  due_date: string | null;
+  payment_method: string | null;
 }
 
 // --- LEVENSHTEIN DISTANCE UTILITY ---
@@ -353,6 +378,63 @@ const getClientStatus = (
   };
 };
 
+// Turns one order's due_date + remaining_balance into a glanceable status —
+// the payment-due counterpart to describeNextExpected's "next order" one.
+const describeReceivableDueStatus = (
+  dueDate: string | null,
+  remainingBalance: number
+): {
+  label: string;
+  colorClass: string;
+  isOverdue: boolean;
+  isDueToday: boolean;
+} => {
+  if (remainingBalance <= 0) {
+    return {
+      label: 'Settled',
+      colorClass: 'text-slate-500',
+      isOverdue: false,
+      isDueToday: false,
+    };
+  }
+  if (!dueDate) {
+    return {
+      label: 'No Due Date',
+      colorClass: 'text-slate-500',
+      isOverdue: false,
+      isDueToday: false,
+    };
+  }
+  const todayStr = new Date().toISOString().split('T')[0];
+  const due = dueDate.substring(0, 10);
+  if (due < todayStr) {
+    const days = Math.floor(
+      (new Date(todayStr).getTime() - new Date(due).getTime()) /
+        (1000 * 60 * 60 * 24)
+    );
+    return {
+      label: `${days}d Overdue`,
+      colorClass: 'text-red-400 font-bold',
+      isOverdue: true,
+      isDueToday: false,
+    };
+  }
+  if (due === todayStr) {
+    return {
+      label: 'Due Today',
+      colorClass: 'text-amber-400 font-bold',
+      isOverdue: false,
+      isDueToday: true,
+    };
+  }
+  return {
+    label: 'Not Yet Due',
+    colorClass: 'text-slate-400',
+    isOverdue: false,
+    isDueToday: false,
+  };
+};
+
 // Formats a stored date/timestamp into "Jul 3, 2026"
 const formatDisplayDate = (iso: string | null): string => {
   if (!iso) return '';
@@ -416,6 +498,15 @@ export default function NewOrderPOS() {
   const [clientOrderStats, setClientOrderStats] = useState<ClientOverviewRow[]>(
     []
   );
+  const [receivableOrdersByClient, setReceivableOrdersByClient] = useState<
+    Record<string, ReceivableOrderDetail[]>
+  >({});
+  // Which client's receivables breakdown is open, if any — stored as an id
+  // (not a snapshot) so the modal always reflects the latest fetched data.
+  const [showReceivablesDetailModal, setShowReceivablesDetailModal] =
+    useState(false);
+  const [selectedReceivablesClientId, setSelectedReceivablesClientId] =
+    useState<string | null>(null);
   const [clientOverviewSearch, setClientOverviewSearch] = useState('');
   const [clientOverviewAgentFilter, setClientOverviewAgentFilter] =
     useState('ALL');
@@ -727,13 +818,17 @@ export default function NewOrderPOS() {
     try {
       const { data: clientRows, error: clientErr } = await supabase
         .from('clients')
-        .select('id, client_name, agent, phone, owner, birthday, notes')
+        .select(
+          'id, client_name, agent, phone, owner, birthday, notes, allowed_terms'
+        )
         .eq('branch_id', currentBranchId);
       if (clientErr) throw clientErr;
 
       const { data: orderRows, error: orderErr } = await supabase
         .from('orders')
-        .select('client_name, total_amount, created_at, agent')
+        .select(
+          'id, order_number, client_name, total_amount, created_at, agent, remaining_balance, status, due_date, payment_method'
+        )
         .eq('branch_id', currentBranchId)
         .order('created_at', { ascending: false });
       if (orderErr) throw orderErr;
@@ -743,14 +838,33 @@ export default function NewOrderPOS() {
         total: number;
         last: string | null;
         dates: string[];
+        // Sum of remaining_balance for this client's orders that aren't
+        // marked completed yet — i.e. what they still owe.
+        receivables: number;
+        // Subset of `receivables` that's already past its due_date.
+        overdueReceivables: number;
+        // Subset of `receivables` whose due_date is today.
+        dueTodayReceivables: number;
       };
       const statsByClient: Record<string, Agg> = {};
+      // Every non-completed order, grouped by client — the exact set that
+      // adds up to that client's `receivables` figure, kept around so the
+      // Receivables column can be clicked through to the orders behind it.
+      const detailsByClient: Record<string, ReceivableOrderDetail[]> = {};
 
       (orderRows || []).forEach((o: any) => {
         const key = (o.client_name || '').trim().toUpperCase();
         if (!key || key === 'WALK-IN') return;
         if (!statsByClient[key]) {
-          statsByClient[key] = { count: 0, total: 0, last: null, dates: [] };
+          statsByClient[key] = {
+            count: 0,
+            total: 0,
+            last: null,
+            dates: [],
+            receivables: 0,
+            overdueReceivables: 0,
+            dueTodayReceivables: 0,
+          };
         }
         statsByClient[key].count += 1;
         statsByClient[key].total += Number(o.total_amount) || 0;
@@ -761,6 +875,45 @@ export default function NewOrderPOS() {
         ) {
           statsByClient[key].last = o.created_at;
         }
+        const statusNotCompleted =
+          (o.status || '').trim().toLowerCase() !== 'completed';
+        if (statusNotCompleted) {
+          const remainingBalance = Number(o.remaining_balance) || 0;
+          statsByClient[key].receivables += remainingBalance;
+
+          const dueStatus = describeReceivableDueStatus(
+            o.due_date || null,
+            remainingBalance
+          );
+          if (dueStatus.isOverdue) {
+            statsByClient[key].overdueReceivables += remainingBalance;
+          } else if (dueStatus.isDueToday) {
+            statsByClient[key].dueTodayReceivables += remainingBalance;
+          }
+
+          if (!detailsByClient[key]) detailsByClient[key] = [];
+          detailsByClient[key].push({
+            id: o.id,
+            order_number: o.order_number,
+            total_amount: Number(o.total_amount) || 0,
+            remaining_balance: remainingBalance,
+            status: o.status || '',
+            created_at: o.created_at,
+            due_date: o.due_date || null,
+            payment_method: o.payment_method || null,
+          });
+        }
+      });
+
+      // Soonest-due (or most overdue) order first, so the breakdown modal
+      // opens with whatever needs following up on right at the top.
+      Object.keys(detailsByClient).forEach((key) => {
+        detailsByClient[key].sort((a, b) => {
+          const aDue = a.due_date || '9999-99-99';
+          const bDue = b.due_date || '9999-99-99';
+          if (aDue !== bDue) return aDue < bDue ? -1 : 1;
+          return (b.created_at || '').localeCompare(a.created_at || '');
+        });
       });
 
       const merged: ClientOverviewRow[] = (clientRows || []).map((c: any) => {
@@ -800,6 +953,13 @@ export default function NewOrderPOS() {
           owner: c.owner ?? null,
           birthday: c.birthday ?? null,
           notes: c.notes ?? null,
+          allowed_terms:
+            c.allowed_terms === null || c.allowed_terms === undefined
+              ? null
+              : Number(c.allowed_terms),
+          receivables: stat?.receivables || 0,
+          overdueReceivables: stat?.overdueReceivables || 0,
+          dueTodayReceivables: stat?.dueTodayReceivables || 0,
           orderCount: stat?.count || 0,
           averageOrder,
           lastOrderDate,
@@ -812,6 +972,7 @@ export default function NewOrderPOS() {
       });
 
       setClientOrderStats(merged);
+      setReceivableOrdersByClient(detailsByClient);
     } catch (err: any) {
       console.error('Fetch client overview error:', err);
     } finally {
@@ -822,18 +983,30 @@ export default function NewOrderPOS() {
   // Reflects a keystroke immediately in the table (no DB round trip yet).
   const updateLocalClientField = (
     clientId: string,
-    field: 'phone' | 'owner' | 'birthday' | 'notes' | 'agent',
+    field: 'phone' | 'owner' | 'birthday' | 'notes' | 'agent' | 'allowed_terms',
     value: string
   ) => {
     setClientOrderStats((prev) =>
-      prev.map((c) => (c.id === clientId ? { ...c, [field]: value } : c))
+      prev.map((c) =>
+        c.id === clientId
+          ? {
+              ...c,
+              [field]:
+                field === 'allowed_terms'
+                  ? value === ''
+                    ? null
+                    : Number(value)
+                  : value,
+            }
+          : c
+      )
     );
   };
 
   // Persists an edited number/owner/birthday/notes/agent back to the `clients` table.
   const saveClientField = async (
     clientId: string,
-    field: 'phone' | 'owner' | 'birthday' | 'notes' | 'agent',
+    field: 'phone' | 'owner' | 'birthday' | 'notes' | 'agent' | 'allowed_terms',
     value: string
   ) => {
     const cellKey = `${clientId}-${field}`;
@@ -841,9 +1014,18 @@ export default function NewOrderPOS() {
     setErrorCell((prev) => (prev?.key === cellKey ? null : prev));
 
     try {
+      const updateValue =
+        field === 'allowed_terms'
+          ? value.trim() === ''
+            ? null
+            : Number(value)
+          : value.trim()
+          ? value.trim()
+          : null;
+
       const { error } = await supabase
         .from('clients')
-        .update({ [field]: value.trim() ? value.trim() : null })
+        .update({ [field]: updateValue })
         .eq('id', clientId);
 
       if (error) throw error;
@@ -898,6 +1080,21 @@ export default function NewOrderPOS() {
     setSavingCell(null);
     setSavedCell(null);
     setErrorCell(null);
+    setShowReceivablesDetailModal(false);
+    setSelectedReceivablesClientId(null);
+  };
+
+  // Opens the per-order breakdown behind one client's Receivables number.
+  const openReceivablesDetail = (client: ClientOverviewRow) => {
+    setSelectedReceivablesClientId(client.id);
+    setShowReceivablesDetailModal(true);
+  };
+
+  // Closing just the breakdown leaves the parent "Looking For Orders?"
+  // modal open behind it.
+  const closeReceivablesDetailModal = () => {
+    setShowReceivablesDetailModal(false);
+    setSelectedReceivablesClientId(null);
   };
 
   // --- CREATE NEW CLIENT ---
@@ -1147,6 +1344,33 @@ export default function NewOrderPOS() {
   const agentClientsWithPotential = filteredClientStats.filter(
     (c) => c.potentialRecovery > 0
   ).length;
+
+  // The client whose Receivables breakdown is currently open, if any —
+  // re-derived from clientOrderStats (not a stored snapshot) so a refresh
+  // while the modal is open still shows current numbers.
+  const selectedReceivablesClient = useMemo(
+    () =>
+      clientOrderStats.find((c) => c.id === selectedReceivablesClientId) ||
+      null,
+    [clientOrderStats, selectedReceivablesClientId]
+  );
+
+  // The outstanding orders behind that client's Receivables total.
+  const selectedReceivablesOrders = useMemo(() => {
+    if (!selectedReceivablesClient) return [];
+    const key = selectedReceivablesClient.client_name.trim().toUpperCase();
+    return receivableOrdersByClient[key] || [];
+  }, [selectedReceivablesClient, receivableOrdersByClient]);
+
+  // Live sum of the balances below — should always match `receivables`.
+  const selectedReceivablesOrdersTotal = useMemo(
+    () =>
+      selectedReceivablesOrders.reduce(
+        (sum, o) => sum + o.remaining_balance,
+        0
+      ),
+    [selectedReceivablesOrders]
+  );
 
   // --- EXPIRY DATE VALIDATION ---
   const validateExpiryDates = (): boolean => {
@@ -1953,7 +2177,7 @@ export default function NewOrderPOS() {
             )}
 
             {/* Table */}
-            <div className="flex-1 overflow-auto">
+            <div className="flex-1 overflow-y-auto overflow-x-hidden">
               {loadingOrderStats ? (
                 <div className="p-16 flex flex-col items-center justify-center gap-3 text-slate-500">
                   <Loader2 className="animate-spin" size={28} />
@@ -1966,73 +2190,104 @@ export default function NewOrderPOS() {
                   No clients found for this branch yet.
                 </div>
               ) : (
-                <table className="w-full text-left text-[12px]">
+                <table className="w-full text-left text-[12px] table-fixed">
+                  <colgroup>
+                    <col style={{ width: '8%' }} />
+                    <col style={{ width: '9%' }} />
+                    <col style={{ width: '3%' }} />
+                    <col style={{ width: '7%' }} />
+                    <col style={{ width: '6%' }} />
+                    <col style={{ width: '5%' }} />
+                    <col style={{ width: '7%' }} />
+                    <col style={{ width: '13%' }} />
+                    <col style={{ width: '6%' }} />
+                    <col style={{ width: '5%' }} />
+                    <col style={{ width: '6%' }} />
+                    <col style={{ width: '6%' }} />
+                    <col style={{ width: '3%' }} />
+                    <col style={{ width: '7%' }} />
+                    <col style={{ width: '9%' }} />
+                  </colgroup>
                   <thead className="bg-white/5 text-[10px] font-black uppercase text-slate-500 sticky top-0 z-10">
                     <tr>
                       <th
                         onClick={() => toggleOverviewSort('agent')}
-                        className="p-3 cursor-pointer select-none whitespace-nowrap"
+                        className="p-2 cursor-pointer select-none"
                       >
                         Agent{sortIndicator('agent')}
                       </th>
                       <th
                         onClick={() => toggleOverviewSort('client_name')}
-                        className="p-3 cursor-pointer select-none whitespace-nowrap"
+                        className="p-2 cursor-pointer select-none"
                       >
                         Client{sortIndicator('client_name')}
                       </th>
-                      <th className="p-3 text-center whitespace-nowrap">
+                      <th className="p-2 text-center whitespace-nowrap">
                         Edit
                       </th>
-                      <th className="p-3 whitespace-nowrap">Number</th>
+                      <th className="p-2">Number</th>
                       <th
                         onClick={() => toggleOverviewSort('owner')}
-                        className="p-3 cursor-pointer select-none whitespace-nowrap"
+                        className="p-2 cursor-pointer select-none"
                       >
                         Owner{sortIndicator('owner')}
                       </th>
                       <th
+                        onClick={() => toggleOverviewSort('allowed_terms')}
+                        className="p-2 text-center cursor-pointer select-none"
+                        title="Payment terms allowed for this client, in days"
+                      >
+                        Terms{sortIndicator('allowed_terms')}
+                      </th>
+                      <th
                         onClick={() => toggleOverviewSort('birthday')}
-                        className="p-3 cursor-pointer select-none whitespace-nowrap"
+                        className="p-2 cursor-pointer select-none"
                       >
                         Birthday{sortIndicator('birthday')}
                       </th>
-                      <th className="p-3 whitespace-nowrap">Manager Notes</th>
+                      <th className="p-2">Manager Notes</th>
                       <th
                         onClick={() => toggleOverviewSort('daysSinceLastOrder')}
-                        className="p-3 text-center cursor-pointer select-none whitespace-nowrap"
+                        className="p-2 text-center cursor-pointer select-none"
                       >
                         Last Ordered{sortIndicator('daysSinceLastOrder')}
                       </th>
                       <th
                         onClick={() => toggleOverviewSort('avgGapDays')}
-                        className="p-3 text-center cursor-pointer select-none whitespace-nowrap"
+                        className="p-2 text-center cursor-pointer select-none"
                         title="Average days between this client's own orders"
                       >
                         Frequency{sortIndicator('avgGapDays')}
                       </th>
                       <th
                         onClick={() => toggleOverviewSort('daysUntilExpected')}
-                        className="p-3 text-center cursor-pointer select-none whitespace-nowrap"
+                        className="p-2 text-center cursor-pointer select-none"
                         title="Projected next order, based on this client's own pace — not a guarantee"
                       >
                         Next Expected{sortIndicator('daysUntilExpected')}
                       </th>
                       <th
                         onClick={() => toggleOverviewSort('averageOrder')}
-                        className="p-3 text-right cursor-pointer select-none whitespace-nowrap"
+                        className="p-2 text-right cursor-pointer select-none"
                       >
                         Avg Order{sortIndicator('averageOrder')}
                       </th>
                       <th
                         onClick={() => toggleOverviewSort('orderCount')}
-                        className="p-3 text-center cursor-pointer select-none whitespace-nowrap"
+                        className="p-2 text-center cursor-pointer select-none"
                       >
                         Orders{sortIndicator('orderCount')}
                       </th>
                       <th
+                        onClick={() => toggleOverviewSort('receivables')}
+                        className="p-2 text-right cursor-pointer select-none"
+                        title="Remaining unpaid/uncollected balance for this client"
+                      >
+                        Receivables{sortIndicator('receivables')}
+                      </th>
+                      <th
                         onClick={() => toggleOverviewSort('potentialRecovery')}
-                        className="p-3 text-center cursor-pointer select-none whitespace-nowrap"
+                        className="p-2 text-center cursor-pointer select-none"
                         title="Sort by estimated ₱ opportunity"
                       >
                         Status{sortIndicator('potentialRecovery')}
@@ -2051,8 +2306,11 @@ export default function NewOrderPOS() {
                       const isUnlocked = unlockedClientIds.has(c.id);
 
                       return (
-                        <tr key={c.id} className="hover:bg-white/[0.02]">
-                          <td className="p-3 whitespace-nowrap">
+                        <tr
+                          key={c.id}
+                          className="hover:bg-white/[0.02] align-top"
+                        >
+                          <td className="p-2 break-words">
                             {isUnlocked ? (
                               <div className="flex items-center gap-1.5">
                                 <select
@@ -2066,7 +2324,7 @@ export default function NewOrderPOS() {
                                     );
                                     saveClientField(c.id, 'agent', newAgent);
                                   }}
-                                  className="bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500"
+                                  className="w-full min-w-0 max-w-full bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500"
                                 >
                                   <option value="MAIN OFFICE">
                                     MAIN OFFICE
@@ -2083,17 +2341,17 @@ export default function NewOrderPOS() {
                               <span className="text-slate-400">{c.agent}</span>
                             )}
                           </td>
-                          <td className="p-3 font-bold text-white max-w-[160px] break-words">
+                          <td className="p-2 font-bold text-white break-words">
                             {c.client_name}
                           </td>
-                          <td className="p-3 text-center whitespace-nowrap">
+                          <td className="p-2 text-center whitespace-nowrap">
                             <button
                               type="button"
                               onClick={() => toggleClientEditUnlock(c.id)}
                               title={
                                 isUnlocked
                                   ? 'Lock this client\u2019s fields'
-                                  : 'Unlock to edit number, owner, and birthday'
+                                  : 'Unlock to edit number, owner, birthday, and terms'
                               }
                               className="shrink-0"
                             >
@@ -2104,7 +2362,7 @@ export default function NewOrderPOS() {
                               )}
                             </button>
                           </td>
-                          <td className="p-3 whitespace-nowrap">
+                          <td className="p-2 break-words">
                             {isUnlocked ? (
                               <div className="flex items-center gap-1.5">
                                 <input
@@ -2125,19 +2383,19 @@ export default function NewOrderPOS() {
                                       e.target.value
                                     )
                                   }
-                                  className="w-28 bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500"
+                                  className="w-full min-w-0 max-w-full bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500"
                                 />
                                 {renderCellStatus(`${c.id}-phone`)}
                               </div>
                             ) : (
-                              <span className="text-slate-300">
+                              <span className="text-slate-300 break-words">
                                 {c.phone || (
                                   <span className="text-slate-600">—</span>
                                 )}
                               </span>
                             )}
                           </td>
-                          <td className="p-3 whitespace-nowrap">
+                          <td className="p-2 break-words">
                             {isUnlocked ? (
                               <div className="flex items-center gap-1.5">
                                 <input
@@ -2158,19 +2416,62 @@ export default function NewOrderPOS() {
                                       e.target.value
                                     )
                                   }
-                                  className="w-28 bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500"
+                                  className="w-full min-w-0 max-w-full bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500"
                                 />
                                 {renderCellStatus(`${c.id}-owner`)}
                               </div>
                             ) : (
-                              <span className="text-slate-300">
+                              <span className="text-slate-300 break-words">
                                 {c.owner || (
                                   <span className="text-slate-600">—</span>
                                 )}
                               </span>
                             )}
                           </td>
-                          <td className="p-3 whitespace-nowrap">
+                          <td className="p-2 text-center">
+                            {isUnlocked ? (
+                              <div className="flex flex-col items-center gap-1">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step={1}
+                                  value={
+                                    c.allowed_terms === null ||
+                                    c.allowed_terms === undefined
+                                      ? ''
+                                      : c.allowed_terms
+                                  }
+                                  placeholder="0"
+                                  onChange={(e) =>
+                                    updateLocalClientField(
+                                      c.id,
+                                      'allowed_terms',
+                                      e.target.value
+                                    )
+                                  }
+                                  onBlur={(e) =>
+                                    saveClientField(
+                                      c.id,
+                                      'allowed_terms',
+                                      e.target.value
+                                    )
+                                  }
+                                  className="w-full min-w-0 max-w-full bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white text-center outline-none focus:border-blue-500"
+                                />
+                                {renderCellStatus(`${c.id}-allowed_terms`)}
+                              </div>
+                            ) : (
+                              <span className="text-slate-300">
+                                {c.allowed_terms === null ||
+                                c.allowed_terms === undefined ? (
+                                  <span className="text-slate-600">—</span>
+                                ) : (
+                                  `${c.allowed_terms}d`
+                                )}
+                              </span>
+                            )}
+                          </td>
+                          <td className="p-2 break-words">
                             {isUnlocked ? (
                               <div className="flex items-start gap-1.5">
                                 <input
@@ -2190,12 +2491,12 @@ export default function NewOrderPOS() {
                                       e.target.value
                                     )
                                   }
-                                  className="bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500"
+                                  className="w-full min-w-0 max-w-full bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500"
                                 />
                                 {renderCellStatus(`${c.id}-birthday`)}
                               </div>
                             ) : (
-                              <span className="text-slate-300">
+                              <span className="text-slate-300 break-words">
                                 {c.birthday ? (
                                   formatDisplayDate(c.birthday)
                                 ) : (
@@ -2204,7 +2505,7 @@ export default function NewOrderPOS() {
                               </span>
                             )}
                           </td>
-                          <td className="p-3">
+                          <td className="p-2">
                             {isUnlocked ? (
                               <div className="flex items-start gap-1.5">
                                 <textarea
@@ -2225,13 +2526,13 @@ export default function NewOrderPOS() {
                                       e.target.value
                                     )
                                   }
-                                  className="w-40 bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500 resize-y"
+                                  className="w-full min-w-0 max-w-full bg-slate-950 border border-white/10 rounded-md px-2 py-1 text-[11px] text-white outline-none focus:border-blue-500 resize-y"
                                 />
                                 {renderCellStatus(`${c.id}-notes`)}
                               </div>
                             ) : (
                               <span
-                                className="text-slate-300 block max-w-[180px] truncate"
+                                className="text-slate-300 block break-words"
                                 title={c.notes || ''}
                               >
                                 {c.notes || (
@@ -2240,10 +2541,10 @@ export default function NewOrderPOS() {
                               </span>
                             )}
                           </td>
-                          <td className="p-3 text-center whitespace-nowrap">
+                          <td className="p-2 text-center">
                             {c.lastOrderDate ? (
                               <div>
-                                <div className="text-slate-300">
+                                <div className="text-slate-300 break-words">
                                   {formatDisplayDate(c.lastOrderDate)}
                                 </div>
                                 <div className="text-[9px] text-slate-500">
@@ -2258,10 +2559,10 @@ export default function NewOrderPOS() {
                               <span className="text-slate-600">Never</span>
                             )}
                           </td>
-                          <td className="p-3 text-center whitespace-nowrap">
+                          <td className="p-2 text-center">
                             {c.avgGapDays !== null ? (
                               <div>
-                                <div className="text-slate-300">
+                                <div className="text-slate-300 break-words">
                                   {describeFrequency(c.avgGapDays)}
                                 </div>
                                 <div className="text-[9px] text-slate-500">
@@ -2273,8 +2574,10 @@ export default function NewOrderPOS() {
                               <span className="text-slate-600">New</span>
                             )}
                           </td>
-                          <td className="p-3 text-center whitespace-nowrap">
-                            <div className={nextExpected.colorClass}>
+                          <td className="p-2 text-center">
+                            <div
+                              className={`${nextExpected.colorClass} break-words`}
+                            >
                               {nextExpected.label}
                             </div>
                             {c.nextExpectedDate && (
@@ -2283,17 +2586,52 @@ export default function NewOrderPOS() {
                               </div>
                             )}
                           </td>
-                          <td className="p-3 text-right font-mono font-bold text-emerald-400 whitespace-nowrap">
+                          <td className="p-2 text-right font-mono font-bold text-emerald-400 break-words">
                             {c.orderCount > 0
                               ? `₱${c.averageOrder.toLocaleString(undefined, {
                                   maximumFractionDigits: 0,
                                 })}`
                               : '—'}
                           </td>
-                          <td className="p-3 text-center text-slate-400">
+                          <td className="p-2 text-center text-slate-400">
                             {c.orderCount}
                           </td>
-                          <td className="p-3 text-center">
+                          <td className="p-2 text-right font-mono font-bold break-words">
+                            <button
+                              type="button"
+                              onClick={() => openReceivablesDetail(c)}
+                              className="w-full text-right cursor-pointer hover:underline decoration-dotted underline-offset-2"
+                              title="Remaining unpaid/uncollected balance — click to see the orders behind it"
+                            >
+                              <span
+                                className={
+                                  c.receivables > 0
+                                    ? 'text-red-400'
+                                    : 'text-slate-600'
+                                }
+                              >
+                                ₱
+                                {c.receivables.toLocaleString(undefined, {
+                                  maximumFractionDigits: 0,
+                                })}
+                              </span>
+                              {c.overdueReceivables > 0 ? (
+                                <div className="text-[9px] text-red-500 font-black uppercase tracking-wider mt-0.5">
+                                  ₱
+                                  {c.overdueReceivables.toLocaleString(
+                                    undefined,
+                                    { maximumFractionDigits: 0 }
+                                  )}{' '}
+                                  Overdue
+                                </div>
+                              ) : c.dueTodayReceivables > 0 ? (
+                                <div className="text-[9px] text-amber-400 font-black uppercase tracking-wider mt-0.5">
+                                  Due Today
+                                </div>
+                              ) : null}
+                            </button>
+                          </td>
+                          <td className="p-2 text-center">
                             <span
                               className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[9px] font-black uppercase whitespace-nowrap ${status.badgeClass}`}
                             >
@@ -2304,7 +2642,7 @@ export default function NewOrderPOS() {
                             </span>
                             {c.potentialRecovery > 0 && (
                               <div
-                                className="text-[9px] text-amber-400/80 mt-1 font-mono whitespace-nowrap"
+                                className="text-[9px] text-amber-400/80 mt-1 font-mono break-words"
                                 title="This client's own average order size — shown once they've gone past their usual ordering pace"
                               >
                                 ~₱
@@ -2331,6 +2669,171 @@ export default function NewOrderPOS() {
               </span>
               <button
                 onClick={closeOrdersOverviewModal}
+                className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-bold text-xs"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* RECEIVABLES BREAKDOWN MODAL — orders behind one client's Receivables number */}
+      {showReceivablesDetailModal && selectedReceivablesClient && (
+        <div className="fixed inset-0 z-[2200] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 border border-white/10 rounded-2xl w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl">
+            {/* Header */}
+            <div className="flex justify-between items-start p-6 border-b border-white/10">
+              <div>
+                <h2 className="text-lg font-black text-white uppercase tracking-tight flex items-center gap-2">
+                  <Receipt size={18} className="text-amber-400" />
+                  {selectedReceivablesClient.client_name}
+                </h2>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  {selectedReceivablesOrders.length} outstanding order
+                  {selectedReceivablesOrders.length === 1 ? '' : 's'} — Agent:{' '}
+                  <span className="text-slate-400">
+                    {selectedReceivablesClient.agent}
+                  </span>
+                </p>
+              </div>
+              <button
+                onClick={closeReceivablesDetailModal}
+                className="text-slate-500 hover:text-white"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Totals strip */}
+            <div className="px-6 py-3 bg-white/[0.03] border-b border-white/5 flex flex-wrap items-center gap-x-8 gap-y-2">
+              <div>
+                <div className="text-[9px] font-black uppercase tracking-wider text-slate-500">
+                  Total Receivables
+                </div>
+                <div className="text-sm font-black font-mono text-red-400">
+                  ₱
+                  {selectedReceivablesClient.receivables.toLocaleString(
+                    undefined,
+                    { maximumFractionDigits: 0 }
+                  )}
+                </div>
+              </div>
+              {selectedReceivablesClient.overdueReceivables > 0 ? (
+                <div>
+                  <div className="text-[9px] font-black uppercase tracking-wider text-red-500">
+                    Overdue
+                  </div>
+                  <div className="text-sm font-black font-mono text-red-500">
+                    ₱
+                    {selectedReceivablesClient.overdueReceivables.toLocaleString(
+                      undefined,
+                      { maximumFractionDigits: 0 }
+                    )}
+                  </div>
+                </div>
+              ) : selectedReceivablesClient.dueTodayReceivables > 0 ? (
+                <div>
+                  <div className="text-[9px] font-black uppercase tracking-wider text-amber-400">
+                    Due Today
+                  </div>
+                  <div className="text-sm font-black font-mono text-amber-400">
+                    ₱
+                    {selectedReceivablesClient.dueTodayReceivables.toLocaleString(
+                      undefined,
+                      { maximumFractionDigits: 0 }
+                    )}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            {/* Order list */}
+            <div className="flex-1 overflow-y-auto">
+              {selectedReceivablesOrders.length === 0 ? (
+                <div className="p-16 flex flex-col items-center justify-center gap-3 text-slate-500">
+                  <CheckCircle2 size={28} className="text-emerald-600" />
+                  <p className="text-xs font-bold uppercase">
+                    No outstanding orders — all paid up.
+                  </p>
+                </div>
+              ) : (
+                <table className="w-full text-left text-[12px]">
+                  <thead className="bg-white/5 text-[10px] font-black uppercase text-slate-500 sticky top-0">
+                    <tr>
+                      <th className="p-2">Order #</th>
+                      <th className="p-2">Placed</th>
+                      <th className="p-2">Method</th>
+                      <th className="p-2">Due Status</th>
+                      <th className="p-2 text-right">Total</th>
+                      <th className="p-2 text-right">Balance</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {selectedReceivablesOrders.map((o) => {
+                      const dueInfo = describeReceivableDueStatus(
+                        o.due_date,
+                        o.remaining_balance
+                      );
+                      return (
+                        <tr key={o.id} className="hover:bg-white/[0.02] align-top">
+                          <td className="p-2 font-bold text-white whitespace-nowrap">
+                            {o.order_number}
+                          </td>
+                          <td className="p-2 text-slate-300 whitespace-nowrap">
+                            {formatDisplayDate(o.created_at)}
+                          </td>
+                          <td className="p-2 text-slate-400 whitespace-nowrap">
+                            {o.payment_method || '—'}
+                          </td>
+                          <td className="p-2 whitespace-nowrap">
+                            <div className={dueInfo.colorClass}>{dueInfo.label}</div>
+                            {o.due_date && (
+                              <div className="text-[9px] text-slate-500">
+                                {formatDisplayDate(o.due_date)}
+                              </div>
+                            )}
+                          </td>
+                          <td className="p-2 text-right font-mono text-slate-300">
+                            ₱
+                            {o.total_amount.toLocaleString(undefined, {
+                              maximumFractionDigits: 0,
+                            })}
+                          </td>
+                          <td className="p-2 text-right font-mono font-bold">
+                            <span
+                              className={
+                                o.remaining_balance > 0
+                                  ? 'text-red-400'
+                                  : 'text-slate-600'
+                              }
+                            >
+                              ₱
+                              {o.remaining_balance.toLocaleString(undefined, {
+                                maximumFractionDigits: 0,
+                              })}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 border-t border-white/10 flex justify-between items-center">
+              <span className="text-[10px] text-slate-500 font-bold uppercase">
+                {selectedReceivablesOrders.length} order
+                {selectedReceivablesOrders.length === 1 ? '' : 's'} · ₱
+                {selectedReceivablesOrdersTotal.toLocaleString(undefined, {
+                  maximumFractionDigits: 0,
+                })}{' '}
+                total outstanding
+              </span>
+              <button
+                onClick={closeReceivablesDetailModal}
                 className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-bold text-xs"
               >
                 Close
