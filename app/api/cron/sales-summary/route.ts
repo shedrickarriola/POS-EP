@@ -1841,6 +1841,7 @@ export async function GET(request: Request) {
           poBySupplier: Map<string, { generic: number; branded: number; total: number; count: number }>;
           users: string[];
           paRows: Array<{ pa: string; total: number; orders: number; pct: number }>;
+          discountRows: Array<{ user: string; orders: number; totalDiscount: number; totalSales: number; avgDiscount: number; flagged: boolean }>;
         };
 
         const branchDataList: BranchMonthData[] = [];
@@ -1895,7 +1896,7 @@ export async function GET(request: Request) {
           // PA performance — group orders by created_by email, resolve to full_name from profiles
           const { data: monthOrders } = await supabaseAdmin
             .from('orders')
-            .select('created_by, total_amount')
+            .select('created_by, total_amount, discount_total, order_number')
             .eq('branch_id', b.id)
             .in('created_date_pht', monthDates);
 
@@ -1923,7 +1924,34 @@ export async function GET(request: Request) {
             .map(([pa, v]) => ({ pa, total: v.total, orders: v.orders, pct: branchSalesTotal > 0 ? (v.total / branchSalesTotal) * 100 : 0 }))
             .sort((a, b) => b.total - a.total);
 
-          branchDataList.push({ branch: b, gen, brd, disc, totalSales, totalExp, actual, quota, poTotal, poBrd, poBySupplier, users: uniqueUsers, paRows });
+          // Discounts by user — orders with discount_total > 0, grouped by who created the order.
+          // Sorted by # of discounted orders (desc) so a user quietly splitting one big order
+          // into many small discounted ones surfaces at the top of their branch's list.
+          const DISCOUNT_BULK_THRESHOLD = 5; // discounted orders/month by one user — flag for review, tune as needed
+          const discMap = new Map<string, { orders: number; totalDiscount: number; totalSales: number }>();
+          (monthOrders || []).forEach((o: any) => {
+            const d = Number(o.discount_total || 0);
+            if (d <= 0) return;
+            const userName = paNameMap.get(o.created_by) || o.created_by || 'UNASSIGNED';
+            const ex = discMap.get(userName) || { orders: 0, totalDiscount: 0, totalSales: 0 };
+            discMap.set(userName, {
+              orders: ex.orders + 1,
+              totalDiscount: ex.totalDiscount + d,
+              totalSales: ex.totalSales + Number(o.total_amount || 0),
+            });
+          });
+          const discountRows = Array.from(discMap.entries())
+            .map(([user, v]) => ({
+              user,
+              orders: v.orders,
+              totalDiscount: v.totalDiscount,
+              totalSales: v.totalSales,
+              avgDiscount: v.orders > 0 ? v.totalDiscount / v.orders : 0,
+              flagged: v.orders >= DISCOUNT_BULK_THRESHOLD,
+            }))
+            .sort((a, b) => b.orders - a.orders || b.totalDiscount - a.totalDiscount);
+
+          branchDataList.push({ branch: b, gen, brd, disc, totalSales, totalExp, actual, quota, poTotal, poBrd, poBySupplier, users: uniqueUsers, paRows, discountRows });
         } // end per-branch loop
 
         // ── Grand totals ──
@@ -2199,6 +2227,56 @@ export async function GET(request: Request) {
                     </tbody>
                   </table>
                 </div>
+              </div>
+
+              <!-- ══════ TABLE 5: DISCOUNTS BY BRANCH & USER (BULK DISCOUNT WATCH) ══════ -->
+              <div style="margin-bottom:16px;">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+                  <div style="width:4px;height:20px;background:#e11d48;border-radius:2px;"></div>
+                  <span style="font-size:11px;font-weight:800;letter-spacing:3px;color:#64748b;text-transform:uppercase;">Discounts by Branch & User</span>
+                </div>
+                <div style="overflow-x:auto;border-radius:10px;border:1px solid #fecdd3;">
+                  <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                    <thead>
+                      <tr style="background:#1e293b;color:#94a3b8;text-align:left;">
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Branch</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">User</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;"># Discounted Orders</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Total Discount</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Avg / Order</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">Flag</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${branchDataList.map((d) => {
+                        if (!d.discountRows || d.discountRows.length === 0) return `
+                          <tr style="background:#fff1f2;border-bottom:1px solid #fecdd3;">
+                            <td style="padding:9px 12px;font-weight:700;color:#1e293b;">${d.branch.branch_name}</td>
+                            <td colspan="5" style="padding:9px 12px;color:#94a3b8;font-style:italic;">No discounted orders</td>
+                          </tr>`;
+                        return d.discountRows.map((r, i) => {
+                          const rowBg = r.flagged ? '#fee2e2' : (i % 2 === 0 ? '#fff1f2' : '#ffffff');
+                          return `<tr style="background:${rowBg};border-bottom:1px solid #fecdd3;">
+                            <td style="padding:9px 12px;font-weight:${i === 0 ? '700' : '400'};color:${i === 0 ? '#1e293b' : '#94a3b8'};">${i === 0 ? d.branch.branch_name : ''}</td>
+                            <td style="padding:9px 12px;font-weight:600;color:#111827;">${r.user}</td>
+                            <td style="padding:9px 12px;text-align:center;font-weight:${r.flagged ? '800' : '400'};color:${r.flagged ? '#dc2626' : '#64748b'};">${r.orders}</td>
+                            <td style="padding:9px 12px;text-align:right;font-family:monospace;font-weight:700;color:#e11d48;">${fmt(r.totalDiscount)}</td>
+                            <td style="padding:9px 12px;text-align:right;font-family:monospace;color:#64748b;">${fmt(r.avgDiscount)}</td>
+                            <td style="padding:9px 12px;text-align:center;font-size:12px;">${r.flagged ? '⚠️ Review' : ''}</td>
+                          </tr>`;
+                        }).join('') + `
+                          <tr style="background:#fecaca;border-bottom:2px solid #fca5a5;">
+                            <td style="padding:8px 12px;font-weight:800;color:#991b1b;font-size:10px;text-transform:uppercase;" colspan="2">${d.branch.branch_name} — Branch Total</td>
+                            <td style="padding:8px 12px;text-align:center;font-weight:700;color:#991b1b;">${d.discountRows.reduce((s, r) => s + r.orders, 0)}</td>
+                            <td style="padding:8px 12px;text-align:right;font-family:monospace;font-weight:800;color:#991b1b;">${fmt(d.discountRows.reduce((s, r) => s + r.totalDiscount, 0))}</td>
+                            <td></td>
+                            <td></td>
+                          </tr>`;
+                      }).join('')}
+                    </tbody>
+                  </table>
+                </div>
+                <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">⚠️ <strong>Review</strong> = 5+ discounted orders by one user at one branch this month — check for order-splitting to unlock discount thresholds. Figures here come from each order's own <code>discount_total</code>, which may differ from the "Discount" total in the Branch Summary table above (that one is manually entered per day by whoever files the daily report).</p>
               </div>
 
             </div>
