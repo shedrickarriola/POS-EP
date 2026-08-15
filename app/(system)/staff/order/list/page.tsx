@@ -28,7 +28,80 @@ import {
   Check,
   User,
   ShieldAlert,
+  FileText,
+  Camera,
+  X,
 } from 'lucide-react';
+
+// Verification Helper: same AI extraction action used on the New Order page
+import { parseInvoiceImage } from '@/app/actions/parseInvoice';
+
+// --- LEVENSHTEIN DISTANCE UTILITY (same approach as New Order's AI matching) ---
+const getLevenshteinDistance = (a: string, b: string): number => {
+  const matrix = Array.from({ length: a.length + 1 }, () =>
+    Array.from({ length: b.length + 1 }, (_, i) => i)
+  );
+  for (let i = 1; i <= a.length; i++) matrix[i][0] = i;
+  for (let j = 1; j <= b.length; j++) matrix[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return matrix[a.length][b.length];
+};
+
+// Lowercase, strip punctuation, collapse whitespace so "Biogesic 500mg" and
+// "biogesic-500 mg" compare the same way.
+const normalizeItemNameForMatch = (s: string): string =>
+  (s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+// Scores how likely `shortName` (usually the shortened, human-written name
+// from the uploaded document) refers to the same product as `fullName`
+// (the full POS/inventory item name). Returns 0 (no relation) to 1 (identical).
+const computeItemNameMatchScore = (
+  shortName: string,
+  fullName: string
+): number => {
+  const a = normalizeItemNameForMatch(shortName);
+  const b = normalizeItemNameForMatch(fullName);
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+
+  // The shortened name is usually a truncated version of the full POS name,
+  // e.g. "Biogesic" inside "Biogesic 500mg Tablet" — treat that as a strong match.
+  if (b.includes(a) || a.includes(b)) {
+    const shorter = Math.min(a.length, b.length);
+    const longer = Math.max(a.length, b.length);
+    return 0.75 + 0.25 * (shorter / longer);
+  }
+
+  // Token-by-token prefix overlap (handles abbreviations like "Amox" -> "Amoxicillin")
+  const tokensA = a.split(' ').filter(Boolean);
+  const tokensB = b.split(' ').filter(Boolean);
+  const tokenScore = tokensA.length
+    ? tokensA.filter((ta) =>
+        tokensB.some(
+          (tb) => tb === ta || tb.startsWith(ta) || ta.startsWith(tb)
+        )
+      ).length / tokensA.length
+    : 0;
+
+  // Fallback: normalized edit distance, for near-miss spelling/OCR differences
+  const dist = getLevenshteinDistance(a, b);
+  const levScore = 1 - dist / Math.max(a.length, b.length, 1);
+
+  return Math.max(tokenScore * 0.9, levScore, 0);
+};
 
 export default function SalesOrderList() {
   const router = useRouter();
@@ -87,6 +160,18 @@ export default function SalesOrderList() {
   const [tempBranchId, setTempBranchId] = useState<string>('');
   // 1. Add View State
   const [viewMode, setViewMode] = useState<'orders' | 'days'>('orders');
+
+  // --- VERIFICATION HELPER STATE (Auditor-only, Day View) ---
+  const [showVerificationHelper, setShowVerificationHelper] = useState(false);
+  const [vhDate, setVhDate] = useState('');
+  const [vhSoFrom, setVhSoFrom] = useState('');
+  const [vhSoTo, setVhSoTo] = useState('');
+  const [vhPosItems, setVhPosItems] = useState<any[]>([]);
+  const [vhLoadingPos, setVhLoadingPos] = useState(false);
+  const [vhUploadedItems, setVhUploadedItems] = useState<any[]>([]);
+  const [vhIsScanning, setVhIsScanning] = useState(false);
+  const [vhHasVerified, setVhHasVerified] = useState(false);
+
   const daySummary = useMemo(() => {
     if (!orders || orders.length === 0) return [];
 
@@ -184,7 +269,7 @@ export default function SalesOrderList() {
       // Fetch profile for role-based verification
       const { data: profile } = await supabase
         .from('profiles')
-        .select('full_name, role')
+        .select('full_name, role, auditor')
         .eq('id', session.user.id)
         .single();
       setCurrentUser(profile);
@@ -665,6 +750,212 @@ export default function SalesOrderList() {
     currentUser?.role
   );
 
+  // Verification Helper button (Day View) is restricted to the auditor role
+  const isAuditor = currentUser?.auditor === true;
+
+  // --- VERIFICATION HELPER LOGIC (Auditor-only, Day View) ---
+  const openVerificationHelper = () => {
+    setVhDate(todayPHT);
+    setVhSoFrom('');
+    setVhSoTo('');
+    setVhPosItems([]);
+    setVhUploadedItems([]);
+    setVhHasVerified(false);
+    setShowVerificationHelper(true);
+  };
+
+  // Loads this branch's order items for the chosen date, narrowed to the
+  // SO# range if one was entered. SO# ranges are compared numerically
+  // (e.g. "SO9" vs "SO10") rather than as text, since order_number isn't
+  // zero-padded consistently once counts pass 99.
+  const fetchVerificationPosItems = async () => {
+    if (!currentBranchId || !vhDate) {
+      setVhPosItems([]);
+      return;
+    }
+    setVhLoadingPos(true);
+    setVhHasVerified(false);
+    try {
+      const { data, error } = await supabase
+        .from('orders')
+        .select(
+          'id, order_number, order_items(id, quantity, inventory!product_id(item_name))'
+        )
+        .eq('branch_id', currentBranchId)
+        .eq('created_date_pht', vhDate);
+
+      if (error) throw error;
+
+      const fromNum = vhSoFrom !== '' ? parseInt(vhSoFrom, 10) : null;
+      const toNum = vhSoTo !== '' ? parseInt(vhSoTo, 10) : null;
+
+      const inRange = (data || []).filter((order: any) => {
+        const soNum = parseInt(
+          String(order.order_number || '').replace(/\D/g, ''),
+          10
+        );
+        if (fromNum !== null && (isNaN(soNum) || soNum < fromNum)) return false;
+        if (toNum !== null && (isNaN(soNum) || soNum > toNum)) return false;
+        return true;
+      });
+
+      inRange.sort((a: any, b: any) => {
+        const na =
+          parseInt(String(a.order_number || '').replace(/\D/g, ''), 10) || 0;
+        const nb =
+          parseInt(String(b.order_number || '').replace(/\D/g, ''), 10) || 0;
+        return na - nb;
+      });
+
+      const flattened: any[] = [];
+      inRange.forEach((order: any) => {
+        (order.order_items || []).forEach((item: any) => {
+          flattened.push({
+            id: item.id,
+            order_number: order.order_number,
+            item_name: item.inventory?.item_name || 'UNKNOWN PRODUCT',
+            qty: Number(item.quantity) || 0,
+          });
+        });
+      });
+
+      setVhPosItems(flattened);
+    } catch (err: any) {
+      console.error('Verification Helper fetch error:', err.message);
+      setVhPosItems([]);
+    } finally {
+      setVhLoadingPos(false);
+    }
+  };
+
+  // Auto-load Table 1 (POS) whenever the auditor's date or SO# range changes,
+  // same reactive pattern as the main filters — debounced so typing a
+  // multi-digit SO# doesn't fire a query per keystroke.
+  useEffect(() => {
+    if (!showVerificationHelper) return;
+    const timer = setTimeout(() => {
+      fetchVerificationPosItems();
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [showVerificationHelper, vhDate, vhSoFrom, vhSoTo, currentBranchId]);
+
+  // Table 2: same AI upload -> base64 -> parseInvoiceImage flow as New Order's
+  // "Scan Photo", but the extracted items are compared against Table 1
+  // instead of being matched into inventory.
+  const handleVerificationAiUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setVhIsScanning(true);
+    setVhHasVerified(false);
+    try {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = async () => {
+        try {
+          const base64Data = (reader.result as string).split(',')[1];
+          const extracted = await parseInvoiceImage(base64Data, file.type);
+          const dataToProcess = Array.isArray(extracted)
+            ? extracted
+            : extracted?.items || extracted?.data || [];
+
+          setVhUploadedItems(
+            (dataToProcess || []).map((aiItem: any) => ({
+              id: crypto.randomUUID(),
+              item_name: (aiItem.item_name || aiItem.name || '').toString(),
+              qty: parseFloat(aiItem.qty || aiItem.quantity) || 0,
+            }))
+          );
+        } catch (err) {
+          console.error('Verification Helper AI parse error:', err);
+          alert(
+            'Could not read items from that file. Please try another image.'
+          );
+        } finally {
+          setVhIsScanning(false);
+        }
+      };
+    } catch (err) {
+      console.error(err);
+      setVhIsScanning(false);
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  // Compares Table 1 (POS, full names) against Table 2 (uploaded, usually
+  // shortened/human-written names) with a greedy best-score pairing: every
+  // candidate pair is scored, sorted best-first (ties broken by exact qty
+  // match), then claimed pair by pair so each row is only matched once.
+  // Anything left unclaimed had no reasonable counterpart on the other side.
+  const handleVerifyCompare = () => {
+    const posRows = vhPosItems.map((p) => ({
+      ...p,
+      matched: false,
+      qtyMatch: false,
+      matchedWith: null as string | null,
+      matchedQty: null as number | null,
+    }));
+    const upRows = vhUploadedItems.map((u) => ({
+      ...u,
+      matched: false,
+      qtyMatch: false,
+      matchedWith: null as string | null,
+      matchedQty: null as number | null,
+    }));
+
+    const candidates: { posIdx: number; upIdx: number; score: number }[] = [];
+    posRows.forEach((p, posIdx) => {
+      upRows.forEach((u, upIdx) => {
+        const score = computeItemNameMatchScore(u.item_name, p.item_name);
+        if (score >= 0.5) candidates.push({ posIdx, upIdx, score });
+      });
+    });
+
+    candidates.sort((x, y) => {
+      if (y.score !== x.score) return y.score - x.score;
+      const xQty = posRows[x.posIdx].qty === upRows[x.upIdx].qty ? 1 : 0;
+      const yQty = posRows[y.posIdx].qty === upRows[y.upIdx].qty ? 1 : 0;
+      return yQty - xQty;
+    });
+
+    const claimedPos = new Set<number>();
+    const claimedUp = new Set<number>();
+
+    candidates.forEach(({ posIdx, upIdx }) => {
+      if (claimedPos.has(posIdx) || claimedUp.has(upIdx)) return;
+      claimedPos.add(posIdx);
+      claimedUp.add(upIdx);
+
+      const qtyMatch = posRows[posIdx].qty === upRows[upIdx].qty;
+
+      posRows[posIdx].matched = true;
+      posRows[posIdx].qtyMatch = qtyMatch;
+      posRows[posIdx].matchedWith = upRows[upIdx].item_name;
+      posRows[posIdx].matchedQty = upRows[upIdx].qty;
+
+      upRows[upIdx].matched = true;
+      upRows[upIdx].qtyMatch = qtyMatch;
+      upRows[upIdx].matchedWith = posRows[posIdx].item_name;
+      upRows[upIdx].matchedQty = posRows[posIdx].qty;
+    });
+
+    setVhPosItems(posRows);
+    setVhUploadedItems(upRows);
+    setVhHasVerified(true);
+  };
+
+  const vhSummary = useMemo(() => {
+    if (!vhHasVerified) return null;
+    return {
+      matchedFull: vhPosItems.filter((p) => p.matched && p.qtyMatch).length,
+      qtyMismatch: vhPosItems.filter((p) => p.matched && !p.qtyMatch).length,
+      posUnmatched: vhPosItems.filter((p) => !p.matched).length,
+      upUnmatched: vhUploadedItems.filter((u) => !u.matched).length,
+    };
+  }, [vhHasVerified, vhPosItems, vhUploadedItems]);
+
   // 5. METRICS CALCULATION (Retained from ol3526.txt)
   const pageMetrics = useMemo(() => {
     return orders.reduce(
@@ -693,6 +984,337 @@ export default function SalesOrderList() {
             >
               Return to Dashboard
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* VERIFICATION HELPER MODAL (Auditor-only, triggered from Day View) */}
+      {showVerificationHelper && (
+        <div className="fixed inset-0 z-[2000] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 border border-white/10 rounded-2xl w-full max-w-6xl max-h-[92vh] flex flex-col shadow-2xl">
+            {/* Modal Header */}
+            <div className="flex justify-between items-start p-6 border-b border-white/10">
+              <div>
+                <h2 className="text-lg font-black text-white uppercase tracking-tight flex items-center gap-2">
+                  <FileText size={18} className="text-blue-400" />
+                  Verification Helper
+                </h2>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Upload the day's written log and compare it against what's
+                  recorded in the POS for {currentBranchName || 'this branch'}.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowVerificationHelper(false)}
+                className="text-slate-500 hover:text-white"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Filters + Upload + Verify */}
+            <div className="p-4 border-b border-white/5 flex flex-wrap items-end gap-4">
+              <div>
+                <label className="text-[10px] font-black text-slate-500 uppercase mb-1 block tracking-wider">
+                  Date
+                </label>
+                <input
+                  type="date"
+                  value={vhDate}
+                  onChange={(e) => setVhDate(e.target.value)}
+                  className="bg-slate-950 border border-white/10 rounded-lg px-3 py-2 text-white outline-none focus:border-blue-500 text-xs"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-black text-slate-500 uppercase mb-1 block tracking-wider">
+                  SO# From
+                </label>
+                <input
+                  type="number"
+                  value={vhSoFrom}
+                  onChange={(e) => setVhSoFrom(e.target.value)}
+                  placeholder="e.g. 14"
+                  className="bg-slate-950 border border-white/10 rounded-lg px-3 py-2 text-white outline-none focus:border-blue-500 text-xs w-24"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-black text-slate-500 uppercase mb-1 block tracking-wider">
+                  SO# To
+                </label>
+                <input
+                  type="number"
+                  value={vhSoTo}
+                  onChange={(e) => setVhSoTo(e.target.value)}
+                  placeholder="e.g. 26"
+                  className="bg-slate-950 border border-white/10 rounded-lg px-3 py-2 text-white outline-none focus:border-blue-500 text-xs w-24"
+                />
+              </div>
+
+              <div className="ml-auto flex items-center gap-3">
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  id="verification-ai-upload"
+                  onChange={handleVerificationAiUpload}
+                  disabled={vhIsScanning}
+                />
+                <label
+                  htmlFor="verification-ai-upload"
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg border border-white/10 hover:border-blue-500 bg-slate-800/50 transition-all cursor-pointer group"
+                >
+                  {vhIsScanning ? (
+                    <Loader2 size={14} className="animate-spin text-blue-400" />
+                  ) : (
+                    <Camera
+                      size={14}
+                      className="text-blue-400 group-hover:scale-110 transition-transform"
+                    />
+                  )}
+                  <span className="text-[9px] font-black uppercase tracking-widest">
+                    {vhIsScanning ? 'Reading...' : 'Upload AI File'}
+                  </span>
+                </label>
+
+                <button
+                  onClick={handleVerifyCompare}
+                  disabled={
+                    vhPosItems.length === 0 || vhUploadedItems.length === 0
+                  }
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-600 text-white transition-all"
+                >
+                  <ShieldCheck size={14} />
+                  <span className="text-[9px] font-black uppercase tracking-widest">
+                    Verify
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {/* Summary bar (appears after Verify is run) */}
+            {vhSummary && (
+              <div className="px-4 py-3 bg-slate-950/40 border-b border-white/5 flex flex-wrap items-center gap-4 text-[10px] font-black uppercase tracking-wider">
+                <span className="text-emerald-400 flex items-center gap-1.5">
+                  <CheckCircle2 size={12} /> {vhSummary.matchedFull} Matched
+                </span>
+                <span className="text-amber-400 flex items-center gap-1.5">
+                  <AlertCircle size={12} /> {vhSummary.qtyMismatch} Qty Mismatch
+                </span>
+                <span className="text-red-400 flex items-center gap-1.5">
+                  <XCircle size={12} /> {vhSummary.posUnmatched} POS Unmatched
+                </span>
+                <span className="text-red-400 flex items-center gap-1.5">
+                  <XCircle size={12} /> {vhSummary.upUnmatched} Upload Unmatched
+                </span>
+              </div>
+            )}
+
+            {/* Two Tables */}
+            <div className="flex-1 overflow-y-auto p-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {/* TABLE 1: POS */}
+              <div className="border border-white/5 rounded-xl overflow-hidden flex flex-col">
+                <div className="bg-white/5 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center justify-between">
+                  <span>POS Records — {currentBranchName || 'Branch'}</span>
+                  <span className="text-slate-600">
+                    {vhPosItems.length} items
+                  </span>
+                </div>
+                <div className="overflow-y-auto max-h-[50vh]">
+                  <table className="w-full text-left text-[11px]">
+                    <thead className="bg-slate-950/60 text-[9px] font-black uppercase text-slate-600 sticky top-0">
+                      <tr>
+                        <th className="p-2">SO#</th>
+                        <th className="p-2">Item Name</th>
+                        <th className="p-2 text-center w-16">Qty</th>
+                        <th className="p-2 text-center w-10"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {vhLoadingPos ? (
+                        <tr>
+                          <td
+                            colSpan={4}
+                            className="p-8 text-center text-slate-500"
+                          >
+                            <Loader2
+                              className="animate-spin inline"
+                              size={18}
+                            />
+                          </td>
+                        </tr>
+                      ) : vhPosItems.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={4}
+                            className="p-8 text-center text-slate-600 text-[10px] uppercase font-bold"
+                          >
+                            No POS orders for this date / range
+                          </td>
+                        </tr>
+                      ) : (
+                        vhPosItems.map((item) => (
+                          <tr
+                            key={item.id}
+                            className={`border-t border-white/5 ${
+                              !vhHasVerified
+                                ? ''
+                                : item.matched && item.qtyMatch
+                                ? 'bg-emerald-500/10'
+                                : item.matched
+                                ? 'bg-amber-500/10'
+                                : 'bg-red-500/10'
+                            }`}
+                          >
+                            <td className="p-2 text-blue-400 font-mono font-bold whitespace-nowrap">
+                              {item.order_number}
+                            </td>
+                            <td className="p-2 text-slate-300">
+                              {item.item_name}
+                              {vhHasVerified && item.matched && (
+                                <div className="text-[9px] text-slate-500 mt-0.5">
+                                  matched: {item.matchedWith}
+                                </div>
+                              )}
+                            </td>
+                            <td className="p-2 text-center font-mono text-slate-400">
+                              {item.qty}
+                              {vhHasVerified &&
+                                item.matched &&
+                                !item.qtyMatch && (
+                                  <div className="text-[9px] text-amber-400">
+                                    doc: {item.matchedQty}
+                                  </div>
+                                )}
+                            </td>
+                            <td className="p-2 text-center">
+                              {vhHasVerified &&
+                                (item.matched && item.qtyMatch ? (
+                                  <CheckCircle2
+                                    size={14}
+                                    className="text-emerald-500 inline"
+                                  />
+                                ) : item.matched ? (
+                                  <AlertCircle
+                                    size={14}
+                                    className="text-amber-500 inline"
+                                  />
+                                ) : (
+                                  <XCircle
+                                    size={14}
+                                    className="text-red-500 inline"
+                                  />
+                                ))}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* TABLE 2: Uploaded Document */}
+              <div className="border border-white/5 rounded-xl overflow-hidden flex flex-col">
+                <div className="bg-white/5 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center justify-between">
+                  <span>Uploaded Document</span>
+                  <span className="text-slate-600">
+                    {vhUploadedItems.length} items
+                  </span>
+                </div>
+                <div className="overflow-y-auto max-h-[50vh]">
+                  <table className="w-full text-left text-[11px]">
+                    <thead className="bg-slate-950/60 text-[9px] font-black uppercase text-slate-600 sticky top-0">
+                      <tr>
+                        <th className="p-2">Item Name (as written)</th>
+                        <th className="p-2 text-center w-16">Qty</th>
+                        <th className="p-2 text-center w-10"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {vhIsScanning ? (
+                        <tr>
+                          <td
+                            colSpan={3}
+                            className="p-8 text-center text-slate-500"
+                          >
+                            <Loader2
+                              className="animate-spin inline"
+                              size={18}
+                            />
+                          </td>
+                        </tr>
+                      ) : vhUploadedItems.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={3}
+                            className="p-8 text-center text-slate-600 text-[10px] uppercase font-bold"
+                          >
+                            Upload a file to extract items
+                          </td>
+                        </tr>
+                      ) : (
+                        vhUploadedItems.map((item) => (
+                          <tr
+                            key={item.id}
+                            className={`border-t border-white/5 ${
+                              !vhHasVerified
+                                ? ''
+                                : item.matched && item.qtyMatch
+                                ? 'bg-emerald-500/10'
+                                : item.matched
+                                ? 'bg-amber-500/10'
+                                : 'bg-red-500/10'
+                            }`}
+                          >
+                            <td className="p-2 text-slate-300">
+                              {item.item_name || (
+                                <span className="text-slate-600 italic">
+                                  Unnamed
+                                </span>
+                              )}
+                              {vhHasVerified && item.matched && (
+                                <div className="text-[9px] text-slate-500 mt-0.5">
+                                  matched: {item.matchedWith}
+                                </div>
+                              )}
+                            </td>
+                            <td className="p-2 text-center font-mono text-slate-400">
+                              {item.qty}
+                              {vhHasVerified &&
+                                item.matched &&
+                                !item.qtyMatch && (
+                                  <div className="text-[9px] text-amber-400">
+                                    pos: {item.matchedQty}
+                                  </div>
+                                )}
+                            </td>
+                            <td className="p-2 text-center">
+                              {vhHasVerified &&
+                                (item.matched && item.qtyMatch ? (
+                                  <CheckCircle2
+                                    size={14}
+                                    className="text-emerald-500 inline"
+                                  />
+                                ) : item.matched ? (
+                                  <AlertCircle
+                                    size={14}
+                                    className="text-amber-500 inline"
+                                  />
+                                ) : (
+                                  <XCircle
+                                    size={14}
+                                    className="text-red-500 inline"
+                                  />
+                                ))}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -1442,6 +2064,20 @@ export default function SalesOrderList() {
         //END OF ORDER VIEW
         //START OF DAY VIEW
         <div className="space-y-4">
+          {isAuditor && (
+            <div className="flex justify-end">
+              <button
+                onClick={openVerificationHelper}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl border border-blue-500/30 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 transition-all"
+              >
+                <FileText size={14} />
+                <span className="text-[10px] font-black uppercase tracking-widest">
+                  Verification Helper
+                </span>
+              </button>
+            </div>
+          )}
+
           {daySummary.map((day) => (
             <div
               key={day.date}
