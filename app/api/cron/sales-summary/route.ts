@@ -1790,9 +1790,9 @@ export async function GET(request: Request) {
       return NextResponse.json({ success: true, message: `Drugstore weekly email sent for ${weekStart} to ${weekEnd}` });
     }
 
-    // ==================== DRUGSTORE MONTHLY EMAIL (11PM 1ST PHT) - NON-OFFICE BRANCHES ====================
+    // ==================== DRUGSTORE MONTHLY EMAIL (6AM 1ST PHT) - NON-OFFICE BRANCHES ====================
     if (type === 'DRUGSTORE_EMAIL_MONTHLY') {
-      console.log('📧 Starting Drugstore Monthly Email (11PM 1st PHT) - Non-Office Branches');
+      console.log('📧 Starting Drugstore Monthly Email (6AM 1st PHT) - Non-Office Branches');
 
       const { data: orgsDM } = await supabaseAdmin
         .from('organizations')
@@ -1814,6 +1814,38 @@ export async function GET(request: Request) {
         cursor.setDate(cursor.getDate() + 1);
       }
       const fmt = (n: number) => `₱${n.toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
+
+      // ── Incentive scheme (flat pesos) — confirm/adjust these ──
+      const WEEKLY_INCENTIVE_AMOUNT = 500;   // per branch, per Sun–Sat week its generic-net sales meet that week's derived quota
+      const MONTHLY_INCENTIVE_AMOUNT = 1000; // per branch, bonus for meeting the full month's generic-net quota
+      const SNACKS_WEEKLY_BUDGET = 500;      // flat weekly food/snacks budget — not tied to sales, paid regardless
+
+      // Sunday–Saturday week windows overlapping this month, clipped to the month's own start/end
+      // (edge weeks can be short, e.g. 1–2 days, if the month doesn't start/end on a Sunday — their
+      // quota is prorated by day count so a short window isn't held to a full week's target)
+      type WeekWindow = { start: string; end: string; days: number };
+      const weekWindows: WeekWindow[] = [];
+      {
+        let wkCursor = new Date(monthStart + 'T00:00:00');
+        while (wkCursor <= monthEndCursor) {
+          const dow = wkCursor.getDay(); // 0=Sun..6=Sat
+          const windowStart = new Date(wkCursor);
+          windowStart.setDate(wkCursor.getDate() - dow);
+          const windowEnd = new Date(windowStart);
+          windowEnd.setDate(windowStart.getDate() + 6);
+          const clippedStart = windowStart < monthStartDate ? monthStartDate : windowStart;
+          const clippedEnd = windowEnd > monthEndDate ? monthEndDate : windowEnd;
+          const days = Math.round((clippedEnd.getTime() - clippedStart.getTime()) / 86400000) + 1;
+          weekWindows.push({
+            start: clippedStart.toISOString().split('T')[0],
+            end: clippedEnd.toISOString().split('T')[0],
+            days,
+          });
+          wkCursor = new Date(windowEnd);
+          wkCursor.setDate(windowEnd.getDate() + 1);
+        }
+      }
+      const snacksTotal = SNACKS_WEEKLY_BUDGET * weekWindows.length;
 
       for (const org of orgsDM || []) {
         if (!org.owner_email) continue;
@@ -1842,6 +1874,12 @@ export async function GET(request: Request) {
           users: string[];
           paRows: Array<{ pa: string; total: number; orders: number; pct: number }>;
           discountRows: Array<{ user: string; orders: number; totalDiscount: number; totalSales: number; avgDiscount: number; flagged: boolean }>;
+          weeklyHits: Array<WeekWindow & { actual: number; quota: number; hit: boolean }>;
+          weeksHit: number;
+          weeklyIncentiveTotal: number;
+          monthlyIncentiveEarned: boolean;
+          monthlyIncentiveAmount: number;
+          totalIncentive: number;
         };
 
         const branchDataList: BranchMonthData[] = [];
@@ -1850,7 +1888,7 @@ export async function GET(request: Request) {
           // Daily reports for the month — get expenses and reported_by directly from here
           const { data: reports } = await supabaseAdmin
             .from('daily_reports')
-            .select('generic_sales, branded_sales, discount_total, expenses, reported_by')
+            .select('generic_sales, branded_sales, discount_total, expenses, reported_by, report_date')
             .eq('branch_id', b.id)
             .in('report_date', monthDates);
 
@@ -1951,7 +1989,31 @@ export async function GET(request: Request) {
             }))
             .sort((a, b) => b.orders - a.orders || b.totalDiscount - a.totalDiscount);
 
-          branchDataList.push({ branch: b, gen, brd, disc, totalSales, totalExp, actual, quota, poTotal, poBrd, poBySupplier, users: uniqueUsers, paRows, discountRows });
+          // Weekly incentive check — bucket this branch's daily_reports into the Sun–Sat windows
+          // built above, and test each window's generic-net sales against its own prorated quota.
+          const weeklyHits = weekWindows.map((w) => {
+            const windowReports = (reports || []).filter(
+              (r: any) => r.report_date >= w.start && r.report_date <= w.end
+            );
+            const wGen = windowReports.reduce((s: number, r: any) => s + Number(r.generic_sales || 0), 0);
+            const wDisc = windowReports.reduce((s: number, r: any) => s + Number(r.discount_total || 0), 0);
+            const wActual = wGen - wDisc;
+            const wQuota = Number(b.daily_generic_quota || 0) * w.days;
+            return { ...w, actual: wActual, quota: wQuota, hit: wQuota > 0 && wActual >= wQuota };
+          });
+          const weeksHit = weeklyHits.filter((w) => w.hit).length;
+          const weeklyIncentiveTotal = weeksHit * WEEKLY_INCENTIVE_AMOUNT;
+
+          // Monthly incentive check — reuses the same quota/generic-net figures as the Quota Report table
+          const monthlyIncentiveEarned = quota > 0 && (gen - disc) >= quota;
+          const monthlyIncentiveAmount = monthlyIncentiveEarned ? MONTHLY_INCENTIVE_AMOUNT : 0;
+          const totalIncentive = weeklyIncentiveTotal + monthlyIncentiveAmount;
+
+          branchDataList.push({
+            branch: b, gen, brd, disc, totalSales, totalExp, actual, quota, poTotal, poBrd, poBySupplier,
+            users: uniqueUsers, paRows, discountRows,
+            weeklyHits, weeksHit, weeklyIncentiveTotal, monthlyIncentiveEarned, monthlyIncentiveAmount, totalIncentive,
+          });
         } // end per-branch loop
 
         // ── Grand totals ──
@@ -1968,6 +2030,23 @@ export async function GET(request: Request) {
         const grandNetNoBrd = grandActual - grandPoBrd;
         const grandGenNet = grandGen - grandDisc;
         const grandPct = grandQuota > 0 ? (grandGenNet / grandQuota) * 100 : 0;
+        // Manager/Marvin — evaluated the same way as branches but on AGGREGATE (whole-operation)
+        // figures, consistent with the Quota Report's "quota as a whole" treatment of this row.
+        // This is independent of individual branches' hit/miss — e.g. one branch missing its own
+        // week can still be covered if others overshoot enough that the combined total clears.
+        const managerWeeklyHits = weekWindows.map((w, i) => {
+          const wActual = branchDataList.reduce((s, d) => s + (d.weeklyHits[i]?.actual || 0), 0);
+          const wQuota = branchDataList.reduce((s, d) => s + (d.weeklyHits[i]?.quota || 0), 0);
+          return { ...w, actual: wActual, quota: wQuota, hit: wQuota > 0 && wActual >= wQuota };
+        });
+        const managerWeeksHit = managerWeeklyHits.filter((w) => w.hit).length;
+        const managerWeeklyIncentiveTotal = managerWeeksHit * WEEKLY_INCENTIVE_AMOUNT;
+        const managerMonthlyEarned = grandQuota > 0 && grandGenNet >= grandQuota;
+        const managerMonthlyAmount = managerMonthlyEarned ? MONTHLY_INCENTIVE_AMOUNT : 0;
+        const managerTotalIncentive = managerWeeklyIncentiveTotal + managerMonthlyAmount;
+
+        const grandIncentive = branchDataList.reduce((s, d) => s + d.totalIncentive, 0);
+        const grandIncentiveWithSnacks = grandIncentive + snacksTotal + managerTotalIncentive;
 
         // ════════════════════════════════════
         // BUILD EMAIL HTML
@@ -2277,6 +2356,116 @@ export async function GET(request: Request) {
                   </table>
                 </div>
                 <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">⚠️ <strong>Review</strong> = 5+ discounted orders by one user at one branch this month — check for order-splitting to unlock discount thresholds. Figures here come from each order's own <code>discount_total</code>, which may differ from the "Discount" total in the Branch Summary table above (that one is manually entered per day by whoever files the daily report).</p>
+              </div>
+
+              <!-- ══════ TABLE 6: QUOTA REPORT ══════ -->
+              <div style="margin-bottom:16px;">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+                  <div style="width:4px;height:20px;background:#f59e0b;border-radius:2px;"></div>
+                  <span style="font-size:11px;font-weight:800;letter-spacing:3px;color:#64748b;text-transform:uppercase;">Quota Report</span>
+                </div>
+                <div style="overflow-x:auto;border-radius:10px;border:1px solid #fde68a;">
+                  <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                    <thead>
+                      <tr style="background:#1e293b;color:#94a3b8;text-align:left;">
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Branch</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Quota</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Monthly Sales</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">% of Quota</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${branchDataList.map((d, i) => {
+                        const genNet = d.gen - d.disc;
+                        const pct = d.quota > 0 ? (genNet / d.quota) * 100 : 0;
+                        const barPct = Math.min(Math.max(pct, 0), 100);
+                        const barColor = pct >= 100 ? '#16a34a' : pct >= 75 ? '#d97706' : '#dc2626';
+                        const rowBg = i % 2 === 0 ? '#ffffff' : '#f8fafc';
+                        return `<tr style="background:${rowBg};border-bottom:1px solid #f1f5f9;">
+                          <td style="padding:10px 12px;font-weight:700;color:#1e293b;">${d.branch.branch_name}</td>
+                          <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#64748b;">${d.quota > 0 ? fmt(d.quota) : '—'}</td>
+                          <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:700;color:#111827;">${fmt(genNet)}</td>
+                          <td style="padding:10px 12px;text-align:center;">
+                            <div style="display:flex;align-items:center;gap:6px;">
+                              <div style="flex:1;background:#fef3c7;border-radius:99px;height:6px;min-width:60px;">
+                                <div style="background:${barColor};height:6px;border-radius:99px;width:${barPct}%;"></div>
+                              </div>
+                              <span style="font-weight:700;color:${barColor};font-size:11px;white-space:nowrap;">${d.quota > 0 ? pct.toFixed(1) + '%' : '—'}</span>
+                            </div>
+                          </td>
+                        </tr>`;
+                      }).join('')}
+                      <tr style="background:#fef3c7;border-top:2px solid #f59e0b;border-bottom:2px solid #f59e0b;">
+                        <td style="padding:11px 12px;font-weight:900;color:#92400e;font-size:11px;text-transform:uppercase;letter-spacing:1px;">👔 Manager</td>
+                        <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#92400e;">${grandQuota > 0 ? fmt(grandQuota) : '—'}</td>
+                        <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:900;color:#92400e;">${fmt(grandGenNet)}</td>
+                        <td style="padding:11px 12px;text-align:center;font-weight:900;color:${grandQuota > 0 ? (grandPct >= 100 ? '#16a34a' : grandPct >= 75 ? '#d97706' : '#dc2626') : '#94a3b8'};">${grandQuota > 0 ? grandPct.toFixed(1) + '%' : '—'}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Quota = daily generic quota × ${monthDates.length} days in ${monthLabel}. Monthly Sales = generic sales net of discount, same basis as the Branch Summary table above. <strong>Manager</strong> is the combined total across all non-office branches — Marvin's overall target for the month.</p>
+              </div>
+
+              <!-- ══════ TABLE 7: INCENTIVE TRACKER ══════ -->
+              <div style="margin-bottom:16px;">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+                  <div style="width:4px;height:20px;background:#14b8a6;border-radius:2px;"></div>
+                  <span style="font-size:11px;font-weight:800;letter-spacing:3px;color:#64748b;text-transform:uppercase;">Incentive Tracker</span>
+                </div>
+                <div style="overflow-x:auto;border-radius:10px;border:1px solid #99f6e4;">
+                  <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                    <thead>
+                      <tr style="background:#1e293b;color:#94a3b8;text-align:left;">
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Branch</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">Weekly Pattern</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">Weeks Hit</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Weekly ₱</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">Monthly Bonus</th>
+                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;background:#134e4a;color:#5eead4;">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${branchDataList.map((d, i) => {
+                        const rowBg = i % 2 === 0 ? '#ffffff' : '#f8fafc';
+                        const dots = d.weeklyHits.map((w) =>
+                          `<span title="${w.start} to ${w.end}: ${fmt(w.actual)} vs ${fmt(w.quota)} quota" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${w.hit ? '#14b8a6' : '#e2e8f0'};margin:0 2px;"></span>`
+                        ).join('');
+                        return `<tr style="background:${rowBg};border-bottom:1px solid #f1f5f9;">
+                          <td style="padding:10px 12px;font-weight:700;color:#1e293b;">${d.branch.branch_name}</td>
+                          <td style="padding:10px 12px;text-align:center;white-space:nowrap;">${dots}</td>
+                          <td style="padding:10px 12px;text-align:center;font-weight:700;color:#0f766e;">${d.weeksHit} / ${d.weeklyHits.length}</td>
+                          <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#0f766e;">${fmt(d.weeklyIncentiveTotal)}</td>
+                          <td style="padding:10px 12px;text-align:center;font-weight:700;color:${d.monthlyIncentiveEarned ? '#16a34a' : '#94a3b8'};">${d.monthlyIncentiveEarned ? fmt(d.monthlyIncentiveAmount) : '—'}</td>
+                          <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:900;color:#0f766e;background:#f0fdfa;">${fmt(d.totalIncentive)}</td>
+                        </tr>`;
+                      }).join('')}
+                      <tr style="background:#fef3c7;border-top:2px solid #f59e0b;border-bottom:2px solid #f59e0b;">
+                        <td style="padding:11px 12px;font-weight:900;color:#92400e;font-size:11px;text-transform:uppercase;letter-spacing:1px;">👔 Manager</td>
+                        <td style="padding:11px 12px;text-align:center;white-space:nowrap;">${managerWeeklyHits.map((w) =>
+                          `<span title="${w.start} to ${w.end}: ${fmt(w.actual)} vs ${fmt(w.quota)} quota" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${w.hit ? '#f59e0b' : '#fde68a'};margin:0 2px;"></span>`
+                        ).join('')}</td>
+                        <td style="padding:11px 12px;text-align:center;font-weight:800;color:#92400e;">${managerWeeksHit} / ${managerWeeklyHits.length}</td>
+                        <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#92400e;">${fmt(managerWeeklyIncentiveTotal)}</td>
+                        <td style="padding:11px 12px;text-align:center;font-weight:800;color:${managerMonthlyEarned ? '#92400e' : '#94a3b8'};">${managerMonthlyEarned ? fmt(managerMonthlyAmount) : '—'}</td>
+                        <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:900;color:#92400e;background:#fde68a;">${fmt(managerTotalIncentive)}</td>
+                      </tr>
+                      <tr style="background:#fef9c3;border-top:2px solid #eab308;border-bottom:1px solid #eab308;">
+                        <td style="padding:10px 12px;font-weight:800;color:#854d0e;">🍿 Snacks Budget</td>
+                        <td style="padding:10px 12px;text-align:center;color:#a16207;font-size:10px;">flat, not performance-based</td>
+                        <td style="padding:10px 12px;text-align:center;color:#854d0e;font-weight:700;">${weekWindows.length} wks</td>
+                        <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#854d0e;">${fmt(SNACKS_WEEKLY_BUDGET)}/wk</td>
+                        <td style="padding:10px 12px;text-align:center;color:#94a3b8;">—</td>
+                        <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:900;color:#854d0e;background:#fef08a;">${fmt(snacksTotal)}</td>
+                      </tr>
+                      <tr style="background:#1e293b;">
+                        <td colspan="5" style="padding:12px;font-weight:900;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px;">💵 Total To Give Out</td>
+                        <td style="padding:12px;text-align:right;font-family:monospace;font-weight:900;font-size:14px;color:#5eead4;background:#134e4a;">${fmt(grandIncentiveWithSnacks)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Weekly incentive = ₱${WEEKLY_INCENTIVE_AMOUNT} per Sun–Sat week a branch's generic-net sales meet that week's quota (daily quota × days in the window; edge weeks are prorated — hover a dot for that week's actual vs. quota). Monthly bonus = ₱${MONTHLY_INCENTIVE_AMOUNT} for meeting the full month's quota, same figures as the Quota Report table above. Snacks is a flat ₱${SNACKS_WEEKLY_BUDGET}/week budget regardless of performance. <strong>These three amounts are constants near the top of this report block — adjust them there if they're not right.</strong> <strong>Manager</strong> is evaluated the same way but on combined totals across every branch — one branch missing its own week doesn't block his if others cover it, same "whole operation" logic as the Quota Report's Manager row.</p>
               </div>
 
             </div>
