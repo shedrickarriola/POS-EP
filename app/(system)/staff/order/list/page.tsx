@@ -90,9 +90,7 @@ const computeItemNameMatchScore = (
   const tokensB = b.split(' ').filter(Boolean);
   const tokenScore = tokensA.length
     ? tokensA.filter((ta) =>
-        tokensB.some(
-          (tb) => tb === ta || tb.startsWith(ta) || ta.startsWith(tb)
-        )
+        tokensB.some((tb) => tb === ta || tb.startsWith(ta) || ta.startsWith(tb))
       ).length / tokensA.length
     : 0;
 
@@ -171,6 +169,7 @@ export default function SalesOrderList() {
   const [vhUploadedItems, setVhUploadedItems] = useState<any[]>([]);
   const [vhIsScanning, setVhIsScanning] = useState(false);
   const [vhHasVerified, setVhHasVerified] = useState(false);
+  const [vhBulkVerifying, setVhBulkVerifying] = useState(false);
 
   const daySummary = useMemo(() => {
     if (!orders || orders.length === 0) return [];
@@ -779,7 +778,7 @@ export default function SalesOrderList() {
       const { data, error } = await supabase
         .from('orders')
         .select(
-          'id, order_number, order_items(id, quantity, inventory!product_id(item_name))'
+          'id, order_number, is_checked, order_items(id, quantity, inventory!product_id(item_name))'
         )
         .eq('branch_id', currentBranchId)
         .eq('created_date_pht', vhDate);
@@ -794,7 +793,8 @@ export default function SalesOrderList() {
           String(order.order_number || '').replace(/\D/g, ''),
           10
         );
-        if (fromNum !== null && (isNaN(soNum) || soNum < fromNum)) return false;
+        if (fromNum !== null && (isNaN(soNum) || soNum < fromNum))
+          return false;
         if (toNum !== null && (isNaN(soNum) || soNum > toNum)) return false;
         return true;
       });
@@ -812,12 +812,15 @@ export default function SalesOrderList() {
         (order.order_items || []).forEach((item: any) => {
           flattened.push({
             id: item.id,
+            order_id: order.id,
             order_number: order.order_number,
+            is_checked: !!order.is_checked,
             item_name: item.inventory?.item_name || 'UNKNOWN PRODUCT',
             qty: Number(item.quantity) || 0,
           });
         });
       });
+
 
       setVhPosItems(flattened);
     } catch (err: any) {
@@ -869,9 +872,7 @@ export default function SalesOrderList() {
           );
         } catch (err) {
           console.error('Verification Helper AI parse error:', err);
-          alert(
-            'Could not read items from that file. Please try another image.'
-          );
+          alert('Could not read items from that file. Please try another image.');
         } finally {
           setVhIsScanning(false);
         }
@@ -889,6 +890,9 @@ export default function SalesOrderList() {
   // candidate pair is scored, sorted best-first (ties broken by exact qty
   // match), then claimed pair by pair so each row is only matched once.
   // Anything left unclaimed had no reasonable counterpart on the other side.
+  // This scoring is entirely content-based (name + qty) — it never looks at
+  // row position, so it doesn't matter what order items were written on the
+  // notebook page or what order the AI happened to extract them in.
   const handleVerifyCompare = () => {
     const posRows = vhPosItems.map((p) => ({
       ...p,
@@ -896,6 +900,7 @@ export default function SalesOrderList() {
       qtyMatch: false,
       matchedWith: null as string | null,
       matchedQty: null as number | null,
+      matchedId: null as string | null,
     }));
     const upRows = vhUploadedItems.map((u) => ({
       ...u,
@@ -903,6 +908,7 @@ export default function SalesOrderList() {
       qtyMatch: false,
       matchedWith: null as string | null,
       matchedQty: null as number | null,
+      matchedId: null as string | null,
     }));
 
     const candidates: { posIdx: number; upIdx: number; score: number }[] = [];
@@ -934,15 +940,39 @@ export default function SalesOrderList() {
       posRows[posIdx].qtyMatch = qtyMatch;
       posRows[posIdx].matchedWith = upRows[upIdx].item_name;
       posRows[posIdx].matchedQty = upRows[upIdx].qty;
+      posRows[posIdx].matchedId = upRows[upIdx].id;
 
       upRows[upIdx].matched = true;
       upRows[upIdx].qtyMatch = qtyMatch;
       upRows[upIdx].matchedWith = posRows[posIdx].item_name;
       upRows[upIdx].matchedQty = posRows[posIdx].qty;
+      upRows[upIdx].matchedId = posRows[posIdx].id;
     });
 
+    // Table 1 stays in SO# order (that sequence is meaningful). Table 2 is
+    // re-ordered so a matched row sits at the same position as its Table 1
+    // counterpart — since the notebook page/AI extraction order rarely
+    // matches SO# order, without this the two tables can look jumbled
+    // relative to each other even when every match underneath is correct.
+    // Unmatched uploaded rows fall to the bottom, in their original order,
+    // still flagged red so they stay visible rather than getting buried.
+    const posPositionById = new Map(posRows.map((p, idx) => [p.id, idx]));
+    const alignedUpRows = upRows
+      .map((u, originalIdx) => ({ u, originalIdx }))
+      .sort((a, b) => {
+        const aKey = a.u.matched
+          ? posPositionById.get(a.u.matchedId) ?? Infinity
+          : Infinity;
+        const bKey = b.u.matched
+          ? posPositionById.get(b.u.matchedId) ?? Infinity
+          : Infinity;
+        if (aKey !== bKey) return aKey - bKey;
+        return a.originalIdx - b.originalIdx;
+      })
+      .map(({ u }) => u);
+
     setVhPosItems(posRows);
-    setVhUploadedItems(upRows);
+    setVhUploadedItems(alignedUpRows);
     setVhHasVerified(true);
   };
 
@@ -955,6 +985,107 @@ export default function SalesOrderList() {
       upUnmatched: vhUploadedItems.filter((u) => !u.matched).length,
     };
   }, [vhHasVerified, vhPosItems, vhUploadedItems]);
+
+  // Groups the flat POS item rows back up by order, in the same SO# order
+  // they were fetched in, so Table 1 can rowSpan the SO# and Status cells
+  // instead of repeating them on every item row. allGreen is only ever true
+  // once a comparison has actually run — before that we don't know either way.
+  const vhGroupedPosItems = useMemo(() => {
+    const groups: Record<string, any> = {};
+    const orderIds: string[] = [];
+    vhPosItems.forEach((item) => {
+      if (!groups[item.order_id]) {
+        groups[item.order_id] = {
+          order_id: item.order_id,
+          order_number: item.order_number,
+          is_checked: item.is_checked,
+          items: [],
+        };
+        orderIds.push(item.order_id);
+      }
+      groups[item.order_id].items.push(item);
+    });
+    return orderIds.map((id) => {
+      const g = groups[id];
+      const allGreen =
+        vhHasVerified &&
+        g.items.length > 0 &&
+        g.items.every((it: any) => it.matched && it.qtyMatch);
+      return { ...g, allGreen };
+    });
+  }, [vhPosItems, vhHasVerified]);
+
+  // SOs that are safe to bulk-verify: every item on the SO matched the
+  // uploaded document with the correct qty, and it isn't already verified.
+  const vhEligibleGreenGroups = useMemo(
+    () => vhGroupedPosItems.filter((g) => g.allGreen && !g.is_checked),
+    [vhGroupedPosItems]
+  );
+
+  const renderSoVerificationStatus = (group: any) => {
+    if (group.is_checked) {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-emerald-400 text-[9px] font-black uppercase tracking-wider whitespace-nowrap">
+          <ShieldCheck size={12} /> Verified
+        </span>
+      );
+    }
+    if (!vhHasVerified) {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-slate-500 text-[9px] font-black uppercase tracking-wider whitespace-nowrap">
+          <Clock size={12} /> Not Compared
+        </span>
+      );
+    }
+    if (group.allGreen) {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-blue-400 text-[9px] font-black uppercase tracking-wider whitespace-nowrap">
+          <CheckCircle2 size={12} /> Ready to Verify
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1.5 text-red-400 text-[9px] font-black uppercase tracking-wider whitespace-nowrap">
+        <AlertCircle size={12} /> Discrepancy
+      </span>
+    );
+  };
+
+  // Bulk-applies the exact same update handleVerifyOrder uses for a single
+  // SO (is_checked / checked_by_name / checked_at), to every SO that's
+  // fully green, in one request. Updates the local rows immediately so the
+  // Status column flips without waiting on a refetch, then refreshes the
+  // main table underneath so it's in sync too.
+  const handleVerifyAllGreenSOs = async () => {
+    if (!currentUser || vhEligibleGreenGroups.length === 0) return;
+    setVhBulkVerifying(true);
+    try {
+      const orderIds = vhEligibleGreenGroups.map((g) => g.order_id);
+      const { error } = await supabase
+        .from('orders')
+        .update({
+          is_checked: true,
+          checked_by_name: currentUser.full_name,
+          checked_at: new Date().toISOString(),
+        })
+        .in('id', orderIds);
+
+      if (error) throw error;
+
+      setVhPosItems((prev) =>
+        prev.map((item) =>
+          orderIds.includes(item.order_id)
+            ? { ...item, is_checked: true }
+            : item
+        )
+      );
+      await fetchData();
+    } catch (err: any) {
+      alert(`Bulk verify failed: ${err.message}`);
+    } finally {
+      setVhBulkVerifying(false);
+    }
+  };
 
   // 5. METRICS CALCULATION (Retained from ol3526.txt)
   const pageMetrics = useMemo(() => {
@@ -1001,7 +1132,8 @@ export default function SalesOrderList() {
                 </h2>
                 <p className="text-[11px] text-slate-500 mt-1">
                   Upload the day's written log and compare it against what's
-                  recorded in the POS for {currentBranchName || 'this branch'}.
+                  recorded in the POS for{' '}
+                  {currentBranchName || 'this branch'}.
                 </p>
               </div>
               <button
@@ -1064,7 +1196,10 @@ export default function SalesOrderList() {
                   className="flex items-center gap-2 px-4 py-2 rounded-lg border border-white/10 hover:border-blue-500 bg-slate-800/50 transition-all cursor-pointer group"
                 >
                   {vhIsScanning ? (
-                    <Loader2 size={14} className="animate-spin text-blue-400" />
+                    <Loader2
+                      size={14}
+                      className="animate-spin text-blue-400"
+                    />
                   ) : (
                     <Camera
                       size={14}
@@ -1098,14 +1233,33 @@ export default function SalesOrderList() {
                   <CheckCircle2 size={12} /> {vhSummary.matchedFull} Matched
                 </span>
                 <span className="text-amber-400 flex items-center gap-1.5">
-                  <AlertCircle size={12} /> {vhSummary.qtyMismatch} Qty Mismatch
+                  <AlertCircle size={12} /> {vhSummary.qtyMismatch} Qty
+                  Mismatch
                 </span>
                 <span className="text-red-400 flex items-center gap-1.5">
                   <XCircle size={12} /> {vhSummary.posUnmatched} POS Unmatched
                 </span>
                 <span className="text-red-400 flex items-center gap-1.5">
-                  <XCircle size={12} /> {vhSummary.upUnmatched} Upload Unmatched
+                  <XCircle size={12} /> {vhSummary.upUnmatched} Upload
+                  Unmatched
                 </span>
+
+                <button
+                  onClick={handleVerifyAllGreenSOs}
+                  disabled={
+                    vhEligibleGreenGroups.length === 0 || vhBulkVerifying
+                  }
+                  className="ml-auto flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-600 text-white normal-case tracking-normal transition-all"
+                >
+                  {vhBulkVerifying ? (
+                    <Loader2 size={14} className="animate-spin" />
+                  ) : (
+                    <ShieldCheck size={14} />
+                  )}
+                  <span className="text-[9px] font-black uppercase tracking-widest">
+                    Verify All Green SO# ({vhEligibleGreenGroups.length})
+                  </span>
+                </button>
               </div>
             )}
 
@@ -1127,85 +1281,100 @@ export default function SalesOrderList() {
                         <th className="p-2">Item Name</th>
                         <th className="p-2 text-center w-16">Qty</th>
                         <th className="p-2 text-center w-10"></th>
+                        <th className="p-2 text-center w-32">SO Status</th>
                       </tr>
                     </thead>
                     <tbody>
                       {vhLoadingPos ? (
                         <tr>
                           <td
-                            colSpan={4}
+                            colSpan={5}
                             className="p-8 text-center text-slate-500"
                           >
-                            <Loader2
-                              className="animate-spin inline"
-                              size={18}
-                            />
+                            <Loader2 className="animate-spin inline" size={18} />
                           </td>
                         </tr>
-                      ) : vhPosItems.length === 0 ? (
+                      ) : vhGroupedPosItems.length === 0 ? (
                         <tr>
                           <td
-                            colSpan={4}
+                            colSpan={5}
                             className="p-8 text-center text-slate-600 text-[10px] uppercase font-bold"
                           >
                             No POS orders for this date / range
                           </td>
                         </tr>
                       ) : (
-                        vhPosItems.map((item) => (
-                          <tr
-                            key={item.id}
-                            className={`border-t border-white/5 ${
-                              !vhHasVerified
-                                ? ''
-                                : item.matched && item.qtyMatch
-                                ? 'bg-emerald-500/10'
-                                : item.matched
-                                ? 'bg-amber-500/10'
-                                : 'bg-red-500/10'
-                            }`}
-                          >
-                            <td className="p-2 text-blue-400 font-mono font-bold whitespace-nowrap">
-                              {item.order_number}
-                            </td>
-                            <td className="p-2 text-slate-300">
-                              {item.item_name}
-                              {vhHasVerified && item.matched && (
-                                <div className="text-[9px] text-slate-500 mt-0.5">
-                                  matched: {item.matchedWith}
-                                </div>
-                              )}
-                            </td>
-                            <td className="p-2 text-center font-mono text-slate-400">
-                              {item.qty}
-                              {vhHasVerified &&
-                                item.matched &&
-                                !item.qtyMatch && (
-                                  <div className="text-[9px] text-amber-400">
-                                    doc: {item.matchedQty}
-                                  </div>
+                        vhGroupedPosItems.map((group) => (
+                          <React.Fragment key={group.order_id}>
+                            {group.items.map((item: any, idx: number) => (
+                              <tr
+                                key={item.id}
+                                className={`border-t border-white/5 ${
+                                  !vhHasVerified
+                                    ? ''
+                                    : item.matched && item.qtyMatch
+                                    ? 'bg-emerald-500/10'
+                                    : item.matched
+                                    ? 'bg-amber-500/10'
+                                    : 'bg-red-500/10'
+                                }`}
+                              >
+                                {idx === 0 && (
+                                  <td
+                                    rowSpan={group.items.length}
+                                    className="p-2 text-blue-400 font-mono font-bold whitespace-nowrap align-top border-r border-white/5"
+                                  >
+                                    {group.order_number}
+                                  </td>
                                 )}
-                            </td>
-                            <td className="p-2 text-center">
-                              {vhHasVerified &&
-                                (item.matched && item.qtyMatch ? (
-                                  <CheckCircle2
-                                    size={14}
-                                    className="text-emerald-500 inline"
-                                  />
-                                ) : item.matched ? (
-                                  <AlertCircle
-                                    size={14}
-                                    className="text-amber-500 inline"
-                                  />
-                                ) : (
-                                  <XCircle
-                                    size={14}
-                                    className="text-red-500 inline"
-                                  />
-                                ))}
-                            </td>
-                          </tr>
+                                <td className="p-2 text-slate-300">
+                                  {item.item_name}
+                                  {vhHasVerified && item.matched && (
+                                    <div className="text-[9px] text-slate-500 mt-0.5">
+                                      matched: {item.matchedWith}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="p-2 text-center font-mono text-slate-400">
+                                  {item.qty}
+                                  {vhHasVerified &&
+                                    item.matched &&
+                                    !item.qtyMatch && (
+                                      <div className="text-[9px] text-amber-400">
+                                        doc: {item.matchedQty}
+                                      </div>
+                                    )}
+                                </td>
+                                <td className="p-2 text-center">
+                                  {vhHasVerified &&
+                                    (item.matched && item.qtyMatch ? (
+                                      <CheckCircle2
+                                        size={14}
+                                        className="text-emerald-500 inline"
+                                      />
+                                    ) : item.matched ? (
+                                      <AlertCircle
+                                        size={14}
+                                        className="text-amber-500 inline"
+                                      />
+                                    ) : (
+                                      <XCircle
+                                        size={14}
+                                        className="text-red-500 inline"
+                                      />
+                                    ))}
+                                </td>
+                                {idx === 0 && (
+                                  <td
+                                    rowSpan={group.items.length}
+                                    className="p-2 text-center align-top border-l border-white/5"
+                                  >
+                                    {renderSoVerificationStatus(group)}
+                                  </td>
+                                )}
+                              </tr>
+                            ))}
+                          </React.Fragment>
                         ))
                       )}
                     </tbody>
@@ -1237,10 +1406,7 @@ export default function SalesOrderList() {
                             colSpan={3}
                             className="p-8 text-center text-slate-500"
                           >
-                            <Loader2
-                              className="animate-spin inline"
-                              size={18}
-                            />
+                            <Loader2 className="animate-spin inline" size={18} />
                           </td>
                         </tr>
                       ) : vhUploadedItems.length === 0 ? (
