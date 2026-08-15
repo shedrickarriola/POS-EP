@@ -2417,55 +2417,69 @@ export async function GET(request: Request) {
                   <table style="width:100%;border-collapse:collapse;font-size:12px;">
                     <thead>
                       <tr style="background:#1e293b;color:#94a3b8;text-align:left;">
-                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Branch</th>
-                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">Weekly Pattern</th>
-                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">Weeks Hit</th>
-                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Weekly ₱</th>
-                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">Monthly Bonus</th>
-                        <th style="padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;background:#134e4a;color:#5eead4;">Total</th>
+                        <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Branch</th>
+                        <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Quota</th>
+                        <th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;">Wk 1</th>
+                        <th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;">Wk 2</th>
+                        <th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;">Wk 3</th>
+                        <th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;">Wk 4</th>
+                        <th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;">Wk 5</th>
+                        <th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;">Wk 6</th>
+                        <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">Monthly (Actual vs Quota)</th>
+                        <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">PA</th>
+                        <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;background:#134e4a;color:#5eead4;">Total Incentive</th>
                       </tr>
                     </thead>
                     <tbody>
                       ${branchDataList.map((d, i) => {
                         const rowBg = i % 2 === 0 ? '#ffffff' : '#f8fafc';
-                        const dots = d.weeklyHits.map((w) =>
-                          `<span title="${w.start} to ${w.end}: ${fmt(w.actual)} vs ${fmt(w.quota)} quota" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${w.hit ? '#14b8a6' : '#e2e8f0'};margin:0 2px;"></span>`
-                        ).join('');
+                        const weeklyQuotaRef = Number(d.branch.daily_generic_quota || 0) * 7;
+                        const weekCells = Array.from({ length: 6 }).map((_, wi) => {
+                          const w = d.weeklyHits[wi];
+                          if (!w) return `<td style="padding:8px 5px;text-align:center;background:#f8fafc;color:#cbd5e1;font-family:monospace;font-size:10px;">—</td>`;
+                          const bg = w.hit ? '#dcfce7' : '#ffffff';
+                          const txt = w.hit ? '#166534' : '#64748b';
+                          return `<td style="padding:8px 5px;text-align:center;background:${bg};color:${txt};font-family:monospace;font-size:10px;font-weight:${w.hit ? '800' : '400'};" title="${w.start} to ${w.end} — quota ${fmt(w.quota)}">${fmt(w.actual)}</td>`;
+                        }).join('');
+                        const genNet = d.gen - d.disc;
+                        const monthColor = d.monthlyIncentiveEarned ? '#16a34a' : '#dc2626';
+                        const topPA = d.paRows && d.paRows.length > 0 ? d.paRows[0].pa : '—';
                         return `<tr style="background:${rowBg};border-bottom:1px solid #f1f5f9;">
-                          <td style="padding:10px 12px;font-weight:700;color:#1e293b;">${d.branch.branch_name}</td>
-                          <td style="padding:10px 12px;text-align:center;white-space:nowrap;">${dots}</td>
-                          <td style="padding:10px 12px;text-align:center;font-weight:700;color:#0f766e;">${d.weeksHit} / ${d.weeklyHits.length}</td>
-                          <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#0f766e;">${fmt(d.weeklyIncentiveTotal)}</td>
-                          <td style="padding:10px 12px;text-align:center;font-weight:700;color:${d.monthlyIncentiveEarned ? '#16a34a' : '#94a3b8'};">${d.monthlyIncentiveEarned ? fmt(d.monthlyIncentiveAmount) : '—'}</td>
-                          <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:900;color:#0f766e;background:#f0fdfa;">${fmt(d.totalIncentive)}</td>
+                          <td style="padding:10px 8px;font-weight:700;color:#1e293b;">${d.branch.branch_name}</td>
+                          <td style="padding:10px 8px;text-align:right;font-family:monospace;color:#64748b;font-size:11px;">${fmt(weeklyQuotaRef)}</td>
+                          ${weekCells}
+                          <td style="padding:10px 8px;text-align:center;font-size:11px;font-weight:700;color:${monthColor};white-space:nowrap;">${fmt(genNet)} / ${fmt(d.quota)}</td>
+                          <td style="padding:10px 8px;color:#374151;font-size:11px;">${topPA}</td>
+                          <td style="padding:10px 8px;text-align:right;font-family:monospace;font-weight:900;color:#0f766e;background:#f0fdfa;">${fmt(d.totalIncentive)}</td>
                         </tr>`;
                       }).join('')}
                       <tr style="background:#fef3c7;border-top:2px solid #f59e0b;border-bottom:2px solid #f59e0b;">
-                        <td style="padding:11px 12px;font-weight:900;color:#92400e;font-size:11px;text-transform:uppercase;letter-spacing:1px;">👔 Manager</td>
-                        <td style="padding:11px 12px;text-align:center;white-space:nowrap;">${managerWeeklyHits.map((w) =>
-                          `<span title="${w.start} to ${w.end}: ${fmt(w.actual)} vs ${fmt(w.quota)} quota" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${w.hit ? '#f59e0b' : '#fde68a'};margin:0 2px;"></span>`
-                        ).join('')}</td>
-                        <td style="padding:11px 12px;text-align:center;font-weight:800;color:#92400e;">${managerWeeksHit} / ${managerWeeklyHits.length}</td>
-                        <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:800;color:#92400e;">${fmt(managerWeeklyIncentiveTotal)}</td>
-                        <td style="padding:11px 12px;text-align:center;font-weight:800;color:${managerMonthlyEarned ? '#92400e' : '#94a3b8'};">${managerMonthlyEarned ? fmt(managerMonthlyAmount) : '—'}</td>
-                        <td style="padding:11px 12px;text-align:right;font-family:monospace;font-weight:900;color:#92400e;background:#fde68a;">${fmt(managerTotalIncentive)}</td>
+                        <td style="padding:11px 8px;font-weight:900;color:#92400e;font-size:11px;text-transform:uppercase;letter-spacing:1px;">👔 Manager</td>
+                        <td style="padding:11px 8px;text-align:right;font-family:monospace;font-weight:700;color:#92400e;font-size:11px;">${fmt(branchDataList.reduce((s, d) => s + Number(d.branch.daily_generic_quota || 0) * 7, 0))}</td>
+                        ${Array.from({ length: 6 }).map((_, wi) => {
+                          const w = managerWeeklyHits[wi];
+                          if (!w) return `<td style="padding:8px 5px;text-align:center;background:#fffbeb;color:#fde68a;font-family:monospace;font-size:10px;">—</td>`;
+                          const bg = w.hit ? '#fde68a' : '#fffbeb';
+                          const txt = w.hit ? '#92400e' : '#a16207';
+                          return `<td style="padding:8px 5px;text-align:center;background:${bg};color:${txt};font-family:monospace;font-size:10px;font-weight:${w.hit ? '800' : '400'};" title="${w.start} to ${w.end} — quota ${fmt(w.quota)}">${fmt(w.actual)}</td>`;
+                        }).join('')}
+                        <td style="padding:11px 8px;text-align:center;font-size:11px;font-weight:800;color:${managerMonthlyEarned ? '#166534' : '#dc2626'};white-space:nowrap;">${fmt(grandGenNet)} / ${fmt(grandQuota)}</td>
+                        <td style="padding:11px 8px;text-align:center;color:#92400e;font-size:11px;">—</td>
+                        <td style="padding:11px 8px;text-align:right;font-family:monospace;font-weight:900;color:#92400e;background:#fde68a;">${fmt(managerTotalIncentive)}</td>
                       </tr>
                       <tr style="background:#fef9c3;border-top:2px solid #eab308;border-bottom:1px solid #eab308;">
-                        <td style="padding:10px 12px;font-weight:800;color:#854d0e;">🍿 Snacks Budget</td>
-                        <td style="padding:10px 12px;text-align:center;color:#a16207;font-size:10px;">flat, not performance-based</td>
-                        <td style="padding:10px 12px;text-align:center;color:#854d0e;font-weight:700;">${weekWindows.length} wks</td>
-                        <td style="padding:10px 12px;text-align:right;font-family:monospace;color:#854d0e;">${fmt(SNACKS_WEEKLY_BUDGET)}/wk</td>
-                        <td style="padding:10px 12px;text-align:center;color:#94a3b8;">—</td>
-                        <td style="padding:10px 12px;text-align:right;font-family:monospace;font-weight:900;color:#854d0e;background:#fef08a;">${fmt(snacksTotal)}</td>
+                        <td style="padding:10px 8px;font-weight:800;color:#854d0e;">🍿 Snacks Budget</td>
+                        <td colspan="9" style="padding:10px 8px;color:#a16207;font-size:11px;">Flat ₱${SNACKS_WEEKLY_BUDGET}/week × ${weekWindows.length} weeks — not performance-based</td>
+                        <td style="padding:10px 8px;text-align:right;font-family:monospace;font-weight:900;color:#854d0e;background:#fef08a;">${fmt(snacksTotal)}</td>
                       </tr>
                       <tr style="background:#1e293b;">
-                        <td colspan="5" style="padding:12px;font-weight:900;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px;">💵 Total To Give Out</td>
+                        <td colspan="10" style="padding:12px;font-weight:900;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px;">💵 Total To Give Out</td>
                         <td style="padding:12px;text-align:right;font-family:monospace;font-weight:900;font-size:14px;color:#5eead4;background:#134e4a;">${fmt(grandIncentiveWithSnacks)}</td>
                       </tr>
                     </tbody>
                   </table>
                 </div>
-                <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Weekly incentive = ₱${WEEKLY_INCENTIVE_AMOUNT} per Sun–Sat week a branch's generic-net sales meet that week's quota (daily quota × days in the window; edge weeks are prorated — hover a dot for that week's actual vs. quota). Monthly bonus = ₱${MONTHLY_INCENTIVE_AMOUNT} for meeting the full month's quota, same figures as the Quota Report table above. Snacks is a flat ₱${SNACKS_WEEKLY_BUDGET}/week budget regardless of performance. <strong>These three amounts are constants near the top of this report block — adjust them there if they're not right.</strong> <strong>Manager</strong> is evaluated the same way but on combined totals across every branch — one branch missing its own week doesn't block his if others cover it, same "whole operation" logic as the Quota Report's Manager row.</p>
+                <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Quota column = the standard 7-day reference (daily quota × 7); cells for edge weeks near month boundaries are checked against a prorated version of that (fewer days = lower bar), shown on hover. Green cell = that week's generic-net sales met its quota → +₱${WEEKLY_INCENTIVE_AMOUNT}. Monthly (Actual vs Quota) uses the same figures as the Quota Report table; green text = the month's quota was met → +₱${MONTHLY_INCENTIVE_AMOUNT}. PA = each branch's top seller by sales this month. Snacks is a flat ₱${SNACKS_WEEKLY_BUDGET}/week budget regardless of performance. <strong>Manager</strong> uses combined totals across every branch, same "whole operation" logic as the Quota Report's Manager row. <strong>The three peso amounts are constants near the top of this report block</strong> — adjust them there if they're not right.</p>
               </div>
 
             </div>
