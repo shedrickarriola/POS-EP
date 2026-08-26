@@ -247,16 +247,34 @@ export default function StaffDashboard() {
   // ============================================================
   const calculateMarkup = (
     type: string | null | undefined,
-    name: string | null | undefined
+    name: string | null | undefined,
+    isOfficeUse?: boolean,
+    genericMarkupOverride?: number | null,
+    brandedMarkupOverride?: number | null
   ): number => {
     const upperType = (type ?? 'GENERIC').toUpperCase();
     const lowerName = (name ?? '').toLowerCase();
 
-    // Rule 1: Generic is always 50%
-    if (upperType === 'GENERIC') return 50;
+    // Rule 1: Generic - branch override wins if set, else Office 20% / Drugstore 50%
+    if (upperType === 'GENERIC') {
+      if (
+        genericMarkupOverride !== null &&
+        genericMarkupOverride !== undefined
+      ) {
+        return Number(genericMarkupOverride);
+      }
+      return isOfficeUse ? 20 : 50;
+    }
 
-    // Rule 2: Branded Logic
+    // Rule 2: Branded - branch override wins if set, else keyword-based logic
     if (upperType === 'BRANDED') {
+      if (
+        brandedMarkupOverride !== null &&
+        brandedMarkupOverride !== undefined
+      ) {
+        return Number(brandedMarkupOverride);
+      }
+
       const medicineKeywords = [
         'tab',
         'tablet',
@@ -464,6 +482,21 @@ export default function StaffDashboard() {
 
     try {
       setBlockingReason('Checking remittance and weekly delivery...');
+
+      // 0. Test environment bypass - skip all New Sale gating for test branches
+      const { data: branchEnvRow } = await supabase
+        .from('branches')
+        .select('test_env')
+        .eq('id', branchId)
+        .single();
+
+      if (branchEnvRow?.test_env === true) {
+        console.log('🧪 test_env branch - bypassing New Sale checks');
+        setCanCreateNewSale(true);
+        setBlockingReason('');
+        setMissingDatesList([]);
+        return true;
+      }
 
       // 1. Remittance check
       const { data: firstOrder } = await supabase
@@ -8371,7 +8404,10 @@ export default function StaffDashboard() {
                       {(() => {
                         const suggestedMarkup = calculateMarkup(
                           updatePrices.type,
-                          selectedProduct?.item_name
+                          selectedProduct?.item_name,
+                          selectedBranch?.is_office_use,
+                          selectedBranch?.generic_markup,
+                          selectedBranch?.branded_markup
                         );
                         const suggestedPrice = Math.ceil(
                           updatePrices.cost * (1 + suggestedMarkup / 100)

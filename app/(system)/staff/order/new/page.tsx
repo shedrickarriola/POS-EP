@@ -453,6 +453,17 @@ const toDateInputValue = (raw: string | null): string => {
   return raw.substring(0, 10);
 };
 
+// PH mobile validation: accepts 09XXXXXXXXX, +639XXXXXXXXX, or 639XXXXXXXXX.
+// Spaces/dashes are stripped before testing so "0917 123 4567" still passes.
+const isValidPHMobile = (input: string): boolean => {
+  const trimmed = (input || '').trim();
+  if (!trimmed) return false;
+  const cleaned = trimmed.startsWith('+')
+    ? '+' + trimmed.slice(1).replace(/\D/g, '')
+    : trimmed.replace(/\D/g, '');
+  return /^(0|\+63|63)9\d{9}$/.test(cleaned);
+};
+
 export default function NewOrderPOS() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
@@ -540,6 +551,13 @@ export default function NewOrderPOS() {
   const [rawExpiryInputs, setRawExpiryInputs] = useState<
     Record<string, string>
   >({});
+
+  // === DRUGSTORE-ONLY: Discount Availed client capture ===
+  // When any line item on a DRUGSTORE order (isOfficeUse === false) has a
+  // discount applied, the client's name + PH mobile number must be on file
+  // before the order can be committed. See metrics.hasValidDiscountInfo.
+  const [discountClientName, setDiscountClientName] = useState('');
+  const [discountClientNumber, setDiscountClientNumber] = useState('');
 
   const DISCOUNT_OPTIONS = [
     { label: 'No Discount', value: 0 },
@@ -1250,6 +1268,13 @@ export default function NewOrderPOS() {
     );
     const hasValidClient = !isOfficeUse || !!clientName?.trim();
 
+    // DRUGSTORE-only: once a discount lands on any line, the client's name
+    // and a valid PH mobile number are required before the order can commit.
+    const discountAvailed = !isOfficeUse && total_discount > 0;
+    const hasValidDiscountInfo =
+      !discountAvailed ||
+      (!!discountClientName.trim() && isValidPHMobile(discountClientNumber));
+
     return {
       total,
       generic_gross,
@@ -1258,14 +1283,25 @@ export default function NewOrderPOS() {
       branded_amt,
       total_discount,
       change: cashReceived > total ? cashReceived - total : 0,
+      discountAvailed,
+      hasValidDiscountInfo,
       isValid:
         isPaid &&
         total > 0 &&
         items.every((i) => i.product_id) &&
-        hasValidClient,
+        hasValidClient &&
+        hasValidDiscountInfo,
       termsAllowed,
     };
-  }, [items, cashReceived, paymentMethod, isOfficeUse, clientName]);
+  }, [
+    items,
+    cashReceived,
+    paymentMethod,
+    isOfficeUse,
+    clientName,
+    discountClientName,
+    discountClientNumber,
+  ]);
 
   // === CLIENT ORDERS OVERVIEW: search, sort, and status helpers ===
   // For most columns, the "interesting" values are highest (most overdue
@@ -1624,6 +1660,38 @@ export default function NewOrderPOS() {
 
       setConfirmedSONumber(order.order_number);
 
+      // DRUGSTORE-only: log who the discount was extended to. Non-critical —
+      // an issue here should not block an otherwise-valid completed order.
+      if (!isOfficeUse && totalDiscount > 0) {
+        try {
+          const { error: discountLogErr } = await supabase
+            .from('order_discount_logs')
+            .insert([
+              {
+                order_id: order.id,
+                order_number: order.order_number,
+                branch_id: currentBranchId,
+                client_name: discountClientName.trim(),
+                client_number: discountClientNumber.trim(),
+                discount_amount: totalDiscount,
+                created_by: session.user.email,
+                created_date_pht: todayPHT,
+              },
+            ]);
+          if (discountLogErr) {
+            console.warn(
+              'Discount log save warning (non-critical):',
+              discountLogErr
+            );
+          }
+        } catch (discountLogEx: any) {
+          console.warn(
+            'Discount log save skipped (non-critical):',
+            discountLogEx.message
+          );
+        }
+      }
+
       const payload = items.map((i) => {
         const gross = Number(i.qty) * Number(i.price_piece);
         const discountAmount = gross * (Number(i.discount_percent) / 100 || 0);
@@ -1951,6 +2019,8 @@ export default function NewOrderPOS() {
     setCashReceived(0);
     setSearchTerms(['']);
     setRawExpiryInputs({});
+    setDiscountClientName('');
+    setDiscountClientNumber('');
     setItems([
       {
         id: crypto.randomUUID(),
@@ -2776,7 +2846,10 @@ export default function NewOrderPOS() {
                         o.remaining_balance
                       );
                       return (
-                        <tr key={o.id} className="hover:bg-white/[0.02] align-top">
+                        <tr
+                          key={o.id}
+                          className="hover:bg-white/[0.02] align-top"
+                        >
                           <td className="p-2 font-bold text-white whitespace-nowrap">
                             {o.order_number}
                           </td>
@@ -2787,7 +2860,9 @@ export default function NewOrderPOS() {
                             {o.payment_method || '—'}
                           </td>
                           <td className="p-2 whitespace-nowrap">
-                            <div className={dueInfo.colorClass}>{dueInfo.label}</div>
+                            <div className={dueInfo.colorClass}>
+                              {dueInfo.label}
+                            </div>
                             {o.due_date && (
                               <div className="text-[9px] text-slate-500">
                                 {formatDisplayDate(o.due_date)}
@@ -4029,6 +4104,39 @@ export default function NewOrderPOS() {
                 TERMS NOT ALLOWED — Client has 0 days terms (COD only)
               </div>
             )}
+
+          {/* DRUGSTORE ONLY: Discount Availed capture */}
+          {metrics.discountAvailed && (
+            <div className="border border-amber-500/30 bg-amber-950/40 rounded-lg px-3 py-2.5 flex flex-col gap-2">
+              <div className="flex items-center gap-1 text-amber-400 text-[9px] font-black uppercase tracking-wide">
+                <AlertCircle size={12} />
+                Discount Availed
+              </div>
+              <input
+                type="text"
+                placeholder="Client Name"
+                value={discountClientName}
+                onChange={(e) => setDiscountClientName(e.target.value)}
+                className="w-full bg-slate-950 border border-white/10 rounded-lg py-2 px-3 text-white text-xs outline-none focus:border-amber-500"
+              />
+              <input
+                type="tel"
+                placeholder="Mobile No. (e.g. 09171234567)"
+                value={discountClientNumber}
+                onChange={(e) => setDiscountClientNumber(e.target.value)}
+                className={`w-full bg-slate-950 border rounded-lg py-2 px-3 text-white text-xs outline-none ${
+                  discountClientNumber && !isValidPHMobile(discountClientNumber)
+                    ? 'border-red-500 focus:border-red-500'
+                    : 'border-white/10 focus:border-amber-500'
+                }`}
+              />
+              {discountClientNumber && !isValidPHMobile(discountClientNumber) && (
+                <span className="text-red-400 text-[9px] font-bold">
+                  Enter a valid PH mobile number (e.g. 09171234567)
+                </span>
+              )}
+            </div>
+          )}
 
           <button
             disabled={!metrics.isValid || loading}
