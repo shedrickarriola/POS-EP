@@ -844,15 +844,11 @@ export default function SalesOrderList() {
 
   // Table 2: same AI upload -> base64 -> parseInvoiceImage flow as New Order's
   // "Scan Photo", but the extracted items are compared against Table 1
-  // instead of being matched into inventory.
-  const handleVerificationAiUpload = async (
-    e: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setVhIsScanning(true);
-    setVhHasVerified(false);
-    try {
+  // instead of being matched into inventory. Accepts multiple photos in one
+  // selection: each file is scanned independently and all extracted items
+  // are combined into Table 2 (Uploaded Document), in file order.
+  const scanVerificationFile = (file: File): Promise<any[] | null> =>
+    new Promise((resolve) => {
       const reader = new FileReader();
       reader.readAsDataURL(file);
       reader.onload = async () => {
@@ -863,7 +859,7 @@ export default function SalesOrderList() {
             ? extracted
             : extracted?.items || extracted?.data || [];
 
-          setVhUploadedItems(
+          resolve(
             (dataToProcess || []).map((aiItem: any) => ({
               id: crypto.randomUUID(),
               item_name: (aiItem.item_name || aiItem.name || '').toString(),
@@ -871,16 +867,38 @@ export default function SalesOrderList() {
             }))
           );
         } catch (err) {
-          console.error('Verification Helper AI parse error:', err);
-          alert('Could not read items from that file. Please try another image.');
-        } finally {
-          setVhIsScanning(false);
+          console.error('Verification Helper AI parse error:', file.name, err);
+          resolve(null);
         }
       };
-    } catch (err) {
-      console.error(err);
-      setVhIsScanning(false);
+      reader.onerror = () => {
+        console.error('Verification Helper file read error:', file.name);
+        resolve(null);
+      };
+    });
+
+  const handleVerificationAiUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    setVhIsScanning(true);
+    setVhHasVerified(false);
+    try {
+      const results = await Promise.all(files.map(scanVerificationFile));
+      const failed = files.filter((_, i) => results[i] === null);
+
+      setVhUploadedItems(results.filter((r): r is any[] => r !== null).flat());
+
+      if (failed.length > 0) {
+        alert(
+          `Could not read ${failed.length} file(s): ${failed
+            .map((f) => f.name)
+            .join(', ')}. Items from the rest were still added below.`
+        );
+      }
     } finally {
+      setVhIsScanning(false);
       e.target.value = '';
     }
   };
@@ -1186,6 +1204,7 @@ export default function SalesOrderList() {
                 <input
                   type="file"
                   accept="image/*"
+                  multiple
                   className="hidden"
                   id="verification-ai-upload"
                   onChange={handleVerificationAiUpload}
@@ -1207,7 +1226,7 @@ export default function SalesOrderList() {
                     />
                   )}
                   <span className="text-[9px] font-black uppercase tracking-widest">
-                    {vhIsScanning ? 'Reading...' : 'Upload AI File'}
+                    {vhIsScanning ? 'Reading...' : 'Upload AI Files'}
                   </span>
                 </label>
 
@@ -1385,7 +1404,7 @@ export default function SalesOrderList() {
               {/* TABLE 2: Uploaded Document */}
               <div className="border border-white/5 rounded-xl overflow-hidden flex flex-col">
                 <div className="bg-white/5 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center justify-between">
-                  <span>Uploaded Document</span>
+                  <span>Uploaded Document(s)</span>
                   <span className="text-slate-600">
                     {vhUploadedItems.length} items
                   </span>
