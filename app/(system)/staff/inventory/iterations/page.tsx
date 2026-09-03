@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useLayoutEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import {
@@ -15,9 +15,108 @@ import {
   Trash2,
 } from 'lucide-react';
 
+// ==================== THEME (LIGHT/DARK) ====================
+// Scoped light-mode overrides, same elevation system as the other pages
+// (strengthened shadow/wash values). Applied only when an ancestor has
+// data-theme="light"; dark stays untouched.
+// NOTE: bg-slate-950 sits directly on both root wrapper divs, and
+// text-white also sits directly on the main one, alongside data-theme —
+// so both need the same-element selector form (no space) in addition to
+// the normal descendant form.
+const THEME_OVERRIDES = `
+  [data-theme-loading='true'],
+  [data-theme-loading='true'] * { transition: none !important; }
+
+  [data-theme='dark'] { color-scheme: dark; }
+  [data-theme='light'] { color-scheme: light; }
+
+  /* Page & recessed wells */
+  [data-theme='light'] .bg-slate-950,
+  [data-theme='light'].bg-slate-950 { background-color: #f1f5f9 !important; }
+  [data-theme='light'] .bg-slate-950\\/50 { background-color: rgba(203,213,225,0.6) !important; }
+
+  /* Card / panel surfaces */
+  [data-theme='light'] .bg-slate-900 {
+    background-color: #ffffff !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.07), 0 6px 20px rgba(15,23,42,0.10) !important;
+  }
+  [data-theme='light'] .bg-slate-800 { background-color: #e2e8f0 !important; }
+  [data-theme='light'] .bg-slate-700 { background-color: #cbd5e1 !important; }
+
+  /* Hover / interactive states */
+  [data-theme='light'] .hover\\:bg-slate-700:hover { background-color: #94a3b8 !important; }
+  [data-theme='light'] .hover\\:bg-white\\/5:hover { background-color: rgba(15,23,42,0.045) !important; }
+  [data-theme='light'] .hover\\:bg-white\\/20:hover { background-color: rgba(15,23,42,0.1) !important; }
+  [data-theme='light'] .bg-white\\/5 { background-color: rgba(15,23,42,0.045) !important; }
+  [data-theme='light'] .bg-white\\/10 { background-color: rgba(15,23,42,0.08) !important; }
+
+  /* Text */
+  [data-theme='light'] .text-white,
+  [data-theme='light'].text-white { color: #0f172a !important; }
+  [data-theme='light'] .text-slate-200 { color: #1e293b !important; }
+  [data-theme='light'] .text-slate-300 { color: #334155 !important; }
+  [data-theme='light'] .text-slate-400 { color: #475569 !important; }
+  [data-theme='light'] .text-slate-600 { color: #94a3b8 !important; }
+  [data-theme='light'] .hover\\:text-white:hover { color: #0f172a !important; }
+
+  /* Borders */
+  [data-theme='light'] .border-white\\/10 { border-color: rgba(15,23,42,0.08) !important; }
+  [data-theme='light'] .divide-white\\/10 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(15,23,42,0.08) !important; }
+
+  /* Accent text: darken bright dark-mode shades for light-background contrast */
+  [data-theme='light'] .text-emerald-400 { color: #059669 !important; }
+  [data-theme='light'] .text-red-400 { color: #dc2626 !important; }
+  [data-theme='light'] .text-red-500 { color: #dc2626 !important; }
+  [data-theme='light'] .text-amber-400 { color: #d97706 !important; }
+  [data-theme='light'] .text-blue-400 { color: #2563eb !important; }
+  [data-theme='light'] .text-sky-400 { color: #0284c7 !important; }
+  [data-theme='light'] .text-purple-400 { color: #9333ea !important; }
+  [data-theme='light'] .text-orange-400 { color: #ea580c !important; }
+`;
+
 export default function WeeklyReport() {
   const router = useRouter();
   const [selectedBranch, setSelectedBranch] = useState<any>(null);
+
+  // Theme preference: mirrors profiles.theme (same source/cache key as the
+  // other pages). Defaults to 'dark' until loaded, and stays 'dark' if the
+  // column is null/unset. No toggle control here. This file's existing
+  // profile query only selects 'owner' and doesn't keep the user id in
+  // state, so this is fully self-contained, including its own getUser call.
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  const [themeReady, setThemeReady] = useState(false);
+  useLayoutEffect(() => {
+    const cached = localStorage.getItem('staffhub_theme');
+    if (cached === 'light' || cached === 'dark') {
+      setTheme(cached);
+    }
+    const raf1 = requestAnimationFrame(() => {
+      requestAnimationFrame(() => setThemeReady(true));
+    });
+    return () => cancelAnimationFrame(raf1);
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user || cancelled) return;
+      const { data } = await supabase
+        .from('profiles')
+        .select('theme')
+        .eq('id', user.id)
+        .single();
+      if (!cancelled) {
+        const resolved = data?.theme === 'light' ? 'light' : 'dark';
+        setTheme(resolved);
+        localStorage.setItem('staffhub_theme', resolved);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [weeks, setWeeks] = useState<any[]>([]);
   const [overallSummary, setOverallSummary] = useState({
     totalSales: 0,
@@ -68,6 +167,8 @@ export default function WeeklyReport() {
   // Iteration modal
   const [selectedIteration, setSelectedIteration] = useState<any>(null);
   const [showIterationModal, setShowIterationModal] = useState(false);
+  const [savingsPerDayInput, setSavingsPerDayInput] = useState('0');
+  const [savingsSaving, setSavingsSaving] = useState(false);
   // NEW: Iteration system
   const [iterations, setIterations] = useState<any[]>([]);
   const [nextIterationNumber, setNextIterationNumber] = useState(0);
@@ -182,7 +283,7 @@ export default function WeeklyReport() {
       supabase
         .from('daily_reports')
         .select(
-          'report_date, generic_sales, branded_sales, discount_total, total_sales, actual_cash, expenses, notes, reported_by, is_checked'
+          'report_date, generic_sales, branded_sales, discount_total, total_sales, actual_cash, expenses, savings, actual_remitted, notes, reported_by, is_checked'
         )
         .eq('branch_id', selectedBranch.id)
         .gte('report_date', firstDateStr)
@@ -247,8 +348,14 @@ export default function WeeklyReport() {
         (sum: number, r: any) => sum + (r.expenses || 0),
         0
       ) || 0;
+    const savings =
+      remittanceRes.data?.reduce(
+        (sum: number, r: any) => sum + (r.savings || 0),
+        0
+      ) || 0;
 
-    const cashVariance = actualRemitted - reportedTotalSales + expenses;
+    const cashVariance =
+      actualRemitted - reportedTotalSales + expenses + savings;
 
     const totalAdjustmentsValue = adjustments.reduce((sum: number, a: any) => {
       const qty = a.quantity || 0;
@@ -265,10 +372,11 @@ export default function WeeklyReport() {
       genericPurchase,
       brandedPurchase,
       totalAdjustmentsValue,
-      expectedCash: reportedTotalSales - expenses, // ← CHANGED
+      expectedCash: reportedTotalSales - expenses - savings,
       actualRemitted,
       cashVariance,
       expenses,
+      savings,
     });
 
     // Generate weeks (item-by-item reconciliation)
@@ -428,10 +536,12 @@ export default function WeeklyReport() {
     const currentAdjustments =
       overallSummary.totalAdjustmentsValue - saved.totalAdjustmentsValue;
     const currentExpenses = overallSummary.expenses - saved.expenses;
+    const currentSavings = overallSummary.savings - saved.savings;
     const currentActualRemitted =
       overallSummary.actualRemitted - saved.actualRemitted;
     const currentCashVariance =
       overallSummary.cashVariance - saved.cashVariance;
+    const currentExpectedCash = currentSales - currentExpenses - currentSavings;
 
     const currentChargeToStaff = -(currentCashVariance + currentAdjustments);
 
@@ -490,9 +600,12 @@ export default function WeeklyReport() {
       expenses: currentExpenses,
       actual_remitted: currentActualRemitted,
       cash_variance: currentCashVariance,
+      expected_cash: currentExpectedCash,
+      daily_savings_total: currentSavings,
 
       stock_variance: 0,
       charge_to_staff: currentChargeToStaff,
+      savings_per_day: 0,
 
       // ← NEW: Save staff names permanently
       responsible_staff: responsibleStaff,
@@ -568,6 +681,42 @@ export default function WeeklyReport() {
     setShowIterationModal(false);
     setSelectedIteration(null);
   };
+
+  const saveSavingsPerDay = async () => {
+    if (!selectedIteration?.id || !selectedBranch?.id) return;
+    const value = parseFloat(savingsPerDayInput) || 0;
+    setSavingsSaving(true);
+
+    const { error } = await supabase
+      .from('weekly_iterations')
+      .update({ savings_per_day: value })
+      .eq('id', selectedIteration.id)
+      .eq('branch_id', selectedBranch.id);
+
+    if (error) {
+      console.error('Failed to save savings value:', error);
+      alert('❌ Failed to save savings value');
+      setSavingsSaving(false);
+      return;
+    }
+
+    const updatedIteration = { ...selectedIteration, savings_per_day: value };
+    setSelectedIteration(updatedIteration);
+    setIterations((prev) =>
+      prev.map((item) =>
+        item.id === selectedIteration.id ? updatedIteration : item
+      )
+    );
+    setSavingsSaving(false);
+  };
+
+  // Reset the savings input whenever a different iteration is opened
+  useEffect(() => {
+    if (selectedIteration) {
+      setSavingsPerDayInput(String(selectedIteration.savings_per_day ?? 0));
+    }
+  }, [selectedIteration]);
+
   useEffect(() => {
     if (selectedBranch?.id) fetchWeeklyReport();
   }, [selectedBranch]);
@@ -799,6 +948,7 @@ export default function WeeklyReport() {
         brandedPurchase: 0,
         totalAdjustmentsValue: 0,
         expenses: 0,
+        savings: 0,
         actualRemitted: 0,
         cashVariance: 0,
       };
@@ -822,6 +972,7 @@ export default function WeeklyReport() {
         0
       ),
       expenses: iters.reduce((sum, i) => sum + (i.expenses || 0), 0),
+      savings: iters.reduce((sum, i) => sum + (i.daily_savings_total || 0), 0),
       actualRemitted: iters.reduce(
         (sum, i) => sum + (i.actual_remitted || 0),
         0
@@ -829,6 +980,14 @@ export default function WeeklyReport() {
       cashVariance: iters.reduce((sum, i) => sum + (i.cash_variance || 0), 0),
     };
   };
+
+  const getIterationDays = (iteration: any) => {
+    if (!iteration?.start_date || !iteration?.end_date) return 0;
+    const start = new Date(iteration.start_date).getTime();
+    const end = new Date(iteration.end_date).getTime();
+    return Math.max(1, Math.round((end - start) / 86400000) + 1);
+  };
+
   const fetchResponsibleStaff = async (startDate: string, endDate: string) => {
     if (!selectedBranch?.id) return [];
 
@@ -905,7 +1064,12 @@ export default function WeeklyReport() {
   };
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+      <div
+        data-theme={theme}
+        data-theme-loading={themeReady ? 'false' : 'true'}
+        className="min-h-screen bg-slate-950 flex items-center justify-center"
+      >
+        <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
         <RefreshCw className="animate-spin text-emerald-400 mr-3" size={24} />
         LOADING WEEKLY REPORT...
       </div>
@@ -913,7 +1077,12 @@ export default function WeeklyReport() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-white pb-20">
+    <div
+      data-theme={theme}
+      data-theme-loading={themeReady ? 'false' : 'true'}
+      className="min-h-screen bg-slate-950 text-white pb-20"
+    >
+      <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
       {/* HEADER */}
       <div className="sticky top-0 bg-slate-900 border-b border-white/10 z-50">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
@@ -1037,16 +1206,6 @@ export default function WeeklyReport() {
                   <p className="text-3xl font-black mt-2">
                     {formatCurrency(overallSummary.expectedCash)}
                   </p>
-                  <div className="mt-4 space-y-1 text-sm font-medium">
-                    <div className="flex justify-between">
-                      <span className="text-emerald-400">Total Sales</span>
-                      <span>{formatCurrency(overallSummary.totalSales)}</span>
-                    </div>
-                    <div className="flex justify-between text-orange-400">
-                      <span>Expenses</span>
-                      <span>-{formatCurrency(overallSummary.expenses)}</span>
-                    </div>
-                  </div>
                 </div>
                 <DollarSign size={28} className="text-amber-400" />
               </div>
@@ -1238,30 +1397,11 @@ export default function WeeklyReport() {
                     overallSummary.totalSales -
                       getSavedTotals(iterations).totalSales -
                       (overallSummary.expenses -
-                        getSavedTotals(iterations).expenses)
+                        getSavedTotals(iterations).expenses) -
+                      (overallSummary.savings -
+                        getSavedTotals(iterations).savings)
                   )}
                 </p>
-                <div className="mt-4 space-y-1 text-sm font-medium">
-                  <div className="flex justify-between">
-                    <span className="text-emerald-400">Total Sales</span>
-                    <span>
-                      {formatCurrency(
-                        overallSummary.totalSales -
-                          getSavedTotals(iterations).totalSales
-                      )}
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-orange-400">
-                    <span>Expenses</span>
-                    <span>
-                      -
-                      {formatCurrency(
-                        overallSummary.expenses -
-                          getSavedTotals(iterations).expenses
-                      )}
-                    </span>
-                  </div>
-                </div>
               </div>
               <DollarSign size={28} className="text-amber-400" />
             </div>
@@ -1762,6 +1902,11 @@ export default function WeeklyReport() {
                   (sum: number, r: any) => sum + (r.total_sales || 0),
                   0
                 );
+                const grossTotalSales = filteredData.reduce(
+                  (sum: number, r: any) =>
+                    sum + (r.generic_sales || 0) + (r.branded_sales || 0),
+                  0
+                );
                 const totalActualCash = filteredData.reduce(
                   (sum: number, r: any) => sum + (r.actual_cash || 0),
                   0
@@ -1770,18 +1915,67 @@ export default function WeeklyReport() {
                   (sum: number, r: any) => sum + (r.expenses || 0),
                   0
                 );
+                const totalSavings = filteredData.reduce(
+                  (sum: number, r: any) => sum + (r.savings || 0),
+                  0
+                );
 
                 const totalExcess =
-                  totalActualCash - netTotalSales + totalExpenses;
+                  totalActualCash -
+                  netTotalSales +
+                  totalExpenses +
+                  totalSavings;
+
+                const remittedRows = filteredData.filter(
+                  (r: any) =>
+                    r.actual_remitted !== null &&
+                    r.actual_remitted !== undefined
+                );
+                const totalActualRemitted = remittedRows.reduce(
+                  (sum: number, r: any) => sum + (r.actual_remitted || 0),
+                  0
+                );
+                const totalActualCashRemitted = remittedRows.reduce(
+                  (sum: number, r: any) => sum + (r.actual_cash || 0),
+                  0
+                );
+                const totalDiff = totalActualRemitted - totalActualCashRemitted;
+                const remittedCoverage = `${remittedRows.length}/${filteredData.length} days confirmed`;
 
                 return (
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-6 text-center">
                     <div>
                       <p className="text-xs font-black uppercase text-slate-400">
-                        Total Sales (Net)
+                        Total Sales (Gross)
                       </p>
                       <p className="text-3xl font-black text-emerald-400">
-                        {formatCurrency(netTotalSales)}
+                        {formatCurrency(grossTotalSales)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-black uppercase text-slate-400">
+                        Expenses
+                      </p>
+                      <p className="text-3xl font-black text-orange-400">
+                        {formatCurrency(totalExpenses)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-black uppercase text-slate-400">
+                        Savings
+                      </p>
+                      <p className="text-3xl font-black text-sky-400">
+                        {formatCurrency(totalSavings)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-black uppercase text-slate-400">
+                        Expected Cash
+                      </p>
+                      <p className="text-3xl font-black text-amber-400">
+                        {formatCurrency(
+                          netTotalSales - totalExpenses - totalSavings
+                        )}
                       </p>
                     </div>
                     <div>
@@ -1807,10 +2001,28 @@ export default function WeeklyReport() {
                     </div>
                     <div>
                       <p className="text-xs font-black uppercase text-slate-400">
-                        Total Expenses
+                        Actual Remitted
                       </p>
-                      <p className="text-3xl font-black text-orange-400">
-                        {formatCurrency(totalExpenses)}
+                      <p className="text-3xl font-black text-white">
+                        {formatCurrency(totalActualRemitted)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-black uppercase text-slate-400">
+                        Diff
+                      </p>
+                      <p
+                        className={`text-3xl font-black ${
+                          Math.abs(totalDiff) < 0.01
+                            ? 'text-emerald-400'
+                            : 'text-red-400'
+                        }`}
+                      >
+                        {totalDiff >= 0 ? '+' : ''}
+                        {formatCurrency(totalDiff)}
+                      </p>
+                      <p className="text-[11px] text-slate-500 mt-1 normal-case">
+                        {remittedCoverage}
                       </p>
                     </div>
                   </div>
@@ -1823,13 +2035,17 @@ export default function WeeklyReport() {
                 <thead className="bg-slate-950 sticky top-0">
                   <tr>
                     <th className="text-left p-3">Date</th>
-                    <th className="text-right p-3">Generic Sales</th>
-                    <th className="text-right p-3">Branded Sales</th>
+                    <th className="text-right p-3">Generic Sales (Gross)</th>
+                    <th className="text-right p-3">Branded Sales (Gross)</th>
                     <th className="text-right p-3">Discount</th>
                     <th className="text-right p-3">Total Sales (Net)</th>
+                    <th className="text-right p-3">Expenses</th>
+                    <th className="text-right p-3">Savings</th>
+                    <th className="text-right p-3">Expected Cash</th>
                     <th className="text-right p-3">Actual Cash</th>
                     <th className="text-right p-3">Cash Excess / Shortage</th>
-                    <th className="text-right p-3">Expenses</th>
+                    <th className="text-right p-3">Actual Remitted</th>
+                    <th className="text-right p-3">Diff</th>
                     <th className="text-left p-3">Notes</th>
                     <th className="text-left p-3">Reported By</th>
                     <th className="text-center p-3">Verified</th>
@@ -1850,10 +2066,21 @@ export default function WeeklyReport() {
                     );
 
                     return data.map((row: any, i: number) => {
+                      const expectedCash =
+                        (row.total_sales || 0) -
+                        (row.expenses || 0) -
+                        (row.savings || 0);
                       const excess =
                         (row.actual_cash || 0) -
                         (row.total_sales || 0) +
-                        (row.expenses || 0);
+                        (row.expenses || 0) +
+                        (row.savings || 0);
+                      const hasRemitted =
+                        row.actual_remitted !== null &&
+                        row.actual_remitted !== undefined;
+                      const diff = hasRemitted
+                        ? (row.actual_remitted || 0) - (row.actual_cash || 0)
+                        : null;
 
                       return (
                         <tr key={i} className="hover:bg-white/5">
@@ -1872,6 +2099,15 @@ export default function WeeklyReport() {
                             {formatCurrency(row.total_sales || 0)}
                           </td>
                           <td className="p-3 text-right">
+                            {formatCurrency(row.expenses || 0)}
+                          </td>
+                          <td className="p-3 text-right text-sky-400">
+                            {formatCurrency(row.savings || 0)}
+                          </td>
+                          <td className="p-3 text-right text-amber-400">
+                            {formatCurrency(expectedCash)}
+                          </td>
+                          <td className="p-3 text-right">
                             {formatCurrency(row.actual_cash || 0)}
                           </td>
                           <td
@@ -1883,7 +2119,29 @@ export default function WeeklyReport() {
                             {formatCurrency(excess)}
                           </td>
                           <td className="p-3 text-right">
-                            {formatCurrency(row.expenses || 0)}
+                            {hasRemitted ? (
+                              formatCurrency(row.actual_remitted || 0)
+                            ) : (
+                              <span className="text-slate-600">–</span>
+                            )}
+                          </td>
+                          <td
+                            className={`p-3 text-right font-medium ${
+                              !hasRemitted
+                                ? 'text-slate-600'
+                                : Math.abs(diff as number) < 0.01
+                                ? 'text-emerald-400'
+                                : 'text-red-400'
+                            }`}
+                          >
+                            {hasRemitted ? (
+                              <>
+                                {(diff as number) >= 0 ? '+' : ''}
+                                {formatCurrency(diff as number)}
+                              </>
+                            ) : (
+                              '–'
+                            )}
                           </td>
                           <td className="p-3">{row.notes || '-'}</td>
                           <td className="p-3">{row.reported_by}</td>
@@ -2335,6 +2593,51 @@ export default function WeeklyReport() {
                     {formatCurrency(selectedIteration.total_purchase || 0)}
                   </p>
                 </div>
+                <div
+                  onClick={() => {
+                    setShowIterationModal(false);
+                    setTimeout(() => {
+                      setModalPeriod({
+                        start: selectedIteration.start_date,
+                        end: selectedIteration.end_date,
+                      });
+                      setShowRemittance(true);
+                    }, 150);
+                  }}
+                  className="bg-slate-800 rounded-2xl p-6 cursor-pointer hover:bg-slate-700 transition-colors"
+                >
+                  <p className="text-xs font-black uppercase text-slate-400">
+                    Expected Cash
+                  </p>
+                  <p className="text-4xl font-black text-amber-400 mt-2">
+                    {formatCurrency(
+                      selectedIteration.expected_cash ??
+                        (selectedIteration.total_sales || 0) -
+                          (selectedIteration.expenses || 0) -
+                          (selectedIteration.daily_savings_total || 0)
+                    )}
+                  </p>
+                </div>
+                <div
+                  onClick={() => {
+                    setShowIterationModal(false);
+                    setTimeout(() => {
+                      setModalPeriod({
+                        start: selectedIteration.start_date,
+                        end: selectedIteration.end_date,
+                      });
+                      setShowRemittance(true);
+                    }, 150);
+                  }}
+                  className="bg-slate-800 rounded-2xl p-6 cursor-pointer hover:bg-slate-700 transition-colors"
+                >
+                  <p className="text-xs font-black uppercase text-slate-400">
+                    Remittance
+                  </p>
+                  <p className="text-4xl font-black text-emerald-400 mt-2">
+                    {formatCurrency(selectedIteration.actual_remitted || 0)}
+                  </p>
+                </div>
                 <div className="bg-slate-800 rounded-2xl p-6">
                   <p className="text-xs font-black uppercase text-slate-400">
                     Adjustments
@@ -2378,6 +2681,54 @@ export default function WeeklyReport() {
                     ).toLocaleString('en-US')}
                   </p>
                 </div>
+              </div>
+
+              {/* Savings for this iteration */}
+              <div className="mt-6 bg-slate-800 rounded-2xl p-6">
+                <p className="text-xs font-black uppercase text-slate-400 mb-4">
+                  Savings For This Iteration
+                </p>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-6 items-end">
+                  <div>
+                    <p className="text-xs font-black uppercase text-slate-500">
+                      Days In Iteration
+                    </p>
+                    <p className="text-2xl font-black mt-2 text-slate-200">
+                      {getIterationDays(selectedIteration)}
+                    </p>
+                  </div>
+                  <div>
+                    <label className="text-xs font-black uppercase text-slate-500 block mb-2">
+                      Savings / Day
+                    </label>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      value={savingsPerDayInput}
+                      onChange={(e) => setSavingsPerDayInput(e.target.value)}
+                      className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-2 text-lg font-bold text-white focus:outline-none focus:border-emerald-400"
+                      placeholder="0.00"
+                    />
+                  </div>
+                  <div>
+                    <p className="text-xs font-black uppercase text-slate-500">
+                      Savings Total
+                    </p>
+                    <p className="text-2xl font-black mt-2 text-emerald-400">
+                      {formatCurrency(
+                        (parseFloat(savingsPerDayInput) || 0) *
+                          getIterationDays(selectedIteration)
+                      )}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={saveSavingsPerDay}
+                  disabled={savingsSaving}
+                  className="mt-4 w-full py-3 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-black font-black uppercase text-sm rounded-2xl transition-colors"
+                >
+                  {savingsSaving ? 'Saving...' : 'Save Savings Value'}
+                </button>
               </div>
             </div>
 
