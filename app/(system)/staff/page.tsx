@@ -28,13 +28,86 @@ import {
   Calendar,
   File,
   TrendingUp,
+  Sun,
+  Moon,
 } from 'lucide-react';
+
+// ==================== THEME (LIGHT/DARK) ====================
+// Scoped light-mode overrides for the dark-first Tailwind classes used
+// throughout this file. Applied only when an ancestor has data-theme="light";
+// data-theme="dark" (or no attribute) leaves the original styling untouched.
+const THEME_OVERRIDES = `
+  [data-theme='dark'] { color-scheme: dark; }
+  [data-theme='light'] { color-scheme: light; }
+
+  /* Page & panel backgrounds */
+  /* NOTE: bg-slate-950 also sits directly on the same element as data-theme
+     (the 3 root wrapper divs), so it needs the same-element selector form
+     (no space) in addition to the normal descendant form below. */
+  [data-theme='light'] .bg-slate-950,
+  [data-theme='light'].bg-slate-950 { background-color: #f8fafc !important; }
+  [data-theme='light'] .bg-slate-900 { background-color: #ffffff !important; }
+  [data-theme='light'] .bg-slate-900\\/40 { background-color: rgba(255,255,255,0.75) !important; }
+  [data-theme='light'] .bg-slate-900\\/20 { background-color: rgba(255,255,255,0.55) !important; }
+  [data-theme='light'] .bg-slate-800 { background-color: #f1f5f9 !important; }
+  [data-theme='light'] .bg-slate-700 { background-color: #e2e8f0 !important; }
+
+  /* Hover / disabled surface states */
+  [data-theme='light'] .hover\\:bg-slate-900:hover { background-color: #f8fafc !important; }
+  [data-theme='light'] .hover\\:bg-slate-900\\/60:hover { background-color: rgba(226,232,240,0.8) !important; }
+  [data-theme='light'] .hover\\:bg-slate-800:hover { background-color: #e2e8f0 !important; }
+  [data-theme='light'] .hover\\:bg-slate-800\\/50:hover { background-color: rgba(226,232,240,0.7) !important; }
+  [data-theme='light'] .hover\\:bg-slate-700:hover { background-color: #cbd5e1 !important; }
+  [data-theme='light'] .disabled\\:bg-slate-700:disabled { background-color: #e2e8f0 !important; }
+  [data-theme='light'] .hover\\:bg-white\\/5:hover { background-color: rgba(15,23,42,0.04) !important; }
+
+  /* Text */
+  [data-theme='light'] .text-white { color: #0f172a !important; }
+  [data-theme='light'] .text-slate-300 { color: #334155 !important; }
+  [data-theme='light'] .text-slate-400 { color: #475569 !important; }
+  [data-theme='light'] .text-slate-600 { color: #94a3b8 !important; }
+  [data-theme='light'] .text-slate-700 { color: #cbd5e1 !important; }
+  [data-theme='light'] .text-slate-200,
+  [data-theme='light'].text-slate-200 { color: #1e293b !important; }
+  [data-theme='light'] .hover\\:text-white:hover { color: #0f172a !important; }
+  [data-theme='light'] .hover\\:text-slate-400:hover { color: #475569 !important; }
+
+  /* Borders */
+  [data-theme='light'] .border-white\\/5 { border-color: rgba(15,23,42,0.06) !important; }
+  [data-theme='light'] .border-white\\/10 { border-color: rgba(15,23,42,0.1) !important; }
+  [data-theme='light'] .border-white\\/20 { border-color: rgba(15,23,42,0.15) !important; }
+  [data-theme='light'] .border-white\\/30 { border-color: rgba(15,23,42,0.2) !important; }
+  [data-theme='light'] .hover\\:border-white\\/30:hover { border-color: rgba(15,23,42,0.2) !important; }
+  [data-theme='light'] .divide-white\\/10 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(15,23,42,0.1) !important; }
+
+  /* Accent text: darken the bright dark-mode shades so they stay readable on light backgrounds */
+  [data-theme='light'] .text-emerald-400 { color: #059669 !important; }
+  [data-theme='light'] .text-emerald-300 { color: #047857 !important; }
+  [data-theme='light'] .text-emerald-500 { color: #059669 !important; }
+  [data-theme='light'].text-emerald-500 { color: #059669 !important; }
+  [data-theme='light'] .text-amber-400 { color: #d97706 !important; }
+  [data-theme='light'] .text-amber-300 { color: #b45309 !important; }
+  [data-theme='light'] .text-red-400 { color: #dc2626 !important; }
+  [data-theme='light'] .text-red-500 { color: #dc2626 !important; }
+  [data-theme='light'] .text-purple-400 { color: #9333ea !important; }
+  [data-theme='light'] .text-purple-300 { color: #7e22ce !important; }
+  [data-theme='light'] .text-sky-400 { color: #0284c7 !important; }
+  [data-theme='light'] .text-sky-300 { color: #0369a1 !important; }
+  [data-theme='light'] .text-blue-400 { color: #2563eb !important; }
+  [data-theme='light'] .text-blue-300 { color: #2563eb !important; }
+  [data-theme='light'] .text-orange-400 { color: #ea580c !important; }
+  [data-theme='light'] .text-cyan-400 { color: #0891b2 !important; }
+  [data-theme='light'] .text-yellow-400 { color: #ca8a04 !important; }
+`;
 
 export default function StaffDashboard() {
   const router = useRouter();
   const [profile, setProfile] = useState<any>(null);
   const isAdmin =
     profile?.role === 'branch_admin' || profile?.role === 'org_manager';
+  // Theme preference: mirrors profiles.theme. Defaults to 'dark' until the
+  // profile loads, and stays 'dark' if the column is null/unset.
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
   const [branches, setBranches] = useState<any[]>([]);
   const [selectedBranch, setSelectedBranch] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -273,6 +346,10 @@ export default function StaffDashboard() {
         brandedMarkupOverride !== undefined
       ) {
         return Number(brandedMarkupOverride);
+      }
+
+      if (isOfficeUse) {
+        return 5;
       }
 
       const medicineKeywords = [
@@ -796,6 +873,14 @@ export default function StaffDashboard() {
     }
     getInitialData();
   }, [router]);
+
+  // Load theme from the profile once it arrives. Anything other than the
+  // literal string 'light' (including null/undefined) resolves to 'dark'.
+  useEffect(() => {
+    if (profile) {
+      setTheme(profile.theme === 'light' ? 'light' : 'dark');
+    }
+  }, [profile]);
 
   useEffect(() => {
     if (showPriceModal && selectedBranch && searchTerm.length > 1) {
@@ -3224,6 +3309,30 @@ export default function StaffDashboard() {
     router.push('/login');
   };
 
+  const handleThemeToggle = async () => {
+    if (!profile?.id) return;
+    const previousTheme = theme;
+    const newTheme: 'light' | 'dark' = theme === 'dark' ? 'light' : 'dark';
+
+    // Optimistic UI update
+    setTheme(newTheme);
+    setProfile((prev: any) => (prev ? { ...prev, theme: newTheme } : prev));
+
+    const { error } = await supabase
+      .from('profiles')
+      .update({ theme: newTheme })
+      .eq('id', profile.id);
+
+    if (error) {
+      // Revert on failure
+      setTheme(previousTheme);
+      setProfile((prev: any) =>
+        prev ? { ...prev, theme: previousTheme } : prev
+      );
+      triggerToast('Failed to save theme preference', 'error');
+    }
+  };
+
   const handleExportInventory = async () => {
     setLogStatus('QUERYING_DATABASE_FOR_EXPORT...');
     try {
@@ -3699,14 +3808,22 @@ export default function StaffDashboard() {
 
   if (loading)
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center font-mono text-emerald-500 text-[10px] tracking-[.4em]">
+      <div
+        data-theme={theme}
+        className="min-h-screen bg-slate-950 flex items-center justify-center font-mono text-emerald-500 text-[10px] tracking-[.4em]"
+      >
+        <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
         AUTHENTICATING...
       </div>
     );
 
   if (!selectedBranch) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
+      <div
+        data-theme={theme}
+        className="min-h-screen bg-slate-950 flex items-center justify-center p-6"
+      >
+        <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
         <div className="w-full max-w-4xl">
           <div className="mb-10 text-center">
             <h1 className="text-4xl font-black italic text-white tracking-tighter uppercase">
@@ -3757,7 +3874,11 @@ export default function StaffDashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200">
+    <div
+      data-theme={theme}
+      className="min-h-screen bg-slate-950 text-slate-200"
+    >
+      <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
       {toast.show && (
         <div
           className={`fixed top-10 left-1/2 -translate-x-1/2 z-[200] flex items-center gap-3 px-6 py-4 rounded-2xl border backdrop-blur-xl shadow-2xl transition-all animate-in fade-in zoom-in slide-in-from-top-4 ${
@@ -3868,6 +3989,17 @@ export default function StaffDashboard() {
                 title="Change Branch"
               >
                 <LayoutGrid size={18} />
+              </button>
+              <button
+                onClick={handleThemeToggle}
+                className="p-2 hover:bg-white/5 rounded-lg text-slate-500 transition-colors"
+                title={
+                  theme === 'dark'
+                    ? 'Switch to Light Mode'
+                    : 'Switch to Dark Mode'
+                }
+              >
+                {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
               </button>
               <button
                 onClick={handleLogout}
