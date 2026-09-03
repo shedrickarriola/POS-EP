@@ -1,5 +1,5 @@
 'use client';
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useLayoutEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import {
@@ -90,7 +90,9 @@ const computeItemNameMatchScore = (
   const tokensB = b.split(' ').filter(Boolean);
   const tokenScore = tokensA.length
     ? tokensA.filter((ta) =>
-        tokensB.some((tb) => tb === ta || tb.startsWith(ta) || ta.startsWith(tb))
+        tokensB.some(
+          (tb) => tb === ta || tb.startsWith(ta) || ta.startsWith(tb)
+        )
       ).length / tokensA.length
     : 0;
 
@@ -100,6 +102,101 @@ const computeItemNameMatchScore = (
 
   return Math.max(tokenScore * 0.9, levScore, 0);
 };
+
+// ==================== THEME (LIGHT/DARK) ====================
+// Scoped light-mode overrides, same elevation system as StaffHub/NewOrder/
+// NewPO/PurchaseOrderList. Applied only when an ancestor has
+// data-theme="light"; dark stays untouched. Like PurchaseOrderList, this
+// file leans on translucent slate-950/slate-900 surfaces for toolbars,
+// table headers, and recessed detail panels rather than solid ones, so the
+// mapping is tailored to that rather than reused verbatim.
+// NOTE: bg-slate-950 and text-white both sit directly on the root wrapper
+// div alongside data-theme, so both need the same-element selector form
+// (no space) in addition to the normal descendant form.
+const THEME_OVERRIDES = `
+  [data-theme-loading='true'],
+  [data-theme-loading='true'] * { transition: none !important; }
+
+  [data-theme='dark'] { color-scheme: dark; }
+  [data-theme='light'] { color-scheme: light; }
+
+  /* Page & recessed/inset wells (translucent slate-950) */
+  [data-theme='light'] .bg-slate-950,
+  [data-theme='light'].bg-slate-950 { background-color: #f1f5f9 !important; }
+  [data-theme='light'] .bg-slate-950\\/20 { background-color: rgba(203,213,225,0.55) !important; }
+  [data-theme='light'] .bg-slate-950\\/30 { background-color: rgba(203,213,225,0.6) !important; }
+  [data-theme='light'] .bg-slate-950\\/60 {
+    background-color: rgba(255,255,255,0.9) !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.06) !important;
+  }
+  [data-theme='light'] .bg-slate-950\\/40 {
+    background-color: rgba(255,255,255,0.94) !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.07), 0 6px 20px rgba(15,23,42,0.10) !important;
+  }
+  [data-theme='light'] .bg-slate-950\\/50 {
+    background-color: rgba(255,255,255,0.92) !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.07), 0 6px 20px rgba(15,23,42,0.10) !important;
+  }
+  [data-theme='light'] .bg-black\\/20 { background-color: rgba(203,213,225,0.55) !important; }
+  [data-theme='light'] .bg-black\\/40 { background-color: rgba(203,213,225,0.68) !important; }
+
+  /* Card / panel surfaces */
+  [data-theme='light'] .bg-slate-900 {
+    background-color: #ffffff !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.07), 0 6px 20px rgba(15,23,42,0.10) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/50 {
+    background-color: rgba(255,255,255,0.92) !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.07), 0 6px 20px rgba(15,23,42,0.10) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/80 {
+    background-color: rgba(255,255,255,0.96) !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.06) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/30 { background-color: rgba(255,255,255,0.72) !important; }
+  [data-theme='light'] .bg-slate-800 { background-color: #e2e8f0 !important; }
+  [data-theme='light'] .bg-slate-800\\/40 { background-color: rgba(203,213,225,0.65) !important; }
+  [data-theme='light'] .bg-slate-800\\/50 { background-color: rgba(226,232,240,0.75) !important; }
+  [data-theme='light'] .bg-slate-700 { background-color: #cbd5e1 !important; }
+
+  /* Hover / disabled states */
+  [data-theme='light'] .hover\\:bg-slate-800:hover { background-color: #e2e8f0 !important; }
+  [data-theme='light'] .hover\\:bg-slate-800\\/40:hover { background-color: rgba(203,213,225,0.65) !important; }
+  [data-theme='light'] .hover\\:bg-slate-700:hover { background-color: #cbd5e1 !important; }
+  [data-theme='light'] .disabled\\:bg-slate-800:disabled { background-color: #e2e8f0 !important; }
+  [data-theme='light'] .disabled\\:bg-slate-700:disabled { background-color: #e2e8f0 !important; }
+  [data-theme='light'] .disabled\\:text-slate-600:disabled { color: #94a3b8 !important; }
+  [data-theme='light'] .hover\\:bg-white\\/\\[0\\.02\\]:hover { background-color: rgba(15,23,42,0.03) !important; }
+  [data-theme='light'] .bg-white\\/5 { background-color: rgba(15,23,42,0.04) !important; }
+
+  /* Text */
+  [data-theme='light'] .text-white,
+  [data-theme='light'].text-white { color: #0f172a !important; }
+  [data-theme='light'] .text-slate-100 { color: #0f172a !important; }
+  [data-theme='light'] .text-slate-200 { color: #1e293b !important; }
+  [data-theme='light'] .text-slate-300 { color: #334155 !important; }
+  [data-theme='light'] .text-slate-400 { color: #475569 !important; }
+  [data-theme='light'] .text-slate-600 { color: #94a3b8 !important; }
+  [data-theme='light'] .text-slate-700 { color: #cbd5e1 !important; }
+  [data-theme='light'] .hover\\:text-white:hover { color: #0f172a !important; }
+  [data-theme='light'] .hover\\:text-slate-300:hover { color: #334155 !important; }
+
+  /* Borders */
+  [data-theme='light'] .border-white\\/5 { border-color: rgba(15,23,42,0.06) !important; }
+  [data-theme='light'] .border-white\\/10 { border-color: rgba(15,23,42,0.08) !important; }
+  [data-theme='light'] .divide-white\\/5 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(15,23,42,0.06) !important; }
+
+  /* Accent text: darken bright dark-mode shades for light-background contrast */
+  [data-theme='light'] .text-blue-400 { color: #2563eb !important; }
+  [data-theme='light'] .text-blue-500 { color: #2563eb !important; }
+  [data-theme='light'] .text-blue-300 { color: #2563eb !important; }
+  [data-theme='light'] .text-emerald-400 { color: #059669 !important; }
+  [data-theme='light'] .text-emerald-500 { color: #059669 !important; }
+  [data-theme='light'] .text-amber-400 { color: #d97706 !important; }
+  [data-theme='light'] .text-amber-500 { color: #b45309 !important; }
+  [data-theme='light'] .text-red-400 { color: #dc2626 !important; }
+  [data-theme='light'] .text-red-500 { color: #dc2626 !important; }
+`;
 
 export default function SalesOrderList() {
   const router = useRouter();
@@ -112,6 +209,48 @@ export default function SalesOrderList() {
   // Auth & Verification States (From Purchase Order Logic)
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [isVerifying, setIsVerifying] = useState<string | null>(null);
+  // Theme preference: mirrors profiles.theme (same source/cache key as
+  // StaffHub, NewOrder, NewPO, and PurchaseOrderList). Defaults to 'dark'
+  // until loaded, and stays 'dark' if the column is null/unset. No toggle
+  // control here.
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  const [themeReady, setThemeReady] = useState(false);
+  useLayoutEffect(() => {
+    const cached = localStorage.getItem('staffhub_theme');
+    if (cached === 'light' || cached === 'dark') {
+      setTheme(cached);
+    }
+    const raf1 = requestAnimationFrame(() => {
+      requestAnimationFrame(() => setThemeReady(true));
+    });
+    return () => cancelAnimationFrame(raf1);
+  }, []);
+  // Authoritative sync. Fully self-contained (own getSession call) rather
+  // than reusing the existing init effect below, since that effect's
+  // profile query only selects full_name/role/auditor, not id/theme. Also
+  // refreshes the shared cache the layout effect above reads from.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (!session || cancelled) return;
+      const { data } = await supabase
+        .from('profiles')
+        .select('theme')
+        .eq('id', session.user.id)
+        .single();
+      if (!cancelled) {
+        const resolved = data?.theme === 'light' ? 'light' : 'dark';
+        setTheme(resolved);
+        localStorage.setItem('staffhub_theme', resolved);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [view, setView] = useState('day');
   const [currentMonth, setCurrentMonth] = useState(new Date());
   // Branch State
@@ -793,8 +932,7 @@ export default function SalesOrderList() {
           String(order.order_number || '').replace(/\D/g, ''),
           10
         );
-        if (fromNum !== null && (isNaN(soNum) || soNum < fromNum))
-          return false;
+        if (fromNum !== null && (isNaN(soNum) || soNum < fromNum)) return false;
         if (toNum !== null && (isNaN(soNum) || soNum > toNum)) return false;
         return true;
       });
@@ -820,7 +958,6 @@ export default function SalesOrderList() {
           });
         });
       });
-
 
       setVhPosItems(flattened);
     } catch (err: any) {
@@ -1118,7 +1255,12 @@ export default function SalesOrderList() {
   }, [orders]);
 
   return (
-    <div className="min-h-screen w-full bg-slate-950 text-white p-4 md:px-6 md:py-4 font-sans selection:bg-blue-500/30">
+    <div
+      data-theme={theme}
+      data-theme-loading={themeReady ? 'false' : 'true'}
+      className="min-h-screen w-full bg-slate-950 text-white p-4 md:px-6 md:py-4 font-sans selection:bg-blue-500/30"
+    >
+      <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
       {/* BRANCH ERROR OVERLAY */}
       {!currentBranchId && !loading && (
         <div className="fixed inset-0 z-50 bg-slate-950/95 backdrop-blur-md flex items-center justify-center p-4">
@@ -1150,8 +1292,7 @@ export default function SalesOrderList() {
                 </h2>
                 <p className="text-[11px] text-slate-500 mt-1">
                   Upload the day's written log and compare it against what's
-                  recorded in the POS for{' '}
-                  {currentBranchName || 'this branch'}.
+                  recorded in the POS for {currentBranchName || 'this branch'}.
                 </p>
               </div>
               <button
@@ -1215,10 +1356,7 @@ export default function SalesOrderList() {
                   className="flex items-center gap-2 px-4 py-2 rounded-lg border border-white/10 hover:border-blue-500 bg-slate-800/50 transition-all cursor-pointer group"
                 >
                   {vhIsScanning ? (
-                    <Loader2
-                      size={14}
-                      className="animate-spin text-blue-400"
-                    />
+                    <Loader2 size={14} className="animate-spin text-blue-400" />
                   ) : (
                     <Camera
                       size={14}
@@ -1252,15 +1390,13 @@ export default function SalesOrderList() {
                   <CheckCircle2 size={12} /> {vhSummary.matchedFull} Matched
                 </span>
                 <span className="text-amber-400 flex items-center gap-1.5">
-                  <AlertCircle size={12} /> {vhSummary.qtyMismatch} Qty
-                  Mismatch
+                  <AlertCircle size={12} /> {vhSummary.qtyMismatch} Qty Mismatch
                 </span>
                 <span className="text-red-400 flex items-center gap-1.5">
                   <XCircle size={12} /> {vhSummary.posUnmatched} POS Unmatched
                 </span>
                 <span className="text-red-400 flex items-center gap-1.5">
-                  <XCircle size={12} /> {vhSummary.upUnmatched} Upload
-                  Unmatched
+                  <XCircle size={12} /> {vhSummary.upUnmatched} Upload Unmatched
                 </span>
 
                 <button
@@ -1310,7 +1446,10 @@ export default function SalesOrderList() {
                             colSpan={5}
                             className="p-8 text-center text-slate-500"
                           >
-                            <Loader2 className="animate-spin inline" size={18} />
+                            <Loader2
+                              className="animate-spin inline"
+                              size={18}
+                            />
                           </td>
                         </tr>
                       ) : vhGroupedPosItems.length === 0 ? (
@@ -1425,7 +1564,10 @@ export default function SalesOrderList() {
                             colSpan={3}
                             className="p-8 text-center text-slate-500"
                           >
-                            <Loader2 className="animate-spin inline" size={18} />
+                            <Loader2
+                              className="animate-spin inline"
+                              size={18}
+                            />
                           </td>
                         </tr>
                       ) : vhUploadedItems.length === 0 ? (

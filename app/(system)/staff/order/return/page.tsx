@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import {
@@ -16,6 +16,61 @@ import {
   History,
 } from 'lucide-react';
 
+// ==================== THEME (LIGHT/DARK) ====================
+// Scoped light-mode overrides, same elevation system as the other pages
+// (strengthened shadow/wash values, not the original softer StaffHub
+// pass). Applied only when an ancestor has data-theme="light"; dark stays
+// untouched.
+// NOTE: bg-slate-950 and text-white both sit directly on the root wrapper
+// div alongside data-theme, so both need the same-element selector form
+// (no space) in addition to the normal descendant form.
+const THEME_OVERRIDES = `
+  [data-theme-loading='true'],
+  [data-theme-loading='true'] * { transition: none !important; }
+
+  [data-theme='dark'] { color-scheme: dark; }
+  [data-theme='light'] { color-scheme: light; }
+
+  /* Page */
+  [data-theme='light'] .bg-slate-950,
+  [data-theme='light'].bg-slate-950 { background-color: #f1f5f9 !important; }
+
+  /* Card / panel surfaces */
+  [data-theme='light'] .bg-slate-900 {
+    background-color: #ffffff !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.07), 0 6px 20px rgba(15,23,42,0.10) !important;
+  }
+  /* Empty-state well (dashed border placeholder) — light wash, no shadow;
+     it's meant to look recessed/quiet, not elevated. */
+  [data-theme='light'] .bg-slate-900\\/30 { background-color: rgba(203,213,225,0.5) !important; }
+  [data-theme='light'] .bg-slate-800 { background-color: #e2e8f0 !important; }
+
+  /* Hover / interactive states */
+  [data-theme='light'] .hover\\:bg-white\\/\\[0\\.02\\]:hover { background-color: rgba(15,23,42,0.03) !important; }
+  [data-theme='light'] .bg-white\\/5 { background-color: rgba(15,23,42,0.045) !important; }
+
+  /* Text */
+  [data-theme='light'] .text-white,
+  [data-theme='light'].text-white { color: #0f172a !important; }
+  [data-theme='light'] .text-slate-500 { color: #64748b !important; }
+  [data-theme='light'] .text-slate-600 { color: #94a3b8 !important; }
+  [data-theme='light'] .text-slate-700 { color: #cbd5e1 !important; }
+  [data-theme='light'] .text-slate-800 { color: #f1f5f9 !important; }
+  [data-theme='light'] .hover\\:text-white:hover { color: #0f172a !important; }
+
+  /* Borders */
+  [data-theme='light'] .border-white\\/5 { border-color: rgba(15,23,42,0.06) !important; }
+  [data-theme='light'] .border-white\\/10 { border-color: rgba(15,23,42,0.08) !important; }
+  [data-theme='light'] .divide-white\\/5 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(15,23,42,0.06) !important; }
+
+  /* Accent text: darken bright dark-mode shades for light-background contrast */
+  [data-theme='light'] .text-red-500,
+  [data-theme='light'] .hover\\:text-red-500:hover { color: #dc2626 !important; }
+  [data-theme='light'] .text-purple-500 { color: #9333ea !important; }
+  [data-theme='light'] .text-blue-500 { color: #2563eb !important; }
+  [data-theme='light'] .text-emerald-500 { color: #059669 !important; }
+`;
+
 export default function ReturnOrder() {
   const router = useRouter();
 
@@ -24,13 +79,53 @@ export default function ReturnOrder() {
   const [loading, setLoading] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
-  const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [activeOrder, setActiveOrder] = useState<any>(null);
   const [items, setItems] = useState<any[]>([]);
   const [returnedItems, setReturnedItems] = useState<any[]>([]);
 
   const [currentBranchId, setCurrentBranchId] = useState<string | null>(null);
   const [orderResults, setOrderResults] = useState<any[]>([]);
+
+  // Theme preference: mirrors profiles.theme (same source/cache key as the
+  // other pages). Defaults to 'dark' until loaded, and stays 'dark' if the
+  // column is null/unset. No toggle control here. This file has no
+  // existing auth/profile query to piggyback on (it does its own access
+  // check separately, without fetching profile fields), so this is fully
+  // self-contained, including its own getUser call.
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  const [themeReady, setThemeReady] = useState(false);
+  useLayoutEffect(() => {
+    const cached = localStorage.getItem('staffhub_theme');
+    if (cached === 'light' || cached === 'dark') {
+      setTheme(cached);
+    }
+    const raf1 = requestAnimationFrame(() => {
+      requestAnimationFrame(() => setThemeReady(true));
+    });
+    return () => cancelAnimationFrame(raf1);
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user || cancelled) return;
+      const { data } = await supabase
+        .from('profiles')
+        .select('theme')
+        .eq('id', user.id)
+        .single();
+      if (!cancelled) {
+        const resolved = data?.theme === 'light' ? 'light' : 'dark';
+        setTheme(resolved);
+        localStorage.setItem('staffhub_theme', resolved);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     checkAccess();
@@ -134,45 +229,6 @@ export default function ReturnOrder() {
 
   const handleProcessReturn = async () => {
     if (isProcessing || returnedItems.length === 0) return;
-
-    // Figure out up front whether this return needs the office-branch /
-    // paid-order treatment — both for the confirmation prompt below and for
-    // the daily_payments entry inside executeReturn, so we only check once.
-    const orderStatus = (activeOrder.status || '').toLowerCase();
-    const isOrderPaidOrCompleted =
-      orderStatus === 'paid' || orderStatus === 'completed';
-
-    let isOfficeBranch = false;
-    if (isOrderPaidOrCompleted && currentBranchId) {
-      setIsProcessing(true); // brief lock while we verify branch type
-      const { data: branchData, error: branchError } = await supabase
-        .from('branches')
-        .select('*')
-        .eq('id', currentBranchId)
-        .single();
-      setIsProcessing(false);
-
-      if (branchError) {
-        console.warn('⚠️ Could not verify branch type:', branchError.message);
-      }
-
-      console.log('[Return] Branch check →', branchData);
-
-      // Confirmed against your branches schema: is_office_use (bool)
-      isOfficeBranch = branchData?.is_office_use === true;
-    }
-
-    if (isOfficeBranch && isOrderPaidOrCompleted) {
-      // Order is already settled — surface a confirmation before touching anything
-      setShowConfirmModal(true);
-      return;
-    }
-
-    await executeReturn(false);
-  };
-
-  const executeReturn = async (logToDailyPayments: boolean) => {
-    setShowConfirmModal(false);
     setIsProcessing(true);
 
     try {
@@ -315,35 +371,6 @@ export default function ReturnOrder() {
         }
       }
 
-      // 5. OFFICE BRANCH — LOG RETURN AS A CASH DEDUCTION IN DAILY_PAYMENTS
-      // Only reached when the order was already paid/completed at an office
-      // branch, and only after the user confirmed it in the modal — the
-      // office/status check itself already ran once in handleProcessReturn.
-      if (logToDailyPayments) {
-        const { error: paymentError } = await supabase
-          .from('daily_payments')
-          .insert({
-            branch_id: currentBranchId,
-            order_id: activeOrder.id,
-            report_date: new Date().toISOString().split('T')[0],
-            customer_name: activeOrder.customer_name || null,
-            amount: -Math.abs(round2(totalAdjustment)),
-            payment_method: 'cash',
-            pr_number: 'RETURN',
-            notes: `Return - Order #${activeOrder.order_number}`,
-          });
-
-        if (paymentError) {
-          // Non-blocking — the return itself already succeeded above
-          console.warn(
-            '⚠️ daily_payments insert warning:',
-            paymentError.message
-          );
-        } else {
-          console.log('✅ daily_payments entry created for return');
-        }
-      }
-
       setShowSuccessModal(true);
     } catch (err: any) {
       alert(`Adjustment Failed: ${err.message}`);
@@ -353,7 +380,12 @@ export default function ReturnOrder() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-white p-6 md:p-12 font-sans">
+    <div
+      data-theme={theme}
+      data-theme-loading={themeReady ? 'false' : 'true'}
+      className="min-h-screen bg-slate-950 text-white p-6 md:p-12 font-sans"
+    >
+      <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
       <div className="max-w-6xl mx-auto">
         {/* HEADER SECTION */}
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-12">
@@ -648,38 +680,6 @@ export default function ReturnOrder() {
           </div>
         )}
       </div>
-
-      {/* CONFIRM DIALOG — order already paid in full */}
-      {showConfirmModal && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center p-6 bg-slate-950/95 backdrop-blur-xl">
-          <div className="bg-slate-900 border border-amber-500/30 p-12 rounded-[3.5rem] max-w-md w-full text-center shadow-2xl">
-            <div className="w-20 h-20 bg-amber-500/10 rounded-full flex items-center justify-center text-amber-500 mx-auto mb-6 shadow-inner">
-              <AlertTriangle size={48} />
-            </div>
-            <h2 className="text-2xl font-black uppercase italic tracking-tighter mb-2">
-              Order_Already_Settled
-            </h2>
-            <p className="text-xs text-slate-500 mb-8 font-mono uppercase tracking-widest leading-relaxed">
-              This order is already paid in full. Shall we proceed with this
-              return?
-            </p>
-            <div className="flex gap-3">
-              <button
-                onClick={() => setShowConfirmModal(false)}
-                className="flex-1 bg-white/5 hover:bg-white/10 py-5 rounded-2xl font-black uppercase text-[10px] tracking-widest transition-all"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => executeReturn(true)}
-                className="flex-1 bg-red-600 hover:bg-red-500 py-5 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-2xl shadow-red-500/40 transition-all"
-              >
-                Proceed
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* SUCCESS DIALOG */}
       {showSuccessModal && (

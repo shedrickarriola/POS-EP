@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useLayoutEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import * as XLSX from 'xlsx';
@@ -17,6 +17,82 @@ import {
   CheckCircle2,
   AlertCircle,
 } from 'lucide-react';
+
+// ==================== THEME (LIGHT/DARK) ====================
+// Scoped light-mode overrides, same elevation system as the other pages.
+// Applied only when an ancestor has data-theme="light"; dark stays
+// untouched. Uses the stronger shadow/wash values (not the original
+// softer StaffHub pass) since a flat-looking first attempt is exactly
+// what this needs to avoid.
+// NOTE: bg-slate-950 and text-slate-200 both sit directly on the root
+// wrapper div alongside data-theme, so both need the same-element
+// selector form (no space) in addition to the normal descendant form.
+const THEME_OVERRIDES = `
+  [data-theme-loading='true'],
+  [data-theme-loading='true'] * { transition: none !important; }
+
+  [data-theme='dark'] { color-scheme: dark; }
+  [data-theme='light'] { color-scheme: light; }
+
+  /* Page & recessed wells */
+  [data-theme='light'] .bg-slate-950,
+  [data-theme='light'].bg-slate-950 { background-color: #f1f5f9 !important; }
+  [data-theme='light'] .bg-black\\/40 { background-color: rgba(203,213,225,0.68) !important; }
+
+  /* Card / panel surfaces — strengthened shadow: visible elevation, not
+     just technically present. */
+  [data-theme='light'] .bg-slate-900 {
+    background-color: #ffffff !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.07), 0 6px 20px rgba(15,23,42,0.10) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/40 {
+    background-color: rgba(255,255,255,0.9) !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.06) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/50 {
+    background-color: rgba(255,255,255,0.92) !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.07), 0 6px 20px rgba(15,23,42,0.10) !important;
+  }
+  [data-theme='light'] .bg-slate-800 { background-color: #e2e8f0 !important; }
+  [data-theme='light'] .bg-slate-700 { background-color: #cbd5e1 !important; }
+
+  /* Hover / interactive states */
+  [data-theme='light'] .hover\\:bg-slate-700:hover { background-color: #94a3b8 !important; }
+  [data-theme='light'] .hover\\:bg-white\\/5:hover { background-color: rgba(15,23,42,0.05) !important; }
+  [data-theme='light'] .hover\\:bg-white\\/10:hover { background-color: rgba(15,23,42,0.08) !important; }
+  [data-theme='light'] .bg-white\\/5 { background-color: rgba(15,23,42,0.045) !important; }
+  [data-theme='light'] .bg-white\\/10 { background-color: rgba(15,23,42,0.08) !important; }
+
+  /* Text */
+  [data-theme='light'] .text-white { color: #0f172a !important; }
+  [data-theme='light'] .text-slate-200,
+  [data-theme='light'].text-slate-200 { color: #1e293b !important; }
+  [data-theme='light'] .text-slate-300 { color: #334155 !important; }
+  [data-theme='light'] .text-slate-400 { color: #475569 !important; }
+  [data-theme='light'] .text-slate-600 { color: #94a3b8 !important; }
+  [data-theme='light'] .hover\\:text-white:hover { color: #0f172a !important; }
+  [data-theme='light'] .hover\\:text-slate-400:hover { color: #475569 !important; }
+
+  /* Borders */
+  [data-theme='light'] .border-white\\/5 { border-color: rgba(15,23,42,0.06) !important; }
+  [data-theme='light'] .border-white\\/10 { border-color: rgba(15,23,42,0.08) !important; }
+  [data-theme='light'] .divide-white\\/5 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(15,23,42,0.06) !important; }
+  [data-theme='light'] .divide-white\\/10 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(15,23,42,0.08) !important; }
+
+  /* Accent text: darken bright dark-mode shades for light-background contrast */
+  [data-theme='light'] .text-indigo-400 { color: #4f46e5 !important; }
+  [data-theme='light'] .text-emerald-400 { color: #059669 !important; }
+  [data-theme='light'] .text-emerald-500 { color: #059669 !important; }
+  [data-theme='light'] .text-amber-400 { color: #d97706 !important; }
+  [data-theme='light'] .text-amber-500 { color: #b45309 !important; }
+  [data-theme='light'] .text-amber-300 { color: #b45309 !important; }
+  [data-theme='light'] .text-red-400 { color: #dc2626 !important; }
+  [data-theme='light'] .text-red-500 { color: #dc2626 !important; }
+  [data-theme='light'] .text-rose-400 { color: #e11d48 !important; }
+  [data-theme='light'] .text-rose-500 { color: #e11d48 !important; }
+  [data-theme='light'] .text-violet-400 { color: #7c3aed !important; }
+  [data-theme='light'] .text-blue-400 { color: #2563eb !important; }
+`;
 
 export default function InventoryProtocol() {
   // Toast system (modern success UI)
@@ -58,6 +134,47 @@ export default function InventoryProtocol() {
 
   // Auditor & Adjustment Modal
   const [isAuditor, setIsAuditor] = useState(false);
+  // Theme preference: mirrors profiles.theme (same source/cache key as the
+  // other pages). Defaults to 'dark' until loaded, and stays 'dark' if the
+  // column is null/unset. No toggle control here.
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  const [themeReady, setThemeReady] = useState(false);
+  useLayoutEffect(() => {
+    const cached = localStorage.getItem('staffhub_theme');
+    if (cached === 'light' || cached === 'dark') {
+      setTheme(cached);
+    }
+    const raf1 = requestAnimationFrame(() => {
+      requestAnimationFrame(() => setThemeReady(true));
+    });
+    return () => cancelAnimationFrame(raf1);
+  }, []);
+  // Authoritative sync. Fully self-contained (own getUser call) rather than
+  // reusing the existing auditor-status effect below, since that effect's
+  // profile query only selects the auditor column, not theme. Also
+  // refreshes the shared cache the layout effect above reads from.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user || cancelled) return;
+      const { data } = await supabase
+        .from('profiles')
+        .select('theme')
+        .eq('id', user.id)
+        .single();
+      if (!cancelled) {
+        const resolved = data?.theme === 'light' ? 'light' : 'dark';
+        setTheme(resolved);
+        localStorage.setItem('staffhub_theme', resolved);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [showAdjustmentModal, setShowAdjustmentModal] = useState(false);
   const [adjustmentForm, setAdjustmentForm] = useState({
     quantity: 0,
@@ -234,7 +351,12 @@ export default function InventoryProtocol() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-indigo-500/30">
+    <div
+      data-theme={theme}
+      data-theme-loading={themeReady ? 'false' : 'true'}
+      className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-indigo-500/30"
+    >
+      <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
       {toast.show && (
         <div
           className={`fixed top-10 left-1/2 -translate-x-1/2 z-[200] flex items-center gap-3 px-6 py-4 rounded-2xl border backdrop-blur-xl shadow-2xl transition-all animate-in fade-in zoom-in slide-in-from-top-4 ${

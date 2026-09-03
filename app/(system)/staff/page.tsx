@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useLayoutEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import { createClient } from '@supabase/supabase-js';
@@ -37,29 +37,56 @@ import {
 // throughout this file. Applied only when an ancestor has data-theme="light";
 // data-theme="dark" (or no attribute) leaves the original styling untouched.
 const THEME_OVERRIDES = `
+  /* Suppresses all CSS transitions while the cached theme is being applied
+     on mount, so the correction snaps instantly instead of visibly fading
+     via transition-all / transition-colors. Unconditional (not scoped to
+     light/dark) since it just needs to be active during the brief
+     themeReady=false window regardless of which theme is being applied. */
+  [data-theme-loading='true'],
+  [data-theme-loading='true'] * { transition: none !important; }
+
   [data-theme='dark'] { color-scheme: dark; }
   [data-theme='light'] { color-scheme: light; }
 
-  /* Page & panel backgrounds */
-  /* NOTE: bg-slate-950 also sits directly on the same element as data-theme
+  /* Page & panel backgrounds
+     A flat 1:1 color inversion is what made this feel "just switched" —
+     dark mode gets its depth from glow/borders on near-black, but light
+     mode needs an actual page/card contrast gap plus soft shadows to read
+     as "elevated" at all. So: page steps down to slate-100 (not slate-50,
+     which was almost indistinguishable from white), cards stay white but
+     now carry a real shadow, and nested surfaces move down a full step
+     too so they don't collide with the new page tone.
+     NOTE: bg-slate-950 also sits directly on the same element as data-theme
      (the 3 root wrapper divs), so it needs the same-element selector form
      (no space) in addition to the normal descendant form below. */
   [data-theme='light'] .bg-slate-950,
-  [data-theme='light'].bg-slate-950 { background-color: #f8fafc !important; }
-  [data-theme='light'] .bg-slate-900 { background-color: #ffffff !important; }
-  [data-theme='light'] .bg-slate-900\\/40 { background-color: rgba(255,255,255,0.75) !important; }
-  [data-theme='light'] .bg-slate-900\\/20 { background-color: rgba(255,255,255,0.55) !important; }
-  [data-theme='light'] .bg-slate-800 { background-color: #f1f5f9 !important; }
-  [data-theme='light'] .bg-slate-700 { background-color: #e2e8f0 !important; }
+  [data-theme='light'].bg-slate-950 { background-color: #f1f5f9 !important; }
+  [data-theme='light'] .bg-slate-900 {
+    background-color: #ffffff !important;
+    box-shadow: 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.06) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/40 {
+    background-color: rgba(255,255,255,0.85) !important;
+    box-shadow: 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.06) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/20 {
+    background-color: rgba(255,255,255,0.65) !important;
+    box-shadow: 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.06) !important;
+  }
+  [data-theme='light'] .bg-red-500\\/5 {
+    box-shadow: 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.06) !important;
+  }
+  [data-theme='light'] .bg-slate-800 { background-color: #e2e8f0 !important; }
+  [data-theme='light'] .bg-slate-700 { background-color: #cbd5e1 !important; }
 
   /* Hover / disabled surface states */
-  [data-theme='light'] .hover\\:bg-slate-900:hover { background-color: #f8fafc !important; }
-  [data-theme='light'] .hover\\:bg-slate-900\\/60:hover { background-color: rgba(226,232,240,0.8) !important; }
-  [data-theme='light'] .hover\\:bg-slate-800:hover { background-color: #e2e8f0 !important; }
-  [data-theme='light'] .hover\\:bg-slate-800\\/50:hover { background-color: rgba(226,232,240,0.7) !important; }
-  [data-theme='light'] .hover\\:bg-slate-700:hover { background-color: #cbd5e1 !important; }
+  [data-theme='light'] .hover\\:bg-slate-900:hover { background-color: #f1f5f9 !important; }
+  [data-theme='light'] .hover\\:bg-slate-900\\/60:hover { background-color: rgba(203,213,225,0.75) !important; }
+  [data-theme='light'] .hover\\:bg-slate-800:hover { background-color: #cbd5e1 !important; }
+  [data-theme='light'] .hover\\:bg-slate-800\\/50:hover { background-color: rgba(203,213,225,0.7) !important; }
+  [data-theme='light'] .hover\\:bg-slate-700:hover { background-color: #94a3b8 !important; }
   [data-theme='light'] .disabled\\:bg-slate-700:disabled { background-color: #e2e8f0 !important; }
-  [data-theme='light'] .hover\\:bg-white\\/5:hover { background-color: rgba(15,23,42,0.04) !important; }
+  [data-theme='light'] .hover\\:bg-white\\/5:hover { background-color: rgba(15,23,42,0.05) !important; }
 
   /* Text */
   [data-theme='light'] .text-white { color: #0f172a !important; }
@@ -74,11 +101,11 @@ const THEME_OVERRIDES = `
 
   /* Borders */
   [data-theme='light'] .border-white\\/5 { border-color: rgba(15,23,42,0.06) !important; }
-  [data-theme='light'] .border-white\\/10 { border-color: rgba(15,23,42,0.1) !important; }
+  [data-theme='light'] .border-white\\/10 { border-color: rgba(15,23,42,0.08) !important; }
   [data-theme='light'] .border-white\\/20 { border-color: rgba(15,23,42,0.15) !important; }
   [data-theme='light'] .border-white\\/30 { border-color: rgba(15,23,42,0.2) !important; }
   [data-theme='light'] .hover\\:border-white\\/30:hover { border-color: rgba(15,23,42,0.2) !important; }
-  [data-theme='light'] .divide-white\\/10 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(15,23,42,0.1) !important; }
+  [data-theme='light'] .divide-white\\/10 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(15,23,42,0.08) !important; }
 
   /* Accent text: darken the bright dark-mode shades so they stay readable on light backgrounds */
   [data-theme='light'] .text-emerald-400 { color: #059669 !important; }
@@ -108,6 +135,29 @@ export default function StaffDashboard() {
   // Theme preference: mirrors profiles.theme. Defaults to 'dark' until the
   // profile loads, and stays 'dark' if the column is null/unset.
   const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  // Apply a cached theme (if any) before the browser paints, so returning
+  // visitors don't see a dark flash while the profile fetch is in flight.
+  // useLayoutEffect (not useEffect) specifically so this runs before paint;
+  // it only ever runs client-side, so it can't cause a hydration mismatch
+  // the way reading localStorage directly in the useState initializer would.
+  //
+  // themeReady additionally suppresses CSS transitions (transition-all /
+  // transition-colors, used throughout on buttons and table rows) for one
+  // paint cycle. Without this, the correction above is instant in terms of
+  // timing, but any element with a transition class still visually FADES
+  // into the corrected color, which reads as a lingering flash even though
+  // the underlying state change itself is instant.
+  const [themeReady, setThemeReady] = useState(false);
+  useLayoutEffect(() => {
+    const cached = localStorage.getItem('staffhub_theme');
+    if (cached === 'light' || cached === 'dark') {
+      setTheme(cached);
+    }
+    const raf1 = requestAnimationFrame(() => {
+      requestAnimationFrame(() => setThemeReady(true));
+    });
+    return () => cancelAnimationFrame(raf1);
+  }, []);
   const [branches, setBranches] = useState<any[]>([]);
   const [selectedBranch, setSelectedBranch] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -876,9 +926,13 @@ export default function StaffDashboard() {
 
   // Load theme from the profile once it arrives. Anything other than the
   // literal string 'light' (including null/undefined) resolves to 'dark'.
+  // Also refreshes the cache used by the layout effect above (and by other
+  // pages, like NewOrder) so it stays correct across devices/sessions.
   useEffect(() => {
     if (profile) {
-      setTheme(profile.theme === 'light' ? 'light' : 'dark');
+      const resolved = profile.theme === 'light' ? 'light' : 'dark';
+      setTheme(resolved);
+      localStorage.setItem('staffhub_theme', resolved);
     }
   }, [profile]);
 
@@ -3316,6 +3370,7 @@ export default function StaffDashboard() {
 
     // Optimistic UI update
     setTheme(newTheme);
+    localStorage.setItem('staffhub_theme', newTheme);
     setProfile((prev: any) => (prev ? { ...prev, theme: newTheme } : prev));
 
     const { error } = await supabase
@@ -3326,6 +3381,7 @@ export default function StaffDashboard() {
     if (error) {
       // Revert on failure
       setTheme(previousTheme);
+      localStorage.setItem('staffhub_theme', previousTheme);
       setProfile((prev: any) =>
         prev ? { ...prev, theme: previousTheme } : prev
       );
@@ -3810,6 +3866,7 @@ export default function StaffDashboard() {
     return (
       <div
         data-theme={theme}
+        data-theme-loading={themeReady ? 'false' : 'true'}
         className="min-h-screen bg-slate-950 flex items-center justify-center font-mono text-emerald-500 text-[10px] tracking-[.4em]"
       >
         <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
@@ -3821,6 +3878,7 @@ export default function StaffDashboard() {
     return (
       <div
         data-theme={theme}
+        data-theme-loading={themeReady ? 'false' : 'true'}
         className="min-h-screen bg-slate-950 flex items-center justify-center p-6"
       >
         <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
@@ -3876,6 +3934,7 @@ export default function StaffDashboard() {
   return (
     <div
       data-theme={theme}
+      data-theme-loading={themeReady ? 'false' : 'true'}
       className="min-h-screen bg-slate-950 text-slate-200"
     >
       <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />

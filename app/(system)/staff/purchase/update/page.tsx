@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import {
@@ -18,6 +18,77 @@ import {
   Plus,
 } from 'lucide-react';
 
+// ==================== THEME (LIGHT/DARK) ====================
+// Scoped light-mode overrides, same elevation system as the other pages
+// (strengthened shadow/wash values). Applied only when an ancestor has
+// data-theme="light"; dark stays untouched.
+// NOTE: bg-slate-950 and text-white both sit directly on the root wrapper
+// div alongside data-theme, so both need the same-element selector form
+// (no space) in addition to the normal descendant form.
+const THEME_OVERRIDES = `
+  [data-theme-loading='true'],
+  [data-theme-loading='true'] * { transition: none !important; }
+
+  [data-theme='dark'] { color-scheme: dark; }
+  [data-theme='light'] { color-scheme: light; }
+
+  /* Page */
+  [data-theme='light'] .bg-slate-950,
+  [data-theme='light'].bg-slate-950 { background-color: #f1f5f9 !important; }
+
+  /* bg-slate-950/50 is used for input fields here (not cards, unlike other
+     files) — a subtle recessed well, no shadow. */
+  [data-theme='light'] .bg-slate-950\\/50 { background-color: #e2e8f0 !important; }
+
+  /* Table wrapper / footer (bg-black) — light wash + shadow on the wrapper */
+  [data-theme='light'] .bg-black\\/40 {
+    background-color: rgba(226,232,240,0.75) !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.06) !important;
+  }
+  [data-theme='light'] .bg-black\\/20 { background-color: rgba(226,232,240,0.55) !important; }
+
+  /* Card / panel surfaces */
+  [data-theme='light'] .bg-slate-900 {
+    background-color: #ffffff !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.07), 0 6px 20px rgba(15,23,42,0.10) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/50 {
+    background-color: rgba(255,255,255,0.92) !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.07), 0 6px 20px rgba(15,23,42,0.10) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/30 { background-color: rgba(255,255,255,0.85) !important; }
+  [data-theme='light'] .bg-slate-800 { background-color: #e2e8f0 !important; }
+  [data-theme='light'] .bg-slate-700 { background-color: #cbd5e1 !important; }
+
+  /* Hover / interactive states */
+  [data-theme='light'] .hover\\:bg-slate-700:hover { background-color: #94a3b8 !important; }
+  [data-theme='light'] .hover\\:bg-white\\/\\[0\\.02\\]:hover { background-color: rgba(15,23,42,0.03) !important; }
+  [data-theme='light'] .hover\\:bg-white\\/\\[0\\.01\\]:hover { background-color: rgba(15,23,42,0.02) !important; }
+  [data-theme='light'] .bg-white\\/5 { background-color: rgba(15,23,42,0.045) !important; }
+
+  /* Text */
+  [data-theme='light'] .text-white,
+  [data-theme='light'].text-white { color: #0f172a !important; }
+  [data-theme='light'] .text-slate-300 { color: #334155 !important; }
+  [data-theme='light'] .text-slate-400 { color: #475569 !important; }
+  [data-theme='light'] .text-slate-600 { color: #94a3b8 !important; }
+  [data-theme='light'] .hover\\:text-white:hover { color: #0f172a !important; }
+
+  /* Borders */
+  [data-theme='light'] .border-white\\/5 { border-color: rgba(15,23,42,0.06) !important; }
+  [data-theme='light'] .border-white\\/10 { border-color: rgba(15,23,42,0.08) !important; }
+  [data-theme='light'] .divide-white\\/5 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(15,23,42,0.06) !important; }
+
+  /* Accent text: darken bright dark-mode shades for light-background contrast */
+  [data-theme='light'] .text-red-400 { color: #dc2626 !important; }
+  [data-theme='light'] .text-red-500,
+  [data-theme='light'] .hover\\:text-red-500:hover { color: #dc2626 !important; }
+  [data-theme='light'] .text-emerald-400 { color: #059669 !important; }
+  [data-theme='light'] .text-emerald-500 { color: #059669 !important; }
+  [data-theme='light'] .text-blue-400 { color: #2563eb !important; }
+  [data-theme='light'] .text-blue-500 { color: #2563eb !important; }
+`;
+
 export default function UpdatePurchaseOrder() {
   const router = useRouter();
 
@@ -29,6 +100,46 @@ export default function UpdatePurchaseOrder() {
   const [orderHeader, setOrderHeader] = useState<any>(null);
   const [items, setItems] = useState<any[]>([]);
   const [currentBranchId, setCurrentBranchId] = useState<string | null>(null);
+
+  // Theme preference: mirrors profiles.theme (same source/cache key as the
+  // other pages). Defaults to 'dark' until loaded, and stays 'dark' if the
+  // column is null/unset. No toggle control here. This file has no
+  // existing auth/profile query to piggyback on, so this is fully
+  // self-contained, including its own getUser call.
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  const [themeReady, setThemeReady] = useState(false);
+  useLayoutEffect(() => {
+    const cached = localStorage.getItem('staffhub_theme');
+    if (cached === 'light' || cached === 'dark') {
+      setTheme(cached);
+    }
+    const raf1 = requestAnimationFrame(() => {
+      requestAnimationFrame(() => setThemeReady(true));
+    });
+    return () => cancelAnimationFrame(raf1);
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user || cancelled) return;
+      const { data } = await supabase
+        .from('profiles')
+        .select('theme')
+        .eq('id', user.id)
+        .single();
+      if (!cancelled) {
+        const resolved = data?.theme === 'light' ? 'light' : 'dark';
+        setTheme(resolved);
+        localStorage.setItem('staffhub_theme', resolved);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // ====================== PRICE ANOMALY CONFIG ======================
   const PRICE_ANOMALY_THRESHOLD = 3; // 3× current selling price = blocked
   // =================================================================
@@ -318,7 +429,12 @@ export default function UpdatePurchaseOrder() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-white p-4 md:p-8 font-sans selection:bg-blue-500/30">
+    <div
+      data-theme={theme}
+      data-theme-loading={themeReady ? 'false' : 'true'}
+      className="min-h-screen bg-slate-950 text-white p-4 md:p-8 font-sans selection:bg-blue-500/30"
+    >
+      <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
       {/* SUCCESS MODAL WITH SUMMARY */}
       {showSuccessModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md">

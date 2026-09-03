@@ -1,6 +1,12 @@
 'use client';
 
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import {
+  useState,
+  useEffect,
+  useMemo,
+  useCallback,
+  useLayoutEffect,
+} from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import {
@@ -235,12 +241,114 @@ const TableSkeleton = ({ isOfficeUse = false }: { isOfficeUse?: boolean }) => (
   </>
 );
 
+// ==================== THEME (LIGHT/DARK) ====================
+// Scoped light-mode overrides, same elevation system as StaffHub/NewOrder
+// (real page/card contrast + soft shadows, not a flat color inversion).
+// Applied only when an ancestor has data-theme="light"; data-theme="dark"
+// (or no attribute) leaves the original dark styling untouched.
+// NOTE: bg-slate-950 sits directly on all 3 root wrapper divs, and
+// text-white also sits directly on the main one, alongside data-theme —
+// so both need the same-element selector form (no space) in addition to
+// the normal descendant form below.
+const THEME_OVERRIDES = `
+  /* Suppresses all CSS transitions while the cached theme is being applied
+     on mount, so the correction snaps instantly instead of visibly fading
+     via transition-all / transition-colors. */
+  [data-theme-loading='true'],
+  [data-theme-loading='true'] * { transition: none !important; }
+
+  [data-theme='dark'] { color-scheme: dark; }
+  [data-theme='light'] { color-scheme: light; }
+
+  /* Page & panel backgrounds */
+  [data-theme='light'] .bg-slate-950,
+  [data-theme='light'].bg-slate-950 { background-color: #f1f5f9 !important; }
+  [data-theme='light'] .bg-slate-950\\/50 { background-color: rgba(241,245,249,0.6) !important; }
+  [data-theme='light'] .bg-slate-900 {
+    background-color: #ffffff !important;
+    box-shadow: 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.06) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/40 {
+    background-color: rgba(255,255,255,0.85) !important;
+    box-shadow: 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.06) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/50 { background-color: rgba(255,255,255,0.8) !important; }
+  [data-theme='light'] .bg-slate-800 { background-color: #e2e8f0 !important; }
+  [data-theme='light'] .bg-slate-800\\/50 { background-color: rgba(226,232,240,0.75) !important; }
+  [data-theme='light'] .group:hover .group-hover\\:bg-slate-800 { background-color: #e2e8f0 !important; }
+
+  /* Hover / border states */
+  [data-theme='light'] .hover\\:bg-white\\/10:hover { background-color: rgba(15,23,42,0.06) !important; }
+  [data-theme='light'] .hover\\:bg-white\\/\\[0\\.02\\]:hover { background-color: rgba(15,23,42,0.03) !important; }
+  [data-theme='light'] .bg-white\\/5 { background-color: rgba(15,23,42,0.04) !important; }
+  [data-theme='light'] .bg-white\\/10 { background-color: rgba(15,23,42,0.06) !important; }
+
+  /* Text */
+  [data-theme='light'] .text-white,
+  [data-theme='light'].text-white { color: #0f172a !important; }
+  [data-theme='light'] .text-white\\/40 { color: rgba(15,23,42,0.45) !important; }
+  [data-theme='light'] .text-slate-400 { color: #475569 !important; }
+  [data-theme='light'] .text-slate-600 { color: #94a3b8 !important; }
+  [data-theme='light'] .hover\\:text-white:hover { color: #0f172a !important; }
+
+  /* Borders */
+  [data-theme='light'] .border-white\\/5 { border-color: rgba(15,23,42,0.06) !important; }
+  [data-theme='light'] .border-white\\/10 { border-color: rgba(15,23,42,0.08) !important; }
+  [data-theme='light'] .hover\\:border-white\\/10:hover { border-color: rgba(15,23,42,0.08) !important; }
+  [data-theme='light'] .divide-white\\/5 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(15,23,42,0.06) !important; }
+
+  /* Accent text: darken bright dark-mode shades so they stay readable on light backgrounds */
+  [data-theme='light'] .text-indigo-400 { color: #4f46e5 !important; }
+  [data-theme='light'] .text-indigo-300 { color: #4338ca !important; }
+  [data-theme='light'] .text-indigo-500 { color: #4f46e5 !important; }
+  [data-theme='light'] .text-emerald-400 { color: #059669 !important; }
+  [data-theme='light'] .text-amber-400 { color: #d97706 !important; }
+  [data-theme='light'] .text-red-400 { color: #dc2626 !important; }
+  [data-theme='light'] .text-red-500 { color: #dc2626 !important; }
+  /* These two are near-white "selected chip" text in dark mode — left as-is
+     they'd be almost invisible on a light chip, so they need a bigger jump
+     than the usual 400-shade darkening. */
+  [data-theme='light'] .text-emerald-50 { color: #047857 !important; }
+  [data-theme='light'] .text-amber-50 { color: #b45309 !important; }
+`;
+
 export default function NewPurchaseOrder() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const urlBranchName = searchParams.get('branchName') || 'Pharmacy Branch';
 
   const [profile, setProfile] = useState<any>(null);
+  // Theme preference: mirrors profiles.theme (same source/cache key as
+  // StaffHub and NewOrder). Defaults to 'dark' until loaded, and stays
+  // 'dark' if the column is null/unset. No toggle control here — theme is
+  // set from StaffHub and this page just reads and applies it.
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  // Apply a cached theme (if any) before the browser paints — same cache
+  // key StaffHub writes to. useLayoutEffect (not useEffect) so it runs
+  // before paint and can't cause a hydration mismatch. themeReady
+  // additionally suppresses CSS transitions for one paint cycle so the
+  // correction snaps instantly instead of visibly fading.
+  const [themeReady, setThemeReady] = useState(false);
+  useLayoutEffect(() => {
+    const cached = localStorage.getItem('staffhub_theme');
+    if (cached === 'light' || cached === 'dark') {
+      setTheme(cached);
+    }
+    const raf1 = requestAnimationFrame(() => {
+      requestAnimationFrame(() => setThemeReady(true));
+    });
+    return () => cancelAnimationFrame(raf1);
+  }, []);
+  // Authoritative sync once the full profile row loads (select('*') already
+  // includes theme, so no extra query is needed here). Also refreshes the
+  // shared cache the layout effect above reads from.
+  useEffect(() => {
+    if (profile) {
+      const resolved = profile.theme === 'light' ? 'light' : 'dark';
+      setTheme(resolved);
+      localStorage.setItem('staffhub_theme', resolved);
+    }
+  }, [profile]);
   const [inventoryList, setInventoryList] = useState<any[]>([]);
   const [supplierList, setSupplierList] = useState<any[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -963,7 +1071,12 @@ export default function NewPurchaseOrder() {
 
   if (loading)
     return (
-      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center">
+      <div
+        data-theme={theme}
+        data-theme-loading={themeReady ? 'false' : 'true'}
+        className="min-h-screen bg-slate-950 flex flex-col items-center justify-center"
+      >
+        <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
         <Loader2 className="animate-spin text-indigo-500 mb-4" size={42} />
         <p className="text-white/40 text-[10px] uppercase font-black tracking-widest">
           Initializing System
@@ -973,7 +1086,12 @@ export default function NewPurchaseOrder() {
 
   if (isSuccess)
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
+      <div
+        data-theme={theme}
+        data-theme-loading={themeReady ? 'false' : 'true'}
+        className="min-h-screen bg-slate-950 flex items-center justify-center p-6"
+      >
+        <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
         <div className="max-w-md w-full bg-slate-900 border border-white/10 rounded-3xl p-10 text-center shadow-2xl relative overflow-hidden">
           <div className="absolute top-0 left-0 w-full h-1 bg-emerald-500" />
           <div className="w-24 h-24 bg-emerald-500/20 rounded-full flex items-center justify-center mx-auto mb-8 border border-emerald-500/30">
@@ -1011,7 +1129,7 @@ export default function NewPurchaseOrder() {
           </div>
           <button
             onClick={() => router.push('/staff')}
-            className="w-full bg-slate-800 text-slate-950 p-5 rounded-2xl font-black uppercase text-xs tracking-widest hover:bg-indigo-400 transition-colors shadow-lg"
+            className="w-full bg-slate-800 text-white p-5 rounded-2xl font-black uppercase text-xs tracking-widest hover:bg-indigo-400 transition-colors shadow-lg flex items-center justify-center gap-2"
           >
             <Home size={16} /> Hub
           </button>
@@ -1026,7 +1144,12 @@ export default function NewPurchaseOrder() {
     );
 
   return (
-    <div className="min-h-screen bg-slate-950 text-white font-sans selection:bg-indigo-500/30">
+    <div
+      data-theme={theme}
+      data-theme-loading={themeReady ? 'false' : 'true'}
+      className="min-h-screen bg-slate-950 text-white font-sans selection:bg-indigo-500/30"
+    >
+      <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
       {isScanning && (
         <div className="fixed inset-0 z-[2000] flex flex-col items-center justify-center bg-slate-950/90 backdrop-blur-xl">
           <Loader2 className="animate-spin text-indigo-400 mb-6" size={64} />

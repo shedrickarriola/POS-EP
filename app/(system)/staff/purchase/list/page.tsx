@@ -1,5 +1,5 @@
 'use client';
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useLayoutEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import {
@@ -23,12 +23,140 @@ import {
   Store,
 } from 'lucide-react';
 
+// ==================== THEME (LIGHT/DARK) ====================
+// Scoped light-mode overrides, same elevation system as StaffHub/NewOrder/
+// NewPO. Applied only when an ancestor has data-theme="light"; dark stays
+// untouched. This file leans mostly on translucent slate-900/slate-950
+// surfaces rather than solid ones (tables/rows/toolbars), so the mapping
+// below is tailored to that rather than reused verbatim from the others.
+// NOTE: bg-slate-950 and text-white both sit directly on the root wrapper
+// div alongside data-theme, so both need the same-element selector form
+// (no space) in addition to the normal descendant form.
+const THEME_OVERRIDES = `
+  [data-theme-loading='true'],
+  [data-theme-loading='true'] * { transition: none !important; }
+
+  [data-theme='dark'] { color-scheme: dark; }
+  [data-theme='light'] { color-scheme: light; }
+
+  /* Page & recessed/inset wells (translucent slate-950) */
+  [data-theme='light'] .bg-slate-950,
+  [data-theme='light'].bg-slate-950 { background-color: #f1f5f9 !important; }
+  [data-theme='light'] .bg-slate-950\\/20 { background-color: rgba(203,213,225,0.55) !important; }
+  [data-theme='light'] .bg-slate-950\\/30 { background-color: rgba(203,213,225,0.6) !important; }
+  [data-theme='light'] .bg-slate-950\\/40 {
+    background-color: rgba(255,255,255,0.94) !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.07), 0 6px 20px rgba(15,23,42,0.10) !important;
+  }
+  [data-theme='light'] .bg-black\\/20 { background-color: rgba(203,213,225,0.55) !important; }
+  [data-theme='light'] .bg-black\\/30 { background-color: rgba(203,213,225,0.62) !important; }
+  [data-theme='light'] .bg-black\\/40 { background-color: rgba(203,213,225,0.68) !important; }
+
+  /* Card / panel surfaces (translucent slate-900 is the dominant pattern
+     here, unlike StaffHub/NewOrder/NewPO where solid bg-slate-900 is) */
+  [data-theme='light'] .bg-slate-900 {
+    background-color: #ffffff !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.07), 0 6px 20px rgba(15,23,42,0.10) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/50 {
+    background-color: rgba(255,255,255,0.92) !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.07), 0 6px 20px rgba(15,23,42,0.10) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/80 {
+    background-color: rgba(255,255,255,0.96) !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.06) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/30 { background-color: rgba(255,255,255,0.72) !important; }
+  [data-theme='light'] .bg-slate-800 { background-color: #e2e8f0 !important; }
+  [data-theme='light'] .bg-slate-800\\/40 { background-color: rgba(203,213,225,0.65) !important; }
+  [data-theme='light'] .bg-slate-700 { background-color: #cbd5e1 !important; }
+
+  /* Hover / interactive states */
+  [data-theme='light'] .hover\\:bg-slate-800\\/40:hover { background-color: rgba(203,213,225,0.65) !important; }
+  [data-theme='light'] .hover\\:bg-slate-700:hover { background-color: #94a3b8 !important; }
+  [data-theme='light'] .hover\\:bg-white\\/5:hover { background-color: rgba(15,23,42,0.05) !important; }
+  [data-theme='light'] .bg-white\\/5 { background-color: rgba(15,23,42,0.04) !important; }
+  [data-theme='light'] .hover\\:bg-white\\/\\[0\\.02\\]:hover { background-color: rgba(15,23,42,0.03) !important; }
+  [data-theme='light'] .hover\\:bg-white\\/\\[0\\.03\\]:hover { background-color: rgba(15,23,42,0.035) !important; }
+
+  /* Text */
+  [data-theme='light'] .text-white,
+  [data-theme='light'].text-white { color: #0f172a !important; }
+  [data-theme='light'] .text-slate-100 { color: #0f172a !important; }
+  [data-theme='light'] .text-slate-200 { color: #1e293b !important; }
+  [data-theme='light'] .text-slate-300 { color: #334155 !important; }
+  [data-theme='light'] .text-slate-400 { color: #475569 !important; }
+  [data-theme='light'] .text-slate-600 { color: #94a3b8 !important; }
+  [data-theme='light'] .text-slate-700 { color: #cbd5e1 !important; }
+  [data-theme='light'] .hover\\:text-white:hover { color: #0f172a !important; }
+  [data-theme='light'] .hover\\:text-slate-300:hover { color: #334155 !important; }
+
+  /* Borders */
+  [data-theme='light'] .border-white\\/5 { border-color: rgba(15,23,42,0.06) !important; }
+  [data-theme='light'] .border-white\\/10 { border-color: rgba(15,23,42,0.08) !important; }
+  [data-theme='light'] .divide-white\\/5 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(15,23,42,0.06) !important; }
+
+  /* Accent text: darken bright dark-mode shades for light-background contrast */
+  [data-theme='light'] .text-blue-400 { color: #2563eb !important; }
+  [data-theme='light'] .text-blue-500 { color: #2563eb !important; }
+  [data-theme='light'] .text-emerald-400 { color: #059669 !important; }
+  [data-theme='light'] .text-amber-400 { color: #d97706 !important; }
+  [data-theme='light'] .text-red-500 { color: #dc2626 !important; }
+`;
+
 export default function PurchaseOrderList() {
   const router = useRouter();
 
   // Auth & Role States
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [isVerifying, setIsVerifying] = useState<string | null>(null);
+
+  // Theme preference: mirrors profiles.theme (same source/cache key as
+  // StaffHub, NewOrder, and NewPO). Defaults to 'dark' until loaded, and
+  // stays 'dark' if the column is null/unset. No toggle control here.
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  // Apply a cached theme (if any) before the browser paints. useLayoutEffect
+  // (not useEffect) so it runs before paint and can't cause a hydration
+  // mismatch. themeReady additionally suppresses CSS transitions for one
+  // paint cycle so the correction snaps instantly instead of fading.
+  const [themeReady, setThemeReady] = useState(false);
+  useLayoutEffect(() => {
+    const cached = localStorage.getItem('staffhub_theme');
+    if (cached === 'light' || cached === 'dark') {
+      setTheme(cached);
+    }
+    const raf1 = requestAnimationFrame(() => {
+      requestAnimationFrame(() => setThemeReady(true));
+    });
+    return () => cancelAnimationFrame(raf1);
+  }, []);
+  // Authoritative sync. Fully self-contained (its own getSession call)
+  // rather than reusing the existing initSession effect below, since that
+  // effect's profile query only selects full_name/role, not id/theme, and
+  // doesn't expose the session elsewhere in state to depend on instead.
+  // Also refreshes the shared cache the layout effect above reads from.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (!session || cancelled) return;
+      const { data } = await supabase
+        .from('profiles')
+        .select('theme')
+        .eq('id', session.user.id)
+        .single();
+      if (!cancelled) {
+        const resolved = data?.theme === 'light' ? 'light' : 'dark';
+        setTheme(resolved);
+        localStorage.setItem('staffhub_theme', resolved);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Branch State
   const [currentBranchId, setCurrentBranchId] = useState<string | null>(null);
@@ -320,7 +448,12 @@ export default function PurchaseOrderList() {
   );
 
   return (
-    <div className="min-h-screen w-full bg-slate-950 text-white p-4 md:px-6 md:py-4 font-sans selection:bg-blue-500/30">
+    <div
+      data-theme={theme}
+      data-theme-loading={themeReady ? 'false' : 'true'}
+      className="min-h-screen w-full bg-slate-950 text-white p-4 md:px-6 md:py-4 font-sans selection:bg-blue-500/30"
+    >
+      <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
       {!currentBranchId && !loading && (
         <div className="fixed inset-0 z-50 bg-slate-950/95 backdrop-blur-md flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-red-500/20 p-8 rounded-2xl max-w-sm w-full text-center shadow-2xl">

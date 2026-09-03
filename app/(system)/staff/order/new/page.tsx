@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useLayoutEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import {
@@ -464,6 +464,79 @@ const isValidPHMobile = (input: string): boolean => {
   return /^(0|\+63|63)9\d{9}$/.test(cleaned);
 };
 
+// ==================== THEME (LIGHT/DARK) ====================
+// Scoped light-mode overrides, mirroring the same elevation system used in
+// StaffHub (real page/card contrast + soft shadows, not a flat inversion).
+// Applied only when an ancestor has data-theme="light"; data-theme="dark"
+// (or no attribute) leaves the original dark styling untouched.
+// NOTE: bg-slate-950 and text-slate-300 both sit directly on the root
+// wrapper div alongside data-theme, so they need the same-element selector
+// form (no space) in addition to the normal descendant form below.
+const THEME_OVERRIDES = `
+  /* Suppresses all CSS transitions while the cached theme is being applied
+     on mount, so the correction snaps instantly instead of visibly fading
+     via transition-all / transition-colors. Unconditional (not scoped to
+     light/dark) since it just needs to be active during the brief
+     themeReady=false window regardless of which theme is being applied. */
+  [data-theme-loading='true'],
+  [data-theme-loading='true'] * { transition: none !important; }
+
+  [data-theme='dark'] { color-scheme: dark; }
+  [data-theme='light'] { color-scheme: light; }
+
+  /* Page & panel backgrounds */
+  [data-theme='light'] .bg-slate-950,
+  [data-theme='light'].bg-slate-950 { background-color: #f1f5f9 !important; }
+  [data-theme='light'] .bg-slate-950\\/50 { background-color: rgba(241,245,249,0.6) !important; }
+  [data-theme='light'] .hover\\:bg-slate-950:hover { background-color: #f1f5f9 !important; }
+  [data-theme='light'] .bg-slate-900 {
+    background-color: #ffffff !important;
+    box-shadow: 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.06) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/40 {
+    background-color: rgba(255,255,255,0.85) !important;
+    box-shadow: 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.06) !important;
+  }
+  [data-theme='light'] .bg-slate-900\\/50 { background-color: rgba(255,255,255,0.8) !important; }
+  [data-theme='light'] .bg-slate-800 { background-color: #e2e8f0 !important; }
+  [data-theme='light'] .bg-slate-800\\/50 { background-color: rgba(226,232,240,0.75) !important; }
+  [data-theme='light'] .bg-slate-700 { background-color: #cbd5e1 !important; }
+
+  /* Hover / disabled surface states */
+  [data-theme='light'] .hover\\:bg-slate-700:hover { background-color: #94a3b8 !important; }
+  [data-theme='light'] .disabled\\:bg-slate-700:disabled { background-color: #e2e8f0 !important; }
+  [data-theme='light'] .hover\\:bg-white\\/5:hover { background-color: rgba(15,23,42,0.05) !important; }
+  [data-theme='light'] .bg-white\\/5 { background-color: rgba(15,23,42,0.04) !important; }
+  [data-theme='light'] .bg-white\\/\\[0\\.02\\] { background-color: rgba(15,23,42,0.02) !important; }
+  [data-theme='light'] .hover\\:bg-white\\/\\[0\\.02\\]:hover { background-color: rgba(15,23,42,0.035) !important; }
+
+  /* Text */
+  [data-theme='light'] .text-white { color: #0f172a !important; }
+  [data-theme='light'] .text-slate-200 { color: #1e293b !important; }
+  [data-theme='light'] .text-slate-300,
+  [data-theme='light'].text-slate-300 { color: #334155 !important; }
+  [data-theme='light'] .text-slate-400 { color: #475569 !important; }
+  [data-theme='light'] .text-slate-600 { color: #94a3b8 !important; }
+  [data-theme='light'] .text-slate-700 { color: #cbd5e1 !important; }
+  [data-theme='light'] .hover\\:text-white:hover { color: #0f172a !important; }
+
+  /* Borders */
+  [data-theme='light'] .border-white\\/5 { border-color: rgba(15,23,42,0.06) !important; }
+  [data-theme='light'] .border-white\\/10 { border-color: rgba(15,23,42,0.08) !important; }
+  [data-theme='light'] .divide-white\\/5 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(15,23,42,0.06) !important; }
+
+  /* Accent text: darken bright dark-mode shades so they stay readable on light backgrounds */
+  [data-theme='light'] .text-emerald-400 { color: #059669 !important; }
+  [data-theme='light'] .text-emerald-500 { color: #059669 !important; }
+  [data-theme='light'] .text-amber-400 { color: #d97706 !important; }
+  [data-theme='light'] .text-red-400 { color: #dc2626 !important; }
+  [data-theme='light'] .text-red-500 { color: #dc2626 !important; }
+  [data-theme='light'] .text-blue-400 { color: #2563eb !important; }
+  [data-theme='light'] .text-blue-500 { color: #2563eb !important; }
+  [data-theme='light'] .text-purple-400 { color: #9333ea !important; }
+  [data-theme='light'] .text-orange-400 { color: #ea580c !important; }
+`;
+
 export default function NewOrderPOS() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
@@ -477,6 +550,35 @@ export default function NewOrderPOS() {
   const [priceErrorMessages, setPriceErrorMessages] = useState<string[]>([]);
   const [user, setUser] = useState<any>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  // Theme preference: mirrors profiles.theme (same source as StaffHub).
+  // Defaults to 'dark' until loaded, and stays 'dark' if the column is
+  // null/unset. No toggle control here — theme is set from StaffHub and
+  // this page just reads and applies it.
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  // Apply a cached theme (if any) before the browser paints — same cache
+  // key StaffHub writes to, so a preference set there is instant here too,
+  // instead of waiting on this page's own profile fetch. useLayoutEffect
+  // (not useEffect) so it runs before paint; client-only, so it can't cause
+  // a hydration mismatch the way reading localStorage in the useState
+  // initializer would.
+  //
+  // themeReady additionally suppresses CSS transitions (transition-all /
+  // transition-colors on the product table rows and buttons) for one paint
+  // cycle. Without this, the correction above is instant in terms of
+  // timing, but any element with a transition class still visually FADES
+  // into the corrected color, which reads as a lingering flash even though
+  // the underlying state change itself is instant.
+  const [themeReady, setThemeReady] = useState(false);
+  useLayoutEffect(() => {
+    const cached = localStorage.getItem('staffhub_theme');
+    if (cached === 'light' || cached === 'dark') {
+      setTheme(cached);
+    }
+    const raf1 = requestAnimationFrame(() => {
+      requestAnimationFrame(() => setThemeReady(true));
+    });
+    return () => cancelAnimationFrame(raf1);
+  }, []);
   const [products, setProducts] = useState<Product[]>([]);
   const [nextSONumber, setNextSONumber] = useState('SO01');
   const [currentBranchId, setCurrentBranchId] = useState<string | null>(null);
@@ -1234,6 +1336,31 @@ export default function NewOrderPOS() {
 
     initPage();
   }, []);
+
+  // Load theme once the user is known. Self-contained: fetches only the
+  // theme column and doesn't touch the initPage effect above. Anything
+  // other than the literal string 'light' (including null/undefined)
+  // resolves to 'dark'. Also refreshes the shared cache the layout effect
+  // above reads from, so it stays correct across devices/sessions.
+  useEffect(() => {
+    if (!user?.id) return;
+    let cancelled = false;
+    supabase
+      .from('profiles')
+      .select('theme')
+      .eq('id', user.id)
+      .single()
+      .then(({ data }) => {
+        if (!cancelled) {
+          const resolved = data?.theme === 'light' ? 'light' : 'dark';
+          setTheme(resolved);
+          localStorage.setItem('staffhub_theme', resolved);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   const metrics = useMemo(() => {
     let total = 0;
@@ -2043,7 +2170,12 @@ export default function NewOrderPOS() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-300 flex flex-col font-sans text-[13px]">
+    <div
+      data-theme={theme}
+      data-theme-loading={themeReady ? 'false' : 'true'}
+      className="min-h-screen bg-slate-950 text-slate-300 flex flex-col font-sans text-[13px]"
+    >
+      <style dangerouslySetInnerHTML={{ __html: THEME_OVERRIDES }} />
       {/* AI OVERLAY */}
       {isScanning && (
         <div className="fixed inset-0 z-[3000] flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-md">
@@ -4130,11 +4262,12 @@ export default function NewOrderPOS() {
                     : 'border-white/10 focus:border-amber-500'
                 }`}
               />
-              {discountClientNumber && !isValidPHMobile(discountClientNumber) && (
-                <span className="text-red-400 text-[9px] font-bold">
-                  Enter a valid PH mobile number (e.g. 09171234567)
-                </span>
-              )}
+              {discountClientNumber &&
+                !isValidPHMobile(discountClientNumber) && (
+                  <span className="text-red-400 text-[9px] font-bold">
+                    Enter a valid PH mobile number (e.g. 09171234567)
+                  </span>
+                )}
             </div>
           )}
 
