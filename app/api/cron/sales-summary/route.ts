@@ -3781,6 +3781,9 @@ export async function GET(request: Request) {
 
           const monthNetTotal = monthGenTotal + monthBrdTotal - monthDiscTotal - monthOthersTotal;
           const monthActualCash = monthCashTotal - totalExpenses;
+          // Cash + cheque together, net of expenses — cheques are still real collected money, this
+          // is "what we actually have" beyond just the physical cash-on-hand figure above.
+          const monthActualCashCheque = monthCashTotal + monthChequeTotal - totalExpenses;
 
           // ── Purchase Orders ──
           const poTotal = (purchaseOrdersData || []).reduce((s: number, p: any) => s + Number(p.total_amount || 0), 0);
@@ -3929,6 +3932,79 @@ export async function GET(request: Request) {
             };
           }).sort((a, b) => b.sales - a.sales);
 
+          // ── Receivables ──
+          // Every order for this branch with a balance still owed, regardless of which month it was
+          // placed in — a receivable doesn't stop being outstanding just because the calendar page
+          // turned, so this intentionally is NOT scoped to monthDates like the rest of this report.
+          // due_date is nullable ("not applicable" per branch's own note). status != 'completed' is
+          // done with an explicit OR for null so an order that's never had its status set doesn't
+          // silently vanish from the list (plain .neq() would exclude nulls under SQL's 3-valued logic).
+          const { data: receivableOrdersRaw } = await supabaseAdmin
+            .from('orders')
+            .select('id, order_number, client_name, agent, total_amount, generic_amt, branded_amt, discount_total, created_date_pht, due_date, status, remaining_balance, notes')
+            .eq('branch_id', b.id)
+            .or('status.neq.completed,status.is.null')
+            .gt('remaining_balance', 0);
+
+          type ReceivableRow = {
+            soNumber: string; client: string; agent: string;
+            generic: number; branded: number; discount: number; total: number;
+            orderDate: string; dueDate: string | null; status: string; notes: string;
+            remainingBalance: number; isOverdue: boolean;
+          };
+          const receivableRows: ReceivableRow[] = (receivableOrdersRaw || []).map((o: any) => ({
+            soNumber: o.order_number || '—',
+            client: o.client_name || 'WALK-IN',
+            agent: o.agent || '—',
+            generic: Number(o.generic_amt || 0),
+            branded: Number(o.branded_amt || 0),
+            discount: Number(o.discount_total || 0),
+            total: Number(o.total_amount || 0),
+            orderDate: o.created_date_pht,
+            dueDate: o.due_date || null,
+            status: o.status || '—',
+            notes: o.notes?.trim() || '—',
+            remainingBalance: Number(o.remaining_balance || 0),
+            isOverdue: !!o.due_date && o.due_date < todayPHT,
+          }));
+
+          // Group client → due date → SO# rows, each level subtotaled; no-due-date bucket sorts last
+          const receivablesByClient = new Map<string, ReceivableRow[]>();
+          receivableRows.forEach((r) => {
+            const arr = receivablesByClient.get(r.client) || [];
+            arr.push(r);
+            receivablesByClient.set(r.client, arr);
+          });
+          const receivableClientGroups = Array.from(receivablesByClient.entries())
+            .map(([client, rows]) => {
+              const byDueDate = new Map<string, ReceivableRow[]>();
+              rows.forEach((r) => {
+                const key = r.dueDate || 'NO_DUE_DATE';
+                const arr = byDueDate.get(key) || [];
+                arr.push(r);
+                byDueDate.set(key, arr);
+              });
+              const dueDateGroups = Array.from(byDueDate.entries())
+                .map(([key, dRows]) => ({
+                  dueDate: key === 'NO_DUE_DATE' ? null : key,
+                  rows: dRows,
+                  subtotal: dRows.reduce((s, r) => s + r.remainingBalance, 0),
+                }))
+                .sort((a, b) => {
+                  if (!a.dueDate && !b.dueDate) return 0;
+                  if (!a.dueDate) return 1;
+                  if (!b.dueDate) return -1;
+                  return a.dueDate.localeCompare(b.dueDate);
+                });
+              return { client, clientTotal: rows.reduce((s, r) => s + r.remainingBalance, 0), dueDateGroups };
+            })
+            .sort((a, b) => b.clientTotal - a.clientTotal);
+
+          const totalReceivables = receivableRows.reduce((s, r) => s + r.remainingBalance, 0);
+          const overdueReceivables = receivableRows.filter((r) => r.isOverdue).reduce((s, r) => s + r.remainingBalance, 0);
+          const notYetDueReceivables = receivableRows.filter((r) => !r.isOverdue && r.dueDate).reduce((s, r) => s + r.remainingBalance, 0);
+          const noDueDateReceivables = receivableRows.filter((r) => !r.dueDate).reduce((s, r) => s + r.remainingBalance, 0);
+
           // ── HTML helpers ──
           const fmt = (n: number) => `₱${n.toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
           const tdR = `style="padding:8px 12px; text-align:right; font-family:monospace;"`;
@@ -3997,9 +4073,14 @@ export async function GET(request: Request) {
                   </td>
                 </tr>
               </table>
-              <div style="background:#064e3b; border:2px solid #10b981; border-radius:12px; padding:20px; text-align:center; margin-bottom:28px;">
+              <div style="background:#064e3b; border:2px solid #10b981; border-radius:12px; padding:20px; text-align:center; margin-bottom:16px;">
                 <div style="color:#10b981; font-size:12px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">ACTUAL CASH (COLLECTED − EXPENSES)</div>
                 <div style="color:#10b981; font-size:28px; font-weight:900; font-family:monospace;">${fmt(monthActualCash)}</div>
+              </div>
+              <div style="background:#0c4a6e; border:2px solid #0ea5e9; border-radius:12px; padding:20px; text-align:center; margin-bottom:28px;">
+                <div style="color:#38bdf8; font-size:12px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">ACTUAL CASH + CHEQUE (COLLECTED − EXPENSES)</div>
+                <div style="color:#38bdf8; font-size:28px; font-weight:900; font-family:monospace;">${fmt(monthActualCashCheque)}</div>
+                <div style="color:#64748b; font-size:10px; margin-top:4px;">What we actually have — cash and cheque together, net of expenses</div>
               </div>
 
               <!-- CASH vs STOCKS SUMMARY -->
@@ -4258,6 +4339,97 @@ export async function GET(request: Request) {
                   </tbody>
                 </table>
               </div>` : ''}
+
+              ${receivableRows.length > 0 ? `
+              <!-- RECEIVABLES -->
+              <h3 style="color:#ef4444; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">📋 Receivables (Outstanding Balance)</h3>
+              <table style="width:100%; border-collapse:collapse; margin-bottom:16px;">
+                <tr>
+                  <td style="padding:4px;">
+                    <div style="background:#1e293b; border:1px solid #475569; border-radius:12px; padding:14px; text-align:center;">
+                      <div style="color:#94a3b8; font-size:10px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">TOTAL RECEIVABLES</div>
+                      <div style="color:#fff; font-size:20px; font-weight:900; font-family:monospace;">${fmt(totalReceivables)}</div>
+                    </div>
+                  </td>
+                  <td style="padding:4px;">
+                    <div style="background:#450a0a; border:1px solid #ef4444; border-radius:12px; padding:14px; text-align:center;">
+                      <div style="color:#f87171; font-size:10px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">⚠️ OVERDUE</div>
+                      <div style="color:#f87171; font-size:20px; font-weight:900; font-family:monospace;">${fmt(overdueReceivables)}</div>
+                    </div>
+                  </td>
+                  <td style="padding:4px;">
+                    <div style="background:#0c4a6e; border:1px solid #0ea5e9; border-radius:12px; padding:14px; text-align:center;">
+                      <div style="color:#38bdf8; font-size:10px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">NOT YET DUE</div>
+                      <div style="color:#38bdf8; font-size:20px; font-weight:900; font-family:monospace;">${fmt(notYetDueReceivables)}</div>
+                    </div>
+                  </td>
+                  ${noDueDateReceivables > 0 ? `
+                  <td style="padding:4px;">
+                    <div style="background:#1e293b; border:1px solid #64748b; border-radius:12px; padding:14px; text-align:center;">
+                      <div style="color:#94a3b8; font-size:10px; font-weight:700; letter-spacing:2px; margin-bottom:6px;">NO DUE DATE</div>
+                      <div style="color:#cbd5e1; font-size:20px; font-weight:900; font-family:monospace;">${fmt(noDueDateReceivables)}</div>
+                    </div>
+                  </td>` : ''}
+                </tr>
+              </table>
+              <div style="overflow-x:auto; margin-bottom:28px;">
+                <table style="width:100%; border-collapse:collapse; font-size:12px;">
+                  <thead>
+                    <tr>
+                      <th ${thL}>Client</th>
+                      <th ${thL}>SO#</th>
+                      <th ${thL}>Order Date</th>
+                      <th ${thL}>Due Date</th>
+                      <th ${thR}>Generic</th>
+                      <th ${thR}>Branded</th>
+                      <th ${thR}>Discount</th>
+                      <th ${thR}>Total</th>
+                      <th ${thL}>Agent</th>
+                      <th ${thL}>Status</th>
+                      <th ${thR}>Balance</th>
+                      <th ${thL}>Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${receivableClientGroups.map((cg) => `
+                    <tr style="background:#1e293b; border-top:2px solid #475569;">
+                      <td colspan="10" ${tdL} style="padding:8px 12px; font-weight:900; color:#fbbf24; font-size:11px; text-transform:uppercase; letter-spacing:1px;">${cg.client}</td>
+                      <td ${tdR} style="padding:8px 12px; font-weight:900; color:#fbbf24;">${fmt(cg.clientTotal)}</td>
+                      <td></td>
+                    </tr>
+                    ${cg.dueDateGroups.map((dg) => {
+                      const dueLabel = dg.dueDate || 'No due date';
+                      const overdue = !!dg.dueDate && dg.dueDate < todayPHT;
+                      const dueColor = !dg.dueDate ? '#94a3b8' : overdue ? '#ef4444' : '#38bdf8';
+                      return `${dg.rows.map((r, i) => {
+                        const row = i % 2 === 0 ? trNorm : trAlt;
+                        return `<tr ${row}>
+                          <td ${tdL} style="padding:6px 12px;"></td>
+                          <td ${tdL} style="padding:6px 12px; font-family:monospace; color:#e2e8f0;">${r.soNumber}</td>
+                          <td ${tdL} style="padding:6px 12px; font-family:monospace; color:#94a3b8; font-size:11px;">${r.orderDate}</td>
+                          <td ${tdL} style="padding:6px 12px; font-family:monospace; color:${dueColor}; font-size:11px;">${dueLabel}${overdue ? ' ⚠️' : ''}</td>
+                          <td ${tdR} style="padding:6px 12px; font-family:monospace; color:#6ee7b7;">${fmt(r.generic)}</td>
+                          <td ${tdR} style="padding:6px 12px; font-family:monospace; color:#c4b5fd;">${fmt(r.branded)}</td>
+                          <td ${tdR} style="padding:6px 12px; font-family:monospace; color:#f97316;">${fmt(r.discount)}</td>
+                          <td ${tdR} style="padding:6px 12px; font-family:monospace; color:#e2e8f0;">${fmt(r.total)}</td>
+                          <td ${tdL} style="padding:6px 12px; color:#94a3b8; font-size:11px;">${r.agent}</td>
+                          <td ${tdL} style="padding:6px 12px; color:#cbd5e1; font-size:11px; text-transform:capitalize;">${r.status}</td>
+                          <td ${tdR} style="padding:6px 12px; font-family:monospace; color:${dueColor}; font-weight:700;">${fmt(r.remainingBalance)}</td>
+                          <td ${tdL} style="padding:6px 12px; color:#7dd3fc; font-size:11px;">${r.notes}</td>
+                        </tr>`;
+                      }).join('')}
+                      <tr style="background:#0f172a; border-bottom:1px solid #334155;">
+                        <td colspan="10" ${tdL} style="padding:6px 12px; color:#64748b; font-size:10px; text-transform:uppercase; letter-spacing:1px;">Total for ${dueLabel}${overdue ? ' (overdue)' : ''}</td>
+                        <td ${tdR} style="padding:6px 12px; font-family:monospace; font-weight:700; color:${dueColor};">${fmt(dg.subtotal)}</td>
+                        <td></td>
+                      </tr>`;
+                    }).join('')}
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>
+              <p style="margin:-20px 2px 20px 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Balance is orders.remaining_balance directly. Filtered to status not equal to "completed" (orders with no status set are included too, not excluded) and balance still &gt; 0. If due_date is blank, that order has no due date on file. Sorted by client (largest outstanding first), then by due date within each client.</p>
+              ` : ''}
 
               <!-- CLIENT SALES & PAYMENTS -->
               <h3 style="color:#f59e0b; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">👤 Sales & Payments by Client</h3>
