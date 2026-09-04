@@ -1814,9 +1814,21 @@ export async function GET(request: Request) {
         cursor.setDate(cursor.getDate() + 1);
       }
       const fmt = (n: number) => `₱${n.toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
+      // Compact date range for a week window, e.g. "Sep 1–6" or "Sep 1" for a single-day edge week.
+      // Windows are already clipped to this report's month (see weekWindows below), so start/end
+      // are always within monthLabel — never a previous/next-month date.
+      const fmtWeekRange = (w: { start: string; end: string }) => {
+        const s = new Date(w.start + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        if (w.start === w.end) return s;
+        const e = new Date(w.end + 'T00:00:00').toLocaleDateString('en-US', { day: 'numeric' });
+        return `${s}–${e}`;
+      };
 
       // ── Incentive scheme (flat pesos) — confirm/adjust these ──
-      const WEEKLY_INCENTIVE_AMOUNT = 500;   // per branch, per Sun–Sat week its generic-net sales meet that week's derived quota
+      const WEEKLY_INCENTIVE_AMOUNT = 500;      // per branch, per FULL Sun–Sat week (7 days) its generic-net sales meet that week's quota
+      const EDGE_WEEK_INCENTIVE_AMOUNT = 250;    // per branch, for a PARTIAL week (Wk 1 or the last week, whichever is clipped by the month
+                                                  // boundary) — the other half of that same real Sun–Sat week is credited in the adjacent
+                                                  // month's report, so each half pays half (250+250) instead of double-paying a full 500 twice
       const MONTHLY_INCENTIVE_AMOUNT = 1000; // per branch, bonus for meeting the full month's generic-net quota
       const SNACKS_WEEKLY_BUDGET = 500;      // flat weekly food/snacks budget — not tied to sales, paid regardless
 
@@ -1874,7 +1886,7 @@ export async function GET(request: Request) {
           users: string[];
           paRows: Array<{ pa: string; total: number; orders: number; pct: number }>;
           discountRows: Array<{ user: string; orders: number; totalDiscount: number; totalSales: number; avgDiscount: number; flagged: boolean }>;
-          weeklyHits: Array<WeekWindow & { actual: number; quota: number; hit: boolean }>;
+          weeklyHits: Array<WeekWindow & { actual: number; quota: number; hit: boolean; dailyQuota: number; daysHit: number; amount: number }>;
           weeksHit: number;
           weeklyIncentiveTotal: number;
           monthlyIncentiveEarned: boolean;
@@ -1883,6 +1895,9 @@ export async function GET(request: Request) {
         };
 
         const branchDataList: BranchMonthData[] = [];
+        // Org-wide day-level generic-net accumulator, used only to compute the Manager row's
+        // per-week "days hit" count against the combined (all-branches) daily quota below.
+        const orgDailyGenNetMap = new Map<string, number>();
 
         for (const b of nonOfficeBranches) {
           // Daily reports for the month — get expenses and reported_by directly from here
@@ -1891,6 +1906,11 @@ export async function GET(request: Request) {
             .select('generic_sales, branded_sales, discount_total, expenses, reported_by, report_date')
             .eq('branch_id', b.id)
             .in('report_date', monthDates);
+
+          (reports || []).forEach((r: any) => {
+            const dayNet = Number(r.generic_sales || 0) - Number(r.discount_total || 0);
+            orgDailyGenNetMap.set(r.report_date, (orgDailyGenNetMap.get(r.report_date) || 0) + dayNet);
+          });
 
           const gen = (reports || []).reduce((s, r: any) => s + Number(r.generic_sales || 0), 0);
           const brd = (reports || []).reduce((s, r: any) => s + Number(r.branded_sales || 0), 0);
@@ -1991,6 +2011,7 @@ export async function GET(request: Request) {
 
           // Weekly incentive check — bucket this branch's daily_reports into the Sun–Sat windows
           // built above, and test each window's generic-net sales against its own prorated quota.
+          const dailyQuota = Number(b.daily_generic_quota || 0);
           const weeklyHits = weekWindows.map((w) => {
             const windowReports = (reports || []).filter(
               (r: any) => r.report_date >= w.start && r.report_date <= w.end
@@ -1998,11 +2019,20 @@ export async function GET(request: Request) {
             const wGen = windowReports.reduce((s: number, r: any) => s + Number(r.generic_sales || 0), 0);
             const wDisc = windowReports.reduce((s: number, r: any) => s + Number(r.discount_total || 0), 0);
             const wActual = wGen - wDisc;
-            const wQuota = Number(b.daily_generic_quota || 0) * w.days;
-            return { ...w, actual: wActual, quota: wQuota, hit: wQuota > 0 && wActual >= wQuota };
+            const wQuota = dailyQuota * w.days;
+            // Days within this week where THAT DAY's own generic-net sales cleared the daily quota
+            // (distinct from wActual >= wQuota above, which only tests the week's combined total)
+            const daysHit = windowReports.filter(
+              (r: any) => dailyQuota > 0 && (Number(r.generic_sales || 0) - Number(r.discount_total || 0)) >= dailyQuota
+            ).length;
+            // A full 7-day window pays the full weekly amount; a clipped edge window (Wk 1 or the
+            // last week, whenever the month doesn't start/end on a Sun/Sat) pays the edge amount —
+            // its other half is this same real week's remaining days, credited in the adjacent month.
+            const amount = w.days < 7 ? EDGE_WEEK_INCENTIVE_AMOUNT : WEEKLY_INCENTIVE_AMOUNT;
+            return { ...w, actual: wActual, quota: wQuota, hit: wQuota > 0 && wActual >= wQuota, dailyQuota, daysHit, amount };
           });
           const weeksHit = weeklyHits.filter((w) => w.hit).length;
-          const weeklyIncentiveTotal = weeksHit * WEEKLY_INCENTIVE_AMOUNT;
+          const weeklyIncentiveTotal = weeklyHits.reduce((s, w) => s + (w.hit ? w.amount : 0), 0);
 
           // Monthly incentive check — reuses the same quota/generic-net figures as the Quota Report table
           const monthlyIncentiveEarned = quota > 0 && (gen - disc) >= quota;
@@ -2034,13 +2064,21 @@ export async function GET(request: Request) {
         // figures, consistent with the Quota Report's "quota as a whole" treatment of this row.
         // This is independent of individual branches' hit/miss — e.g. one branch missing its own
         // week can still be covered if others overshoot enough that the combined total clears.
+        const combinedDailyQuota = nonOfficeBranches.reduce((s: number, b: any) => s + Number(b.daily_generic_quota || 0), 0);
         const managerWeeklyHits = weekWindows.map((w, i) => {
           const wActual = branchDataList.reduce((s, d) => s + (d.weeklyHits[i]?.actual || 0), 0);
           const wQuota = branchDataList.reduce((s, d) => s + (d.weeklyHits[i]?.quota || 0), 0);
-          return { ...w, actual: wActual, quota: wQuota, hit: wQuota > 0 && wActual >= wQuota };
+          // Days within this week where the COMBINED (all-branches) generic-net sales cleared the
+          // combined daily quota — same aggregate-first logic as wActual/wQuota above, at day grain.
+          const windowDates = monthDates.filter((ds) => ds >= w.start && ds <= w.end);
+          const daysHit = windowDates.filter(
+            (ds) => combinedDailyQuota > 0 && (orgDailyGenNetMap.get(ds) || 0) >= combinedDailyQuota
+          ).length;
+          const amount = w.days < 7 ? EDGE_WEEK_INCENTIVE_AMOUNT : WEEKLY_INCENTIVE_AMOUNT;
+          return { ...w, actual: wActual, quota: wQuota, hit: wQuota > 0 && wActual >= wQuota, dailyQuota: combinedDailyQuota, daysHit, amount };
         });
         const managerWeeksHit = managerWeeklyHits.filter((w) => w.hit).length;
-        const managerWeeklyIncentiveTotal = managerWeeksHit * WEEKLY_INCENTIVE_AMOUNT;
+        const managerWeeklyIncentiveTotal = managerWeeklyHits.reduce((s, w) => s + (w.hit ? w.amount : 0), 0);
         const managerMonthlyEarned = grandQuota > 0 && grandGenNet >= grandQuota;
         const managerMonthlyAmount = managerMonthlyEarned ? MONTHLY_INCENTIVE_AMOUNT : 0;
         const managerTotalIncentive = managerWeeklyIncentiveTotal + managerMonthlyAmount;
@@ -2418,13 +2456,13 @@ export async function GET(request: Request) {
                     <thead>
                       <tr style="background:#1e293b;color:#94a3b8;text-align:left;">
                         <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Branch</th>
-                        <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Quota</th>
-                        <th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;">Wk 1</th>
-                        <th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;">Wk 2</th>
-                        <th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;">Wk 3</th>
-                        <th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;">Wk 4</th>
-                        <th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;">Wk 5</th>
-                        <th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;">Wk 6</th>
+                        <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Daily Quota</th>
+                        <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;">Wk Quota</th>
+                        ${Array.from({ length: 6 }).map((_, wi) => {
+                          const w = weekWindows[wi];
+                          if (!w) return `<th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;color:#475569;">—</th>`;
+                          return `<th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;">Wk ${wi + 1}<br><span style="font-weight:500;text-transform:none;letter-spacing:0;font-size:8px;color:#94a3b8;">${fmtWeekRange(w)}</span></th>`;
+                        }).join('')}
                         <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">Monthly (Actual vs Quota)</th>
                         <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">PA</th>
                         <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;background:#134e4a;color:#5eead4;">Total Incentive</th>
@@ -2439,13 +2477,14 @@ export async function GET(request: Request) {
                           if (!w) return `<td style="padding:8px 5px;text-align:center;background:#f8fafc;color:#cbd5e1;font-family:monospace;font-size:10px;">—</td>`;
                           const bg = w.hit ? '#dcfce7' : '#ffffff';
                           const txt = w.hit ? '#166534' : '#64748b';
-                          return `<td style="padding:8px 5px;text-align:center;background:${bg};color:${txt};font-family:monospace;font-size:10px;font-weight:${w.hit ? '800' : '400'};" title="${w.start} to ${w.end} — quota ${fmt(w.quota)}">${fmt(w.actual)}</td>`;
+                          return `<td style="padding:8px 5px;text-align:center;background:${bg};color:${txt};font-family:monospace;font-size:10px;font-weight:${w.hit ? '800' : '400'};" title="${w.start} to ${w.end} — quota ${fmt(w.quota)} — +${fmt(w.amount)} if hit">${fmt(w.actual)}<br><span style="font-size:8px;font-weight:500;color:${w.hit ? '#166534' : '#94a3b8'};">${w.daysHit}/${w.days}d</span></td>`;
                         }).join('');
                         const genNet = d.gen - d.disc;
                         const monthColor = d.monthlyIncentiveEarned ? '#16a34a' : '#dc2626';
                         const topPA = d.paRows && d.paRows.length > 0 ? d.paRows[0].pa : '—';
                         return `<tr style="background:${rowBg};border-bottom:1px solid #f1f5f9;">
                           <td style="padding:10px 8px;font-weight:700;color:#1e293b;">${d.branch.branch_name}</td>
+                          <td style="padding:10px 8px;text-align:right;font-family:monospace;color:#64748b;font-size:11px;">${fmt(Number(d.branch.daily_generic_quota || 0))}</td>
                           <td style="padding:10px 8px;text-align:right;font-family:monospace;color:#64748b;font-size:11px;">${fmt(weeklyQuotaRef)}</td>
                           ${weekCells}
                           <td style="padding:10px 8px;text-align:center;font-size:11px;font-weight:700;color:${monthColor};white-space:nowrap;">${fmt(genNet)} / ${fmt(d.quota)}</td>
@@ -2455,13 +2494,14 @@ export async function GET(request: Request) {
                       }).join('')}
                       <tr style="background:#fef3c7;border-top:2px solid #f59e0b;border-bottom:2px solid #f59e0b;">
                         <td style="padding:11px 8px;font-weight:900;color:#92400e;font-size:11px;text-transform:uppercase;letter-spacing:1px;">👔 Manager</td>
+                        <td style="padding:11px 8px;text-align:right;font-family:monospace;font-weight:700;color:#92400e;font-size:11px;">${fmt(combinedDailyQuota)}</td>
                         <td style="padding:11px 8px;text-align:right;font-family:monospace;font-weight:700;color:#92400e;font-size:11px;">${fmt(branchDataList.reduce((s, d) => s + Number(d.branch.daily_generic_quota || 0) * 7, 0))}</td>
                         ${Array.from({ length: 6 }).map((_, wi) => {
                           const w = managerWeeklyHits[wi];
                           if (!w) return `<td style="padding:8px 5px;text-align:center;background:#fffbeb;color:#fde68a;font-family:monospace;font-size:10px;">—</td>`;
                           const bg = w.hit ? '#fde68a' : '#fffbeb';
                           const txt = w.hit ? '#92400e' : '#a16207';
-                          return `<td style="padding:8px 5px;text-align:center;background:${bg};color:${txt};font-family:monospace;font-size:10px;font-weight:${w.hit ? '800' : '400'};" title="${w.start} to ${w.end} — quota ${fmt(w.quota)}">${fmt(w.actual)}</td>`;
+                          return `<td style="padding:8px 5px;text-align:center;background:${bg};color:${txt};font-family:monospace;font-size:10px;font-weight:${w.hit ? '800' : '400'};" title="${w.start} to ${w.end} — quota ${fmt(w.quota)} — +${fmt(w.amount)} if hit">${fmt(w.actual)}<br><span style="font-size:8px;font-weight:500;color:${w.hit ? '#92400e' : '#a16207'};">${w.daysHit}/${w.days}d</span></td>`;
                         }).join('')}
                         <td style="padding:11px 8px;text-align:center;font-size:11px;font-weight:800;color:${managerMonthlyEarned ? '#166534' : '#dc2626'};white-space:nowrap;">${fmt(grandGenNet)} / ${fmt(grandQuota)}</td>
                         <td style="padding:11px 8px;text-align:center;color:#92400e;font-size:11px;">—</td>
@@ -2469,17 +2509,17 @@ export async function GET(request: Request) {
                       </tr>
                       <tr style="background:#fef9c3;border-top:2px solid #eab308;border-bottom:1px solid #eab308;">
                         <td style="padding:10px 8px;font-weight:800;color:#854d0e;">🍿 Snacks Budget</td>
-                        <td colspan="9" style="padding:10px 8px;color:#a16207;font-size:11px;">Flat ₱${SNACKS_WEEKLY_BUDGET}/week × ${weekWindows.length} weeks — not performance-based</td>
+                        <td colspan="10" style="padding:10px 8px;color:#a16207;font-size:11px;">Flat ₱${SNACKS_WEEKLY_BUDGET}/week × ${weekWindows.length} weeks — not performance-based</td>
                         <td style="padding:10px 8px;text-align:right;font-family:monospace;font-weight:900;color:#854d0e;background:#fef08a;">${fmt(snacksTotal)}</td>
                       </tr>
                       <tr style="background:#1e293b;">
-                        <td colspan="10" style="padding:12px;font-weight:900;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px;">💵 Total To Give Out</td>
+                        <td colspan="11" style="padding:12px;font-weight:900;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px;">💵 Total To Give Out</td>
                         <td style="padding:12px;text-align:right;font-family:monospace;font-weight:900;font-size:14px;color:#5eead4;background:#134e4a;">${fmt(grandIncentiveWithSnacks)}</td>
                       </tr>
                     </tbody>
                   </table>
                 </div>
-                <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Quota column = the standard 7-day reference (daily quota × 7); cells for edge weeks near month boundaries are checked against a prorated version of that (fewer days = lower bar), shown on hover. Green cell = that week's generic-net sales met its quota → +₱${WEEKLY_INCENTIVE_AMOUNT}. Monthly (Actual vs Quota) uses the same figures as the Quota Report table; green text = the month's quota was met → +₱${MONTHLY_INCENTIVE_AMOUNT}. PA = each branch's top seller by sales this month. Snacks is a flat ₱${SNACKS_WEEKLY_BUDGET}/week budget regardless of performance. <strong>Manager</strong> uses combined totals across every branch, same "whole operation" logic as the Quota Report's Manager row. <strong>The three peso amounts are constants near the top of this report block</strong> — adjust them there if they're not right.</p>
+                <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Daily Quota = each branch's own daily generic-net target. Wk Quota column = the standard 7-day reference (daily quota × 7); cells for edge weeks near month boundaries are checked against a prorated version of that (fewer days = lower bar), shown on hover — the date range under each week's label is already clipped to ${monthLabel}, so a short first/last week never shows a previous/next-month date. Green cell = that week's generic-net sales met its quota → +₱${WEEKLY_INCENTIVE_AMOUNT} for a full 7-day week, or +₱${EDGE_WEEK_INCENTIVE_AMOUNT} for a partial edge week (Wk 1 or the last week, whichever is clipped by the month boundary) — its other half is that same real week's remaining days, credited the same way in the adjacent month's report, so a fully-hit split week still nets a full ₱${WEEKLY_INCENTIVE_AMOUNT} across both reports (hover a cell for its exact payout). The small "x/yd" under each amount is how many of that week's own days individually cleared the daily quota. Monthly (Actual vs Quota) uses the same figures as the Quota Report table; green text = the month's quota was met → +₱${MONTHLY_INCENTIVE_AMOUNT}. PA = each branch's top seller by sales this month. Snacks is a flat ₱${SNACKS_WEEKLY_BUDGET}/week budget regardless of performance. <strong>Manager</strong> uses combined totals across every branch — including its own days-hit, tested against the combined daily quota — same "whole operation" logic as the Quota Report's Manager row. <strong>The peso amounts are constants near the top of this report block</strong> — adjust them there if they're not right.</p>
               </div>
 
             </div>
