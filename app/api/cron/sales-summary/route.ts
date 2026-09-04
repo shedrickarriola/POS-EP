@@ -1893,7 +1893,7 @@ export async function GET(request: Request) {
           users: string[];
           paRows: Array<{ pa: string; total: number; orders: number; pct: number }>;
           discountRows: Array<{ user: string; orders: number; totalDiscount: number; totalSales: number; avgDiscount: number; flagged: boolean }>;
-          weeklyHits: Array<WeekWindow & { actual: number; quota: number; hit: boolean; dailyQuota: number; daysHit: number; amount: number }>;
+          weeklyHits: Array<WeekWindow & { actual: number; monthActual: number; quota: number; hit: boolean; dailyQuota: number; daysHit: number; amount: number }>;
           weeksHit: number;
           weeklyIncentiveTotal: number;
           monthlyIncentiveEarned: boolean;
@@ -2036,6 +2036,12 @@ export async function GET(request: Request) {
             const wGen = windowReports.reduce((s: number, r: any) => s + Number(r.generic_sales || 0), 0);
             const wDisc = windowReports.reduce((s: number, r: any) => s + Number(r.discount_total || 0), 0);
             const wActual = wGen - wDisc;
+            // Same total, but only the days that actually fall in THIS month's report — identical
+            // to wActual for a full week, smaller for an edge week (Wk 1 / the last week).
+            const monthReports = windowReports.filter((r: any) => r.report_date >= w.start && r.report_date <= w.end);
+            const monthGen = monthReports.reduce((s: number, r: any) => s + Number(r.generic_sales || 0), 0);
+            const monthDisc = monthReports.reduce((s: number, r: any) => s + Number(r.discount_total || 0), 0);
+            const monthActual = monthGen - monthDisc;
             const wQuota = dailyQuota * 7; // always the full week's quota now, never prorated
             // Days within this REAL week (up to 7) where that day's own generic-net sales cleared
             // the daily quota (distinct from wActual >= wQuota above, which tests the week's total)
@@ -2045,7 +2051,7 @@ export async function GET(request: Request) {
             // Payout tier still keyed on THIS MONTH's slice being partial (w.days < 7): the other
             // half of a split week's 500 is credited the same way in the adjacent month's report.
             const amount = w.days < 7 ? EDGE_WEEK_INCENTIVE_AMOUNT : WEEKLY_INCENTIVE_AMOUNT;
-            return { ...w, actual: wActual, quota: wQuota, hit: wQuota > 0 && wActual >= wQuota, dailyQuota, daysHit, amount };
+            return { ...w, actual: wActual, monthActual, quota: wQuota, hit: wQuota > 0 && wActual >= wQuota, dailyQuota, daysHit, amount };
           });
           const weeksHit = weeklyHits.filter((w) => w.hit).length;
           const weeklyIncentiveTotal = weeklyHits.reduce((s, w) => s + (w.hit ? w.amount : 0), 0);
@@ -2083,6 +2089,7 @@ export async function GET(request: Request) {
         const combinedDailyQuota = nonOfficeBranches.reduce((s: number, b: any) => s + Number(b.daily_generic_quota || 0), 0);
         const managerWeeklyHits = weekWindows.map((w, i) => {
           const wActual = branchDataList.reduce((s, d) => s + (d.weeklyHits[i]?.actual || 0), 0);
+          const wMonthActual = branchDataList.reduce((s, d) => s + (d.weeklyHits[i]?.monthActual || 0), 0);
           const wQuota = branchDataList.reduce((s, d) => s + (d.weeklyHits[i]?.quota || 0), 0);
           // Days within this FULL real week (may include a couple of adjacent-month days for an
           // edge week) where the COMBINED (all-branches) generic-net sales cleared the combined
@@ -2100,7 +2107,7 @@ export async function GET(request: Request) {
             (ds) => combinedDailyQuota > 0 && (orgDailyGenNetMap.get(ds) || 0) >= combinedDailyQuota
           ).length;
           const amount = w.days < 7 ? EDGE_WEEK_INCENTIVE_AMOUNT : WEEKLY_INCENTIVE_AMOUNT;
-          return { ...w, actual: wActual, quota: wQuota, hit: wQuota > 0 && wActual >= wQuota, dailyQuota: combinedDailyQuota, daysHit, amount };
+          return { ...w, actual: wActual, monthActual: wMonthActual, quota: wQuota, hit: wQuota > 0 && wActual >= wQuota, dailyQuota: combinedDailyQuota, daysHit, amount };
         });
         const managerWeeksHit = managerWeeklyHits.filter((w) => w.hit).length;
         const managerWeeklyIncentiveTotal = managerWeeklyHits.reduce((s, w) => s + (w.hit ? w.amount : 0), 0);
@@ -2502,13 +2509,16 @@ export async function GET(request: Request) {
                           if (!w) return `<td style="padding:8px 5px;text-align:center;background:#f8fafc;color:#cbd5e1;font-family:monospace;font-size:10px;">—</td>`;
                           const bg = w.hit ? '#dcfce7' : '#ffffff';
                           const txt = w.hit ? '#166534' : '#64748b';
-                          // Edge weeks (this month only shows part of the real week) get an extra
-                          // line spelling that out; a full week's "7 of 7" would be a no-op, so it's
-                          // skipped there to keep the cell at its normal 2-line height.
-                          const includedLine = w.days < 7
-                            ? `<br><span style="font-size:8px;font-weight:500;color:#94a3b8;">${w.days}/7 in rpt</span>`
+                          // Both of these are edge-week-only: a full week's days-included is always
+                          // 7/7 (not worth stating) and its whole-week total always equals the first
+                          // number anyway, so a full week renders as just the amount + hit line.
+                          const includedSuffix = w.days < 7
+                            ? ` <span style="font-size:8px;font-weight:400;color:${txt};">(${w.days}/7)</span>`
                             : '';
-                          return `<td style="padding:8px 5px;text-align:center;background:${bg};color:${txt};font-family:monospace;font-size:10px;font-weight:${w.hit ? '800' : '400'};" title="Full week ${w.realStart} to ${w.realEnd} — quota ${fmt(w.quota)} — +${fmt(w.amount)} if hit">${fmt(w.actual)}${includedLine}<br><span style="font-size:8px;font-weight:500;color:${w.hit ? '#166534' : '#94a3b8'};">${w.daysHit}/7 hit</span></td>`;
+                          const wholeWeekLine = w.days < 7
+                            ? `<br><span style="font-size:8px;font-weight:500;color:${txt};">${fmt(w.actual)} wk total</span>`
+                            : '';
+                          return `<td style="padding:8px 5px;text-align:center;background:${bg};color:${txt};font-family:monospace;font-size:10px;font-weight:${w.hit ? '800' : '400'};" title="Full week ${w.realStart} to ${w.realEnd} — quota ${fmt(w.quota)} — +${fmt(w.amount)} if hit">${fmt(w.monthActual)}${includedSuffix}${wholeWeekLine}<br><span style="font-size:8px;font-weight:500;color:${w.hit ? '#166534' : '#94a3b8'};">${w.daysHit}/7 hit</span></td>`;
                         }).join('');
                         const genNet = d.gen - d.disc;
                         const monthColor = d.monthlyIncentiveEarned ? '#16a34a' : '#dc2626';
@@ -2532,10 +2542,13 @@ export async function GET(request: Request) {
                           if (!w) return `<td style="padding:8px 5px;text-align:center;background:#fffbeb;color:#fde68a;font-family:monospace;font-size:10px;">—</td>`;
                           const bg = w.hit ? '#fde68a' : '#fffbeb';
                           const txt = w.hit ? '#92400e' : '#a16207';
-                          const includedLine = w.days < 7
-                            ? `<br><span style="font-size:8px;font-weight:500;color:#a16207;">${w.days}/7 in rpt</span>`
+                          const includedSuffix = w.days < 7
+                            ? ` <span style="font-size:8px;font-weight:400;color:${txt};">(${w.days}/7)</span>`
                             : '';
-                          return `<td style="padding:8px 5px;text-align:center;background:${bg};color:${txt};font-family:monospace;font-size:10px;font-weight:${w.hit ? '800' : '400'};" title="Full week ${w.realStart} to ${w.realEnd} — quota ${fmt(w.quota)} — +${fmt(w.amount)} if hit">${fmt(w.actual)}${includedLine}<br><span style="font-size:8px;font-weight:500;color:${w.hit ? '#92400e' : '#a16207'};">${w.daysHit}/7 hit</span></td>`;
+                          const wholeWeekLine = w.days < 7
+                            ? `<br><span style="font-size:8px;font-weight:500;color:${txt};">${fmt(w.actual)} wk total</span>`
+                            : '';
+                          return `<td style="padding:8px 5px;text-align:center;background:${bg};color:${txt};font-family:monospace;font-size:10px;font-weight:${w.hit ? '800' : '400'};" title="Full week ${w.realStart} to ${w.realEnd} — quota ${fmt(w.quota)} — +${fmt(w.amount)} if hit">${fmt(w.monthActual)}${includedSuffix}${wholeWeekLine}<br><span style="font-size:8px;font-weight:500;color:${w.hit ? '#92400e' : '#a16207'};">${w.daysHit}/7 hit</span></td>`;
                         }).join('')}
                         <td style="padding:11px 8px;text-align:center;font-size:11px;font-weight:800;color:${managerMonthlyEarned ? '#166534' : '#dc2626'};white-space:nowrap;">${fmt(grandGenNet)} / ${fmt(grandQuota)}</td>
                         <td style="padding:11px 8px;text-align:center;color:#92400e;font-size:11px;">—</td>
@@ -2553,7 +2566,7 @@ export async function GET(request: Request) {
                     </tbody>
                   </table>
                 </div>
-                <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Daily Quota = each branch's own daily generic-net target. Wk Quota column = the standard 7-day reference (daily quota × 7). Every week — including Wk 1 or the last week when the month doesn't start/end on a Sun/Sat — is checked against its FULL real Sun–Sat week's sales, even the day or two that spill into the adjacent month (hover a cell for the exact range); only the date shown under each week's label stays clipped to ${monthLabel}, so the label itself never shows a previous/next-month date even though the underlying check does look at those days. Green cell = that week's generic-net sales met its (always full, never prorated) quota → +₱${WEEKLY_INCENTIVE_AMOUNT} for a full 7-day week, or +₱${EDGE_WEEK_INCENTIVE_AMOUNT} for a partial edge week (Wk 1 or the last week, whichever this month only shows part of) — its other half is that same real week's remaining days, credited the same way in the adjacent month's report, so a fully-hit split week still nets a full ₱${WEEKLY_INCENTIVE_AMOUNT} across both reports (hover a cell for its exact payout). The "x/7 hit" under each amount is how many of that real week's 7 days individually cleared the daily quota; an edge week also gets an "x/7 in rpt" line above it showing how many of those 7 days actually fall in this month's report (a full week skips that line since it'd always just read "7/7"). Monthly (Actual vs Quota) uses the same figures as the Quota Report table; green text = the month's quota was met → +₱${MONTHLY_INCENTIVE_AMOUNT}. PA = each branch's top seller by sales this month. Snacks is a flat ₱${SNACKS_WEEKLY_BUDGET}/week budget regardless of performance. <strong>Manager</strong> uses combined totals across every branch — including its own days-hit, tested against the combined daily quota — same "whole operation" logic as the Quota Report's Manager row. <strong>The peso amounts are constants near the top of this report block</strong> — adjust them there if they're not right.</p>
+                <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Daily Quota = each branch's own daily generic-net target. Wk Quota column = the standard 7-day reference (daily quota × 7). Every week — including Wk 1 or the last week when the month doesn't start/end on a Sun/Sat — is checked against its FULL real Sun–Sat week's sales, even the day or two that spill into the adjacent month (hover a cell for the exact range); only the date shown under each week's label stays clipped to ${monthLabel}, so the label itself never shows a previous/next-month date even though the underlying check does look at those days. Green cell = that week's generic-net sales met its (always full, never prorated) quota → +₱${WEEKLY_INCENTIVE_AMOUNT} for a full 7-day week, or +₱${EDGE_WEEK_INCENTIVE_AMOUNT} for a partial edge week (Wk 1 or the last week, whichever this month only shows part of) — its other half is that same real week's remaining days, credited the same way in the adjacent month's report, so a fully-hit split week still nets a full ₱${WEEKLY_INCENTIVE_AMOUNT} across both reports (hover a cell for its exact payout). Each week cell shows the generic-net sales for just the days that fall in this month's report; for a split week (Wk 1 or the last week, whichever this month only shows part of), a "(x/7)" next to it says how many of that real week's 7 days that is, plus a "wk total" line below with the full real week's total. A full week shows neither — it's trivially all 7 days already. Every cell ends with "x/7 hit" (how many of the 7 real days individually cleared the daily quota). Quota itself isn't repeated per cell — see the Daily Quota / Wk Quota columns for that. Monthly (Actual vs Quota) uses the same figures as the Quota Report table; green text = the month's quota was met → +₱${MONTHLY_INCENTIVE_AMOUNT}. PA = each branch's top seller by sales this month. Snacks is a flat ₱${SNACKS_WEEKLY_BUDGET}/week budget regardless of performance. <strong>Manager</strong> uses combined totals across every branch — including its own days-hit, tested against the combined daily quota — same "whole operation" logic as the Quota Report's Manager row. <strong>The peso amounts are constants near the top of this report block</strong> — adjust them there if they're not right.</p>
               </div>
 
             </div>
