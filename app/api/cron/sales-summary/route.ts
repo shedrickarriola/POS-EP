@@ -1899,7 +1899,7 @@ export async function GET(request: Request) {
           monthlyIncentiveEarned: boolean;
           monthlyIncentiveAmount: number;
           totalIncentive: number;
-          shiftUsers: Array<{ name: string; weeklyGenNet: number[]; monthGenNet: number; avgTimeIn: string; avgTimeOut: string; days: number }>;
+          shiftUsers: Array<{ name: string; weeklyGenNet: number[]; weeklyDays: Array<Array<{ date: string; amount: number }>>; monthGenNet: number; avgTimeIn: string; avgTimeOut: string; days: number }>;
         };
 
         const branchDataList: BranchMonthData[] = [];
@@ -2097,15 +2097,21 @@ export async function GET(request: Request) {
             return h * 60 + m;
           };
 
-          const shiftUserMap = new Map<string, { weeklyGenNet: number[]; monthGenNet: number; timeInMin: number[]; timeOutMin: number[]; days: number }>();
+          type DayContribution = { date: string; amount: number };
+          const shiftUserMap = new Map<string, { weeklyGenNet: number[]; weeklyDays: DayContribution[][]; monthGenNet: number; timeInMin: number[]; timeOutMin: number[]; days: number }>();
           shiftByUserDay.forEach((e) => {
             if (e.times.length < 2) return; // single stray order — not treated as a worked shift
             const sorted = [...e.times].sort((a, b) => a.getTime() - b.getTime());
             const wi = weekWindows.findIndex((w) => e.day >= w.realStart && e.day <= w.realEnd);
             const entry = shiftUserMap.get(e.user) || {
-              weeklyGenNet: new Array(weekWindows.length).fill(0), monthGenNet: 0, timeInMin: [], timeOutMin: [], days: 0,
+              weeklyGenNet: new Array(weekWindows.length).fill(0),
+              weeklyDays: weekWindows.map(() => [] as DayContribution[]),
+              monthGenNet: 0, timeInMin: [], timeOutMin: [], days: 0,
             };
-            if (wi >= 0) entry.weeklyGenNet[wi] += e.genNet;
+            if (wi >= 0) {
+              entry.weeklyGenNet[wi] += e.genNet;
+              entry.weeklyDays[wi].push({ date: e.day, amount: e.genNet });
+            }
             if (e.day >= monthStart && e.day <= monthEnd) entry.monthGenNet += e.genNet;
             entry.timeInMin.push(minutesPHT(sorted[0]));
             entry.timeOutMin.push(minutesPHT(sorted[sorted.length - 1]));
@@ -2136,6 +2142,7 @@ export async function GET(request: Request) {
             .map(([email, e]) => ({
               name: shiftNameMap.get(email) || email,
               weeklyGenNet: e.weeklyGenNet,
+              weeklyDays: e.weeklyDays.map((days) => [...days].sort((a, b) => a.date.localeCompare(b.date))),
               monthGenNet: e.monthGenNet,
               avgTimeIn: fmtMinutes(e.timeInMin.reduce((s, x) => s + x, 0) / e.timeInMin.length),
               avgTimeOut: fmtMinutes(e.timeOutMin.reduce((s, x) => s + x, 0) / e.timeOutMin.length),
@@ -2614,9 +2621,15 @@ export async function GET(request: Request) {
                           <td style="padding:10px 8px;color:#374151;font-size:11px;max-width:70px;overflow-wrap:break-word;word-break:break-word;">${topPA}</td>
                           <td style="padding:10px 8px;text-align:right;font-family:monospace;font-weight:900;color:#0f766e;background:#f0fdfa;">${fmt(d.totalIncentive)}</td>
                         </tr>${(d.shiftUsers || []).map((su) => {
+                          const fmtShort = (n: number) => n.toLocaleString('en-PH', { maximumFractionDigits: 0 });
                           const weekTds = Array.from({ length: 6 }).map((_, wi) => {
                             const val = su.weeklyGenNet[wi] || 0;
-                            return `<td style="padding:5px;text-align:center;background:#f8fafc;color:#94a3b8;font-family:monospace;font-size:9px;">${val > 0 ? fmt(val) : '—'}</td>`;
+                            if (val <= 0) return `<td style="padding:5px;text-align:center;background:#f8fafc;color:#cbd5e1;font-family:monospace;font-size:9px;">—</td>`;
+                            const dayList = (su.weeklyDays[wi] || []).map((dc) => {
+                              const shortDate = new Date(dc.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
+                              return `<div>${shortDate}: ${fmtShort(dc.amount)}</div>`;
+                            }).join('');
+                            return `<td style="padding:5px;text-align:center;background:#f8fafc;color:#94a3b8;font-family:monospace;font-size:9px;"><strong style="color:#64748b;">${fmt(val)}</strong><div style="margin-top:2px;font-size:8px;color:#94a3b8;line-height:1.4;">${dayList}</div></td>`;
                           }).join('');
                           return `<tr style="background:#f8fafc;border-bottom:1px solid #f1f5f9;">
                             <td style="padding:5px 8px 5px 20px;color:#64748b;font-size:10px;font-style:italic;">↳ ${su.name} <span style="color:#94a3b8;">(${su.avgTimeIn}–${su.avgTimeOut})</span></td>
