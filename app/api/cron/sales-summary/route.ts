@@ -1882,6 +1882,13 @@ export async function GET(request: Request) {
         );
         if (!nonOfficeBranches || nonOfficeBranches.length === 0) continue;
 
+        // Shared shape for one AM/PM/Whole-Day bucket, used both per-week (in shiftBreakdown) and
+        // for the monthly rollup (monthlyByType) further down.
+        type ShiftBucketType = {
+          total: number; quota: number; daysHit: number; daysTotal: number;
+          entries: Array<{ date: string; email: string; name: string; timeIn: string; timeOut: string; amount: number; dayQuota: number; hit: boolean }>;
+        };
+
         // ── Per-branch data ──
         // For TABLE 1 (cash vs PO) and TABLE 2 (branch summary) and TABLE 3 (PO per branch per supplier)
         type BranchMonthData = {
@@ -1899,11 +1906,9 @@ export async function GET(request: Request) {
           monthlyIncentiveEarned: boolean;
           monthlyIncentiveAmount: number;
           totalIncentive: number;
-          shiftUsers: Array<{
-            email: string; name: string; weeklyGenNet: number[]; weeklyQuota: number[];
-            weeklyDays: Array<Array<{ date: string; amount: number; shiftLabel: string; dayQuota: number; hit: boolean }>>;
-            monthGenNet: number; monthQuota: number; avgTimeIn: string; avgTimeOut: string; days: number;
-          }>;
+          shiftBreakdown: Array<{ AM: ShiftBucketType; PM: ShiftBucketType; WHOLE: ShiftBucketType }>;
+          monthlyByType: { AM: ShiftBucketType; PM: ShiftBucketType; WHOLE: ShiftBucketType };
+          hasAM: boolean; hasPM: boolean; hasWhole: boolean;
         };
 
         const branchDataList: BranchMonthData[] = [];
@@ -2158,36 +2163,8 @@ export async function GET(request: Request) {
             }
           });
 
-          type DayContribution = { date: string; amount: number; shiftLabel: string; dayQuota: number; hit: boolean };
-          const shiftUserMap = new Map<string, {
-            weeklyGenNet: number[]; weeklyQuota: number[]; weeklyDays: DayContribution[][];
-            monthGenNet: number; monthQuota: number; timeInMin: number[]; timeOutMin: number[]; days: number;
-          }>();
-          userDayRecords.forEach((r) => {
-            const wi = weekWindows.findIndex((w) => r.day >= w.realStart && r.day <= w.realEnd);
-            const entry = shiftUserMap.get(r.user) || {
-              weeklyGenNet: new Array(weekWindows.length).fill(0),
-              weeklyQuota: new Array(weekWindows.length).fill(0),
-              weeklyDays: weekWindows.map(() => [] as DayContribution[]),
-              monthGenNet: 0, monthQuota: 0, timeInMin: [], timeOutMin: [], days: 0,
-            };
-            if (wi >= 0) {
-              entry.weeklyGenNet[wi] += r.genNet;
-              entry.weeklyQuota[wi] += r.dayQuota;
-              entry.weeklyDays[wi].push({ date: r.day, amount: r.genNet, shiftLabel: r.shiftLabel, dayQuota: r.dayQuota, hit: r.hit });
-            }
-            if (r.day >= monthStart && r.day <= monthEnd) {
-              entry.monthGenNet += r.genNet;
-              entry.monthQuota += r.dayQuota;
-            }
-            entry.timeInMin.push(r.timeInMin);
-            entry.timeOutMin.push(r.timeOutMin);
-            entry.days += 1;
-            shiftUserMap.set(r.user, entry);
-          });
-
-          const fmtMinutes = (avgMin: number) => {
-            const m = Math.round(avgMin) % 1440;
+          const fmtMinutes = (mins: number) => {
+            const m = Math.round(mins) % 1440;
             const h24 = Math.floor(m / 60);
             const min = m % 60;
             const period = h24 >= 12 ? 'PM' : 'AM';
@@ -2195,29 +2172,51 @@ export async function GET(request: Request) {
             return `${h12}:${String(min).padStart(2, '0')} ${period}`;
           };
 
-          const shiftUserEmails = Array.from(shiftUserMap.keys());
-          shiftUserEmails.forEach((email) => allShiftEmails.add(email));
+          // Organized by week first (matching the Wk1-6 columns already in this table), then by
+          // shift type within that week — AM / PM only exist for days that actually split that way;
+          // Whole Day covers days with a single qualifying worker. UNSPLIT (3+ in one day) has no
+          // defined quota, so those days are left out of this breakdown entirely.
+          type ShiftEntry = { date: string; email: string; name: string; timeIn: string; timeOut: string; amount: number; dayQuota: number; hit: boolean };
+          type ShiftBucket = { total: number; quota: number; daysHit: number; daysTotal: number; entries: ShiftEntry[] };
+          const makeBucket = (): ShiftBucket => ({ total: 0, quota: 0, daysHit: 0, daysTotal: 0, entries: [] });
+          const shiftBreakdown: Array<{ AM: ShiftBucket; PM: ShiftBucket; WHOLE: ShiftBucket }> =
+            weekWindows.map(() => ({ AM: makeBucket(), PM: makeBucket(), WHOLE: makeBucket() }));
+          const monthlyByType = { AM: makeBucket(), PM: makeBucket(), WHOLE: makeBucket() };
 
-          const shiftUsers = Array.from(shiftUserMap.entries())
-            .map(([email, e]) => ({
-              email,
-              name: email, // resolved in one batched profiles lookup after the branch loop below
-              weeklyGenNet: e.weeklyGenNet,
-              weeklyQuota: e.weeklyQuota,
-              weeklyDays: e.weeklyDays.map((days) => [...days].sort((a, b) => a.date.localeCompare(b.date))),
-              monthGenNet: e.monthGenNet,
-              monthQuota: e.monthQuota,
-              avgTimeIn: fmtMinutes(e.timeInMin.reduce((s, x) => s + x, 0) / e.timeInMin.length),
-              avgTimeOut: fmtMinutes(e.timeOutMin.reduce((s, x) => s + x, 0) / e.timeOutMin.length),
-              days: e.days,
-            }))
-            .sort((a, b) => b.monthGenNet - a.monthGenNet);
+          userDayRecords.forEach((r) => {
+            if (r.shiftLabel === 'UNSPLIT') return;
+            const typeKey = r.shiftLabel as 'AM' | 'PM' | 'WHOLE';
+            const entry: ShiftEntry = {
+              date: r.day, email: r.user, name: r.user, // name resolved after the branch loop, batched
+              timeIn: fmtMinutes(r.timeInMin), timeOut: fmtMinutes(r.timeOutMin),
+              amount: r.genNet, dayQuota: r.dayQuota, hit: r.hit,
+            };
+            allShiftEmails.add(r.user);
+            const wi = weekWindows.findIndex((w) => r.day >= w.realStart && r.day <= w.realEnd);
+            if (wi >= 0) {
+              const bucket = shiftBreakdown[wi][typeKey];
+              bucket.total += r.genNet;
+              bucket.quota += r.dayQuota;
+              bucket.daysTotal += 1;
+              if (r.hit) bucket.daysHit += 1;
+              bucket.entries.push(entry);
+            }
+            if (r.day >= monthStart && r.day <= monthEnd) {
+              const mBucket = monthlyByType[typeKey];
+              mBucket.total += r.genNet;
+              mBucket.quota += r.dayQuota;
+            }
+          });
+          shiftBreakdown.forEach((week) => {
+            (['AM', 'PM', 'WHOLE'] as const).forEach((k) => week[k].entries.sort((a, b) => a.date.localeCompare(b.date)));
+          });
+          const hasShiftType = (k: 'AM' | 'PM' | 'WHOLE') => shiftBreakdown.some((w) => w[k].entries.length > 0);
 
           branchDataList.push({
             branch: b, gen, brd, disc, totalSales, totalExp, actual, quota, poTotal, poBrd, poBySupplier,
             users: uniqueUsers, paRows, discountRows,
             weeklyHits, weeksHit, weeklyIncentiveTotal, monthlyIncentiveEarned, monthlyIncentiveAmount, totalIncentive,
-            shiftUsers,
+            shiftBreakdown, monthlyByType, hasAM: hasShiftType('AM'), hasPM: hasShiftType('PM'), hasWhole: hasShiftType('WHOLE'),
           });
         } // end per-branch loop
 
@@ -2232,8 +2231,12 @@ export async function GET(request: Request) {
           const globalShiftNameMap = new Map<string, string>();
           (allShiftProfiles || []).forEach((p: any) => globalShiftNameMap.set(p.email, p.full_name));
           branchDataList.forEach((d) => {
-            d.shiftUsers.forEach((su) => {
-              su.name = globalShiftNameMap.get(su.email) || su.email;
+            d.shiftBreakdown.forEach((week) => {
+              (['AM', 'PM', 'WHOLE'] as const).forEach((k) => {
+                week[k].entries.forEach((en) => {
+                  en.name = globalShiftNameMap.get(en.email) || en.email;
+                });
+              });
             });
           });
         }
@@ -2700,32 +2703,32 @@ export async function GET(request: Request) {
                           <td style="padding:10px 8px;text-align:center;font-size:11px;font-weight:700;color:${monthColor};white-space:nowrap;">${fmt(genNet)} / ${fmt(d.quota)}</td>
                           <td style="padding:10px 8px;color:#374151;font-size:11px;max-width:70px;overflow-wrap:break-word;word-break:break-word;">${topPA}</td>
                           <td style="padding:10px 8px;text-align:right;font-family:monospace;font-weight:900;color:#0f766e;background:#f0fdfa;">${fmt(d.totalIncentive)}</td>
-                        </tr>${(d.shiftUsers || []).map((su) => {
+                        </tr>${(['AM', 'PM', 'WHOLE'] as const).filter((k) => (k === 'AM' && d.hasAM) || (k === 'PM' && d.hasPM) || (k === 'WHOLE' && d.hasWhole)).map((typeKey) => {
                           const fmtShort = (n: number) => n.toLocaleString('en-PH', { maximumFractionDigits: 0 });
+                          const label = typeKey === 'WHOLE' ? 'Whole Day' : typeKey;
                           const weekTds = Array.from({ length: 6 }).map((_, wi) => {
-                            const val = su.weeklyGenNet[wi] || 0;
-                            if (val <= 0) return `<td style="padding:5px;text-align:center;background:#f8fafc;color:#cbd5e1;font-family:monospace;font-size:9px;">—</td>`;
-                            const wq = su.weeklyQuota[wi] || 0;
-                            const weekHit = wq > 0 && val >= wq;
-                            const bg = wq > 0 ? (weekHit ? '#dcfce7' : '#ffffff') : '#f8fafc';
-                            const totalColor = wq > 0 ? (weekHit ? '#166534' : '#64748b') : '#64748b';
-                            const dayList = (su.weeklyDays[wi] || []).map((dc) => {
-                              const shortDate = new Date(dc.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
-                              const tag = dc.shiftLabel === 'AM' || dc.shiftLabel === 'PM' ? ` ${dc.shiftLabel}` : '';
-                              const mark = dc.dayQuota > 0 ? (dc.hit ? ' ✓' : ' ✗') : '';
-                              const lineColor = dc.dayQuota > 0 ? (dc.hit ? '#16a34a' : '#94a3b8') : '#94a3b8';
-                              return `<div style="color:${lineColor};">${shortDate}${tag}: ${fmtShort(dc.amount)}${mark}</div>`;
+                            const bucket = d.shiftBreakdown[wi]?.[typeKey];
+                            if (!bucket || bucket.entries.length === 0) return `<td style="padding:5px;text-align:center;background:#f8fafc;color:#cbd5e1;font-family:monospace;font-size:9px;">—</td>`;
+                            const weekHit = bucket.quota > 0 && bucket.total >= bucket.quota;
+                            const bg = bucket.quota > 0 ? (weekHit ? '#dcfce7' : '#ffffff') : '#f8fafc';
+                            const totalColor = bucket.quota > 0 ? (weekHit ? '#166534' : '#64748b') : '#64748b';
+                            const entryList = bucket.entries.map((en) => {
+                              const shortDate = new Date(en.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
+                              const mark = en.dayQuota > 0 ? (en.hit ? ' ✓' : ' ✗') : '';
+                              const lineColor = en.dayQuota > 0 ? (en.hit ? '#16a34a' : '#94a3b8') : '#94a3b8';
+                              return `<div style="color:${lineColor};text-align:left;">${shortDate} ${en.name} ${en.timeIn}–${en.timeOut}: ${fmtShort(en.amount)}${mark}</div>`;
                             }).join('');
-                            return `<td style="padding:5px;text-align:center;background:${bg};font-family:monospace;font-size:9px;"><strong style="color:${totalColor};">${fmt(val)}</strong><div style="margin-top:2px;font-size:8px;line-height:1.4;">${dayList}</div></td>`;
+                            return `<td style="padding:5px;text-align:center;background:${bg};font-family:monospace;font-size:9px;"><strong style="color:${totalColor};">${fmt(bucket.total)}</strong><div style="font-size:7px;color:#94a3b8;">${bucket.daysHit}/${bucket.daysTotal} hit</div><div style="margin-top:2px;font-size:8px;line-height:1.4;">${entryList}</div></td>`;
                           }).join('');
-                          const monthHit = su.monthQuota > 0 && su.monthGenNet >= su.monthQuota;
-                          const monthCellColor = su.monthQuota > 0 ? (monthHit ? '#16a34a' : '#dc2626') : '#64748b';
+                          const mo = d.monthlyByType[typeKey];
+                          const moHit = mo.quota > 0 && mo.total >= mo.quota;
+                          const moColor = mo.quota > 0 ? (moHit ? '#16a34a' : '#dc2626') : '#64748b';
                           return `<tr style="background:#f8fafc;border-bottom:1px solid #f1f5f9;">
-                            <td style="padding:5px 8px 5px 20px;color:#64748b;font-size:10px;font-style:italic;">↳ ${su.name} <span style="color:#94a3b8;">(${su.avgTimeIn}–${su.avgTimeOut})</span></td>
+                            <td style="padding:5px 8px 5px 20px;color:#64748b;font-size:10px;font-style:italic;">↳ ${label}</td>
                             <td style="padding:5px 8px;text-align:right;color:#cbd5e1;font-size:10px;">—</td>
                             <td style="padding:5px 8px;text-align:right;color:#cbd5e1;font-size:10px;">—</td>
                             ${weekTds}
-                            <td style="padding:5px 8px;text-align:center;font-family:monospace;font-size:10px;font-weight:${su.monthQuota > 0 ? '700' : '400'};color:${monthCellColor};white-space:nowrap;">${fmt(su.monthGenNet)}${su.monthQuota > 0 ? ' / ' + fmt(su.monthQuota) : ''}</td>
+                            <td style="padding:5px 8px;text-align:center;font-family:monospace;font-size:10px;font-weight:${mo.quota > 0 ? '700' : '400'};color:${moColor};white-space:nowrap;">${fmt(mo.total)}${mo.quota > 0 ? ' / ' + fmt(mo.quota) : ''}</td>
                             <td style="padding:5px 8px;text-align:center;color:#cbd5e1;font-size:10px;">—</td>
                             <td style="padding:5px 8px;text-align:right;color:#cbd5e1;font-size:10px;">—</td>
                           </tr>`;
