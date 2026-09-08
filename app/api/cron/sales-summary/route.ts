@@ -1831,6 +1831,7 @@ export async function GET(request: Request) {
                                                   // month's report, so each half pays half (250+250) instead of double-paying a full 500 twice
       const MONTHLY_INCENTIVE_AMOUNT = 1000; // per branch, bonus for meeting the full month's generic-net quota
       const SNACKS_WEEKLY_BUDGET = 500;      // flat weekly food/snacks budget — not tied to sales, paid regardless
+      const SHIFT_DAY_INCENTIVE_AMOUNT = 100; // per person, per day that month they hit their assigned AM/PM/Whole Day quota
 
       // Sunday–Saturday week windows overlapping this month, clipped to the month's own start/end
       // (edge weeks can be short, e.g. 1–2 days, if the month doesn't start/end on a Sunday — the
@@ -1908,6 +1909,7 @@ export async function GET(request: Request) {
           totalIncentive: number;
           shiftBreakdown: Array<{ AM: ShiftBucketType; PM: ShiftBucketType; WHOLE: ShiftBucketType }>;
           monthlyByType: { AM: ShiftBucketType; PM: ShiftBucketType; WHOLE: ShiftBucketType };
+          monthlyIncentiveByType: { AM: Array<{ email: string; name: string; hitDates: string[] }>; PM: Array<{ email: string; name: string; hitDates: string[] }>; WHOLE: Array<{ email: string; name: string; hitDates: string[] }> };
           hasAM: boolean; hasPM: boolean; hasWhole: boolean;
         };
 
@@ -2147,8 +2149,17 @@ export async function GET(request: Request) {
           });
 
           const branchDailyQuota = Number(b.daily_generic_quota || 0);
+          // Only branches explicitly flagged is_multi_shift = true get AM/PM split detection at
+          // all. Without that flag, a branch always classifies as whole-day, no matter how many
+          // distinct people happen to place orders there in a day (a manager or auditor stepping in
+          // alongside the regular staff shouldn't look like a second shift).
+          const branchIsMultiShift = b.is_multi_shift === true;
           const userDayRecords: UserDayRecord[] = [];
           byDay.forEach((entries) => {
+            if (!branchIsMultiShift) {
+              entries.forEach((r) => userDayRecords.push({ ...r, shiftLabel: 'WHOLE', dayQuota: branchDailyQuota, hit: branchDailyQuota > 0 && r.genNet >= branchDailyQuota }));
+              return;
+            }
             if (entries.length === 1) {
               const r = entries[0];
               userDayRecords.push({ ...r, shiftLabel: 'WHOLE', dayQuota: branchDailyQuota, hit: branchDailyQuota > 0 && r.genNet >= branchDailyQuota });
@@ -2182,6 +2193,9 @@ export async function GET(request: Request) {
           const shiftBreakdown: Array<{ AM: ShiftBucket; PM: ShiftBucket; WHOLE: ShiftBucket }> =
             weekWindows.map(() => ({ AM: makeBucket(), PM: makeBucket(), WHOLE: makeBucket() }));
           const monthlyByType = { AM: makeBucket(), PM: makeBucket(), WHOLE: makeBucket() };
+          // Per person, per shift type: which dates THIS MONTH they hit their assigned quota —
+          // feeds the 100/day incentive shown in the shift row's Total Incentive column.
+          const incentiveMaps = { AM: new Map<string, string[]>(), PM: new Map<string, string[]>(), WHOLE: new Map<string, string[]>() };
 
           userDayRecords.forEach((r) => {
             if (r.shiftLabel === 'UNSPLIT') return;
@@ -2205,8 +2219,18 @@ export async function GET(request: Request) {
               const mBucket = monthlyByType[typeKey];
               mBucket.total += r.genNet;
               mBucket.quota += r.dayQuota;
+              if (r.hit) {
+                const dates = incentiveMaps[typeKey].get(r.user) || [];
+                dates.push(r.day);
+                incentiveMaps[typeKey].set(r.user, dates);
+              }
             }
           });
+          const monthlyIncentiveByType = {
+            AM: Array.from(incentiveMaps.AM.entries()).map(([email, hitDates]) => ({ email, name: email, hitDates: [...hitDates].sort() })),
+            PM: Array.from(incentiveMaps.PM.entries()).map(([email, hitDates]) => ({ email, name: email, hitDates: [...hitDates].sort() })),
+            WHOLE: Array.from(incentiveMaps.WHOLE.entries()).map(([email, hitDates]) => ({ email, name: email, hitDates: [...hitDates].sort() })),
+          };
           shiftBreakdown.forEach((week) => {
             (['AM', 'PM', 'WHOLE'] as const).forEach((k) => week[k].entries.sort((a, b) => a.date.localeCompare(b.date)));
           });
@@ -2216,7 +2240,7 @@ export async function GET(request: Request) {
             branch: b, gen, brd, disc, totalSales, totalExp, actual, quota, poTotal, poBrd, poBySupplier,
             users: uniqueUsers, paRows, discountRows,
             weeklyHits, weeksHit, weeklyIncentiveTotal, monthlyIncentiveEarned, monthlyIncentiveAmount, totalIncentive,
-            shiftBreakdown, monthlyByType, hasAM: hasShiftType('AM'), hasPM: hasShiftType('PM'), hasWhole: hasShiftType('WHOLE'),
+            shiftBreakdown, monthlyByType, monthlyIncentiveByType, hasAM: hasShiftType('AM'), hasPM: hasShiftType('PM'), hasWhole: hasShiftType('WHOLE'),
           });
         } // end per-branch loop
 
@@ -2236,6 +2260,11 @@ export async function GET(request: Request) {
                 week[k].entries.forEach((en) => {
                   en.name = globalShiftNameMap.get(en.email) || en.email;
                 });
+              });
+            });
+            (['AM', 'PM', 'WHOLE'] as const).forEach((k) => {
+              d.monthlyIncentiveByType[k].forEach((p) => {
+                p.name = globalShiftNameMap.get(p.email) || p.email;
               });
             });
           });
@@ -2668,7 +2697,6 @@ export async function GET(request: Request) {
                           return `<th style="padding:8px 5px;font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;text-align:center;">Wk ${wi + 1}<br><span style="font-weight:500;text-transform:none;letter-spacing:0;font-size:8px;color:#94a3b8;">${fmtWeekRange(w)}</span></th>`;
                         }).join('')}
                         <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center;">Monthly (Actual vs Quota)</th>
-                        <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;max-width:70px;">PA</th>
                         <th style="padding:10px 8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:right;background:#134e4a;color:#5eead4;">Total Incentive</th>
                       </tr>
                     </thead>
@@ -2694,14 +2722,12 @@ export async function GET(request: Request) {
                         }).join('');
                         const genNet = d.gen - d.disc;
                         const monthColor = d.monthlyIncentiveEarned ? '#16a34a' : '#dc2626';
-                        const topPA = d.paRows && d.paRows.length > 0 ? d.paRows[0].pa : '—';
                         return `<tr style="background:${rowBg};border-bottom:1px solid #f1f5f9;">
                           <td style="padding:10px 8px;font-weight:700;color:#1e293b;">${d.branch.branch_name}</td>
                           <td style="padding:10px 8px;text-align:right;font-family:monospace;color:#64748b;font-size:11px;">${fmt(Number(d.branch.daily_generic_quota || 0))}</td>
                           <td style="padding:10px 8px;text-align:right;font-family:monospace;color:#64748b;font-size:11px;">${fmt(weeklyQuotaRef)}</td>
                           ${weekCells}
                           <td style="padding:10px 8px;text-align:center;font-size:11px;font-weight:700;color:${monthColor};white-space:nowrap;">${fmt(genNet)} / ${fmt(d.quota)}</td>
-                          <td style="padding:10px 8px;color:#374151;font-size:11px;max-width:70px;overflow-wrap:break-word;word-break:break-word;">${topPA}</td>
                           <td style="padding:10px 8px;text-align:right;font-family:monospace;font-weight:900;color:#0f766e;background:#f0fdfa;">${fmt(d.totalIncentive)}</td>
                         </tr>${(['AM', 'PM', 'WHOLE'] as const).filter((k) => (k === 'AM' && d.hasAM) || (k === 'PM' && d.hasPM) || (k === 'WHOLE' && d.hasWhole)).map((typeKey) => {
                           const fmtShort = (n: number) => n.toLocaleString('en-PH', { maximumFractionDigits: 0 });
@@ -2723,14 +2749,17 @@ export async function GET(request: Request) {
                           const mo = d.monthlyByType[typeKey];
                           const moHit = mo.quota > 0 && mo.total >= mo.quota;
                           const moColor = mo.quota > 0 ? (moHit ? '#16a34a' : '#dc2626') : '#64748b';
+                          const incentiveList = (d.monthlyIncentiveByType[typeKey] || []).map((p) => {
+                            const dates = p.hitDates.map((dt) => new Date(dt + 'T00:00:00').toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })).join(', ');
+                            return `<div>${p.name}: ${fmt(p.hitDates.length * SHIFT_DAY_INCENTIVE_AMOUNT)}<br><span style="color:#5eead4;">(${dates})</span></div>`;
+                          }).join('');
                           return `<tr style="background:#f8fafc;border-bottom:1px solid #f1f5f9;">
                             <td style="padding:5px 8px 5px 20px;color:#64748b;font-size:10px;font-style:italic;">↳ ${label}</td>
                             <td style="padding:5px 8px;text-align:right;color:#cbd5e1;font-size:10px;">—</td>
                             <td style="padding:5px 8px;text-align:right;color:#cbd5e1;font-size:10px;">—</td>
                             ${weekTds}
                             <td style="padding:5px 8px;text-align:center;font-family:monospace;font-size:10px;font-weight:${mo.quota > 0 ? '700' : '400'};color:${moColor};white-space:nowrap;">${fmt(mo.total)}${mo.quota > 0 ? ' / ' + fmt(mo.quota) : ''}</td>
-                            <td style="padding:5px 8px;text-align:center;color:#cbd5e1;font-size:10px;">—</td>
-                            <td style="padding:5px 8px;text-align:right;color:#cbd5e1;font-size:10px;">—</td>
+                            <td style="padding:5px 8px;text-align:left;font-size:9px;color:#0f766e;background:#f0fdfa;">${incentiveList || '—'}</td>
                           </tr>`;
                         }).join('')}`;
                       }).join('')}
@@ -2752,22 +2781,21 @@ export async function GET(request: Request) {
                           return `<td style="padding:8px 5px;text-align:center;background:${bg};color:${txt};font-family:monospace;font-size:10px;font-weight:${w.hit ? '800' : '400'};" title="Full week ${w.realStart} to ${w.realEnd} — quota ${fmt(w.quota)} — +${fmt(w.amount)} if hit">${fmt(w.monthActual)}${includedSuffix}${wholeWeekLine}<br><span style="font-size:8px;font-weight:500;color:${w.hit ? '#92400e' : '#a16207'};">${w.daysHit}/${w.days} hit</span></td>`;
                         }).join('')}
                         <td style="padding:11px 8px;text-align:center;font-size:11px;font-weight:800;color:${managerMonthlyEarned ? '#166534' : '#dc2626'};white-space:nowrap;">${fmt(grandGenNet)} / ${fmt(grandQuota)}</td>
-                        <td style="padding:11px 8px;text-align:center;color:#92400e;font-size:11px;">—</td>
                         <td style="padding:11px 8px;text-align:right;font-family:monospace;font-weight:900;color:#92400e;background:#fde68a;">${fmt(managerTotalIncentive)}</td>
                       </tr>
                       <tr style="background:#fef9c3;border-top:2px solid #eab308;border-bottom:1px solid #eab308;">
                         <td style="padding:10px 8px;font-weight:800;color:#854d0e;">🍿 Snacks Budget</td>
-                        <td colspan="10" style="padding:10px 8px;color:#a16207;font-size:11px;">Flat ₱${SNACKS_WEEKLY_BUDGET}/week × ${weekWindows.length} weeks — not performance-based</td>
+                        <td colspan="9" style="padding:10px 8px;color:#a16207;font-size:11px;">Flat ₱${SNACKS_WEEKLY_BUDGET}/week × ${weekWindows.length} weeks — not performance-based</td>
                         <td style="padding:10px 8px;text-align:right;font-family:monospace;font-weight:900;color:#854d0e;background:#fef08a;">${fmt(snacksTotal)}</td>
                       </tr>
                       <tr style="background:#1e293b;">
-                        <td colspan="11" style="padding:12px;font-weight:900;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px;">💵 Total To Give Out</td>
+                        <td colspan="10" style="padding:12px;font-weight:900;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:1px;">💵 Total To Give Out</td>
                         <td style="padding:12px;text-align:right;font-family:monospace;font-weight:900;font-size:14px;color:#5eead4;background:#134e4a;">${fmt(grandIncentiveWithSnacks)}</td>
                       </tr>
                     </tbody>
                   </table>
                 </div>
-                <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Daily Quota = each branch's own daily generic-net target. Wk Quota column = the standard 7-day reference (daily quota × 7). Every week — including Wk 1 or the last week when the month doesn't start/end on a Sun/Sat — is checked against its FULL real Sun–Sat week's sales, even the day or two that spill into the adjacent month (hover a cell for the exact range); only the date shown under each week's label stays clipped to ${monthLabel}, so the label itself never shows a previous/next-month date even though the underlying check does look at those days. Green cell = that week's generic-net sales met its (always full, never prorated) quota → +₱${WEEKLY_INCENTIVE_AMOUNT} for a full 7-day week, or +₱${EDGE_WEEK_INCENTIVE_AMOUNT} for a partial edge week (Wk 1 or the last week, whichever this month only shows part of) — its other half is that same real week's remaining days, credited the same way in the adjacent month's report, so a fully-hit split week still nets a full ₱${WEEKLY_INCENTIVE_AMOUNT} across both reports (hover a cell for its exact payout). Each week cell shows the generic-net sales for just the days that fall in this month's report; for a split week (Wk 1 or the last week, whichever this month only shows part of), a "(x/7)" next to it says how many of that real week's 7 days that is, plus a "wk total" line below with the full real week's total. A full week shows neither — it's trivially all 7 days already. Every cell ends with "x hit" out of however many days this month's report actually shows for that week (3 of 3, not 3 of 7, for a week that's only in this report for 3 days) — it's about this month's own days, same scope as the amount above it, not the full real week used for the quota/payout check. Quota itself isn't repeated per cell — see the Daily Quota / Wk Quota columns for that. Monthly (Actual vs Quota) uses the same figures as the Quota Report table; green text = the month's quota was met → +₱${MONTHLY_INCENTIVE_AMOUNT}. PA = each branch's top seller by sales this month. Snacks is a flat ₱${SNACKS_WEEKLY_BUDGET}/week budget regardless of performance. <strong>Manager</strong> uses combined totals across every branch — including its own days-hit, tested against the combined daily quota — same "whole operation" logic as the Quota Report's Manager row. <strong>The peso amounts are constants near the top of this report block</strong> — adjust them there if they're not right. <em>Italic ↳ rows</em> under a branch are inferred shifts — anyone with more than one order on a given day, with their avg first/last order time that month. Each day is classified by how many people qualified that same day: exactly 2 → earlier-starting is AM (40% of that branch's daily quota), later-starting is PM (60%); exactly 1 → whole day (100% of the daily quota). Green/red follows the same hit-the-quota logic as the branch row above it. A day with 3+ qualifying people has no defined split, so it's shown plain with no ✓/✗ and isn't counted toward that week's or month's quota total. No incentive dollar amount is attached to these rows yet — that's a separate decision from the quota split itself.</p>
+                <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Daily Quota = each branch's own daily generic-net target. Wk Quota column = the standard 7-day reference (daily quota × 7). Every week — including Wk 1 or the last week when the month doesn't start/end on a Sun/Sat — is checked against its FULL real Sun–Sat week's sales, even the day or two that spill into the adjacent month (hover a cell for the exact range); only the date shown under each week's label stays clipped to ${monthLabel}, so the label itself never shows a previous/next-month date even though the underlying check does look at those days. Green cell = that week's generic-net sales met its (always full, never prorated) quota → +₱${WEEKLY_INCENTIVE_AMOUNT} for a full 7-day week, or +₱${EDGE_WEEK_INCENTIVE_AMOUNT} for a partial edge week (Wk 1 or the last week, whichever this month only shows part of) — its other half is that same real week's remaining days, credited the same way in the adjacent month's report, so a fully-hit split week still nets a full ₱${WEEKLY_INCENTIVE_AMOUNT} across both reports (hover a cell for its exact payout). Each week cell shows the generic-net sales for just the days that fall in this month's report; for a split week (Wk 1 or the last week, whichever this month only shows part of), a "(x/7)" next to it says how many of that real week's 7 days that is, plus a "wk total" line below with the full real week's total. A full week shows neither — it's trivially all 7 days already. Every cell ends with "x hit" out of however many days this month's report actually shows for that week (3 of 3, not 3 of 7, for a week that's only in this report for 3 days) — it's about this month's own days, same scope as the amount above it, not the full real week used for the quota/payout check. Quota itself isn't repeated per cell — see the Daily Quota / Wk Quota columns for that. Monthly (Actual vs Quota) uses the same figures as the Quota Report table; green text = the month's quota was met → +₱${MONTHLY_INCENTIVE_AMOUNT}. Snacks is a flat ₱${SNACKS_WEEKLY_BUDGET}/week budget regardless of performance. <strong>Manager</strong> uses combined totals across every branch — including its own days-hit, tested against the combined daily quota — same "whole operation" logic as the Quota Report's Manager row. <strong>The peso amounts are constants near the top of this report block</strong> — adjust them there if they're not right. <em>Italic ↳ rows</em> under a branch break down AM / PM / Whole Day shifts (only whichever ones actually happened at that branch this month). AM/PM splitting only applies to branches with "is_multi_shift" set to true on the branches table — everything else always classifies as Whole Day regardless of how many people place orders there in a day, so a manager or auditor stepping in alongside the regular staff doesn't get mistaken for a second shift. For a multi-shift branch, a day with exactly 2 qualifying people (more than one order that day) splits into earlier-starting = AM (40% of that branch's daily quota) and later-starting = PM (60%); exactly 1 qualifying person = Whole Day (100%); 3+ in one day has no defined split, so it's left out of the quota totals entirely rather than guessing. Each entry shows that person's actual first/last order time for that specific day, not an average. Total Incentive on a shift row is +₱${SHIFT_DAY_INCENTIVE_AMOUNT} per person per day THIS MONTH they hit their assigned quota — listed per person with the exact dates, separate from the branch's own weekly/monthly incentive above it.</p>
               </div>
 
             </div>
