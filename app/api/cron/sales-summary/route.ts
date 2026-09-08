@@ -1900,7 +1900,7 @@ export async function GET(request: Request) {
           monthlyIncentiveAmount: number;
           totalIncentive: number;
           shiftUsers: Array<{
-            name: string; weeklyGenNet: number[]; weeklyQuota: number[];
+            email: string; name: string; weeklyGenNet: number[]; weeklyQuota: number[];
             weeklyDays: Array<Array<{ date: string; amount: number; shiftLabel: string; dayQuota: number; hit: boolean }>>;
             monthGenNet: number; monthQuota: number; avgTimeIn: string; avgTimeOut: string; days: number;
           }>;
@@ -1910,6 +1910,28 @@ export async function GET(request: Request) {
         // Org-wide day-level generic-net accumulator, used only to compute the Manager row's
         // per-week "days hit" count against the combined (all-branches) daily quota below.
         const orgDailyGenNetMap = new Map<string, number>();
+
+        // Shift-visibility orders, fetched ONCE for every branch instead of once per branch inside
+        // the loop below — with several branches, opening a fresh connection per branch per query
+        // is exactly the kind of thing that exhausts Supabase's connection pool (PGRST003).
+        const nonOfficeBranchIds = (nonOfficeBranches || []).map((b: any) => b.id);
+        const shiftOrdersByBranch = new Map<string, any[]>();
+        if (nonOfficeBranchIds.length > 0) {
+          const { data: allShiftOrdersRaw } = await supabaseAdmin
+            .from('orders')
+            .select('branch_id, created_by, generic_amt, discount_total, created_at, created_date_pht')
+            .in('branch_id', nonOfficeBranchIds)
+            .gte('created_date_pht', weekRangeStart)
+            .lte('created_date_pht', weekRangeEnd);
+          (allShiftOrdersRaw || []).forEach((o: any) => {
+            const arr = shiftOrdersByBranch.get(o.branch_id) || [];
+            arr.push(o);
+            shiftOrdersByBranch.set(o.branch_id, arr);
+          });
+        }
+        // Emails needing a profiles lookup are collected across ALL branches during the loop, then
+        // resolved in one batched query after the loop — see below the loop's closing brace.
+        const allShiftEmails = new Set<string>();
 
         for (const b of nonOfficeBranches) {
           // Fetch the full week-range span (may reach a few days into the adjacent month for Wk 1 /
@@ -2076,12 +2098,7 @@ export async function GET(request: Request) {
           // the month as an average, since there's no explicit shift roster to key off day-by-day.
           // ASSUMPTION: orders has a created_at timestamp (created_date_pht alone is date-only) — if
           // it's named differently this query needs that one field name swapped.
-          const { data: shiftOrdersRaw } = await supabaseAdmin
-            .from('orders')
-            .select('created_by, generic_amt, discount_total, created_at, created_date_pht')
-            .eq('branch_id', b.id)
-            .gte('created_date_pht', weekRangeStart)
-            .lte('created_date_pht', weekRangeEnd);
+          const shiftOrdersRaw = shiftOrdersByBranch.get(b.id) || [];
 
           const shiftByUserDay = new Map<string, { user: string; day: string; genNet: number; times: Date[] }>();
           (shiftOrdersRaw || []).forEach((o: any) => {
@@ -2179,18 +2196,12 @@ export async function GET(request: Request) {
           };
 
           const shiftUserEmails = Array.from(shiftUserMap.keys());
-          const shiftNameMap = new Map<string, string>();
-          if (shiftUserEmails.length > 0) {
-            const { data: shiftProfiles } = await supabaseAdmin
-              .from('profiles')
-              .select('email, full_name')
-              .in('email', shiftUserEmails);
-            (shiftProfiles || []).forEach((p: any) => shiftNameMap.set(p.email, p.full_name));
-          }
+          shiftUserEmails.forEach((email) => allShiftEmails.add(email));
 
           const shiftUsers = Array.from(shiftUserMap.entries())
             .map(([email, e]) => ({
-              name: shiftNameMap.get(email) || email,
+              email,
+              name: email, // resolved in one batched profiles lookup after the branch loop below
               weeklyGenNet: e.weeklyGenNet,
               weeklyQuota: e.weeklyQuota,
               weeklyDays: e.weeklyDays.map((days) => [...days].sort((a, b) => a.date.localeCompare(b.date))),
@@ -2209,6 +2220,23 @@ export async function GET(request: Request) {
             shiftUsers,
           });
         } // end per-branch loop
+
+        // One batched profiles lookup for every shift-user email across every branch at once,
+        // instead of a separate query per branch — same connection-pool reasoning as batching the
+        // shift orders fetch above.
+        if (allShiftEmails.size > 0) {
+          const { data: allShiftProfiles } = await supabaseAdmin
+            .from('profiles')
+            .select('email, full_name')
+            .in('email', Array.from(allShiftEmails));
+          const globalShiftNameMap = new Map<string, string>();
+          (allShiftProfiles || []).forEach((p: any) => globalShiftNameMap.set(p.email, p.full_name));
+          branchDataList.forEach((d) => {
+            d.shiftUsers.forEach((su) => {
+              su.name = globalShiftNameMap.get(su.email) || su.email;
+            });
+          });
+        }
 
         // ── Grand totals ──
         const grandGen = branchDataList.reduce((s, d) => s + d.gen, 0);
