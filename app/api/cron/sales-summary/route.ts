@@ -1899,6 +1899,7 @@ export async function GET(request: Request) {
           monthlyIncentiveEarned: boolean;
           monthlyIncentiveAmount: number;
           totalIncentive: number;
+          shiftUsers: Array<{ name: string; weeklyGenNet: number[]; monthGenNet: number; avgTimeIn: string; avgTimeOut: string; days: number }>;
         };
 
         const branchDataList: BranchMonthData[] = [];
@@ -2063,10 +2064,90 @@ export async function GET(request: Request) {
           const monthlyIncentiveAmount = monthlyIncentiveEarned ? MONTHLY_INCENTIVE_AMOUNT : 0;
           const totalIncentive = weeklyIncentiveTotal + monthlyIncentiveAmount;
 
+          // ── Shift visibility (no per-shift quota exists yet — this is visibility only) ──
+          // A "shift" is inferred, not stored anywhere: for this branch, any day where a given
+          // created_by has MORE THAN ONE order is treated as that person having worked that day —
+          // a single stray order (e.g. a manager covering one sale) is dropped, per your note. Time
+          // in / time out = that person's first/last order timestamp that day, PHT; rolled up across
+          // the month as an average, since there's no explicit shift roster to key off day-by-day.
+          // ASSUMPTION: orders has a created_at timestamp (created_date_pht alone is date-only) — if
+          // it's named differently this query needs that one field name swapped.
+          const { data: shiftOrdersRaw } = await supabaseAdmin
+            .from('orders')
+            .select('created_by, generic_amt, discount_total, created_at, created_date_pht')
+            .eq('branch_id', b.id)
+            .gte('created_date_pht', weekRangeStart)
+            .lte('created_date_pht', weekRangeEnd);
+
+          const shiftByUserDay = new Map<string, { user: string; day: string; genNet: number; times: Date[] }>();
+          (shiftOrdersRaw || []).forEach((o: any) => {
+            const user = o.created_by;
+            const day = o.created_date_pht;
+            if (!user || !day || !o.created_at) return;
+            const key = `${user}__${day}`;
+            const entry = shiftByUserDay.get(key) || { user, day, genNet: 0, times: [] };
+            entry.genNet += Number(o.generic_amt || 0) - Number(o.discount_total || 0);
+            entry.times.push(new Date(o.created_at));
+            shiftByUserDay.set(key, entry);
+          });
+
+          const minutesPHT = (d: Date) => {
+            const parts = d.toLocaleString('en-US', { timeZone: 'Asia/Manila', hour12: false, hour: '2-digit', minute: '2-digit' });
+            const [h, m] = parts.split(':').map((x) => parseInt(x, 10));
+            return h * 60 + m;
+          };
+
+          const shiftUserMap = new Map<string, { weeklyGenNet: number[]; monthGenNet: number; timeInMin: number[]; timeOutMin: number[]; days: number }>();
+          shiftByUserDay.forEach((e) => {
+            if (e.times.length < 2) return; // single stray order — not treated as a worked shift
+            const sorted = [...e.times].sort((a, b) => a.getTime() - b.getTime());
+            const wi = weekWindows.findIndex((w) => e.day >= w.realStart && e.day <= w.realEnd);
+            const entry = shiftUserMap.get(e.user) || {
+              weeklyGenNet: new Array(weekWindows.length).fill(0), monthGenNet: 0, timeInMin: [], timeOutMin: [], days: 0,
+            };
+            if (wi >= 0) entry.weeklyGenNet[wi] += e.genNet;
+            if (e.day >= monthStart && e.day <= monthEnd) entry.monthGenNet += e.genNet;
+            entry.timeInMin.push(minutesPHT(sorted[0]));
+            entry.timeOutMin.push(minutesPHT(sorted[sorted.length - 1]));
+            entry.days += 1;
+            shiftUserMap.set(e.user, entry);
+          });
+
+          const fmtMinutes = (avgMin: number) => {
+            const m = Math.round(avgMin) % 1440;
+            const h24 = Math.floor(m / 60);
+            const min = m % 60;
+            const period = h24 >= 12 ? 'PM' : 'AM';
+            const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+            return `${h12}:${String(min).padStart(2, '0')} ${period}`;
+          };
+
+          const shiftUserEmails = Array.from(shiftUserMap.keys());
+          const shiftNameMap = new Map<string, string>();
+          if (shiftUserEmails.length > 0) {
+            const { data: shiftProfiles } = await supabaseAdmin
+              .from('profiles')
+              .select('email, full_name')
+              .in('email', shiftUserEmails);
+            (shiftProfiles || []).forEach((p: any) => shiftNameMap.set(p.email, p.full_name));
+          }
+
+          const shiftUsers = Array.from(shiftUserMap.entries())
+            .map(([email, e]) => ({
+              name: shiftNameMap.get(email) || email,
+              weeklyGenNet: e.weeklyGenNet,
+              monthGenNet: e.monthGenNet,
+              avgTimeIn: fmtMinutes(e.timeInMin.reduce((s, x) => s + x, 0) / e.timeInMin.length),
+              avgTimeOut: fmtMinutes(e.timeOutMin.reduce((s, x) => s + x, 0) / e.timeOutMin.length),
+              days: e.days,
+            }))
+            .sort((a, b) => b.monthGenNet - a.monthGenNet);
+
           branchDataList.push({
             branch: b, gen, brd, disc, totalSales, totalExp, actual, quota, poTotal, poBrd, poBySupplier,
             users: uniqueUsers, paRows, discountRows,
             weeklyHits, weeksHit, weeklyIncentiveTotal, monthlyIncentiveEarned, monthlyIncentiveAmount, totalIncentive,
+            shiftUsers,
           });
         } // end per-branch loop
 
@@ -2532,7 +2613,21 @@ export async function GET(request: Request) {
                           <td style="padding:10px 8px;text-align:center;font-size:11px;font-weight:700;color:${monthColor};white-space:nowrap;">${fmt(genNet)} / ${fmt(d.quota)}</td>
                           <td style="padding:10px 8px;color:#374151;font-size:11px;max-width:70px;overflow-wrap:break-word;word-break:break-word;">${topPA}</td>
                           <td style="padding:10px 8px;text-align:right;font-family:monospace;font-weight:900;color:#0f766e;background:#f0fdfa;">${fmt(d.totalIncentive)}</td>
-                        </tr>`;
+                        </tr>${(d.shiftUsers || []).map((su) => {
+                          const weekTds = Array.from({ length: 6 }).map((_, wi) => {
+                            const val = su.weeklyGenNet[wi] || 0;
+                            return `<td style="padding:5px;text-align:center;background:#f8fafc;color:#94a3b8;font-family:monospace;font-size:9px;">${val > 0 ? fmt(val) : '—'}</td>`;
+                          }).join('');
+                          return `<tr style="background:#f8fafc;border-bottom:1px solid #f1f5f9;">
+                            <td style="padding:5px 8px 5px 20px;color:#64748b;font-size:10px;font-style:italic;">↳ ${su.name} <span style="color:#94a3b8;">(${su.avgTimeIn}–${su.avgTimeOut})</span></td>
+                            <td style="padding:5px 8px;text-align:right;color:#cbd5e1;font-size:10px;">—</td>
+                            <td style="padding:5px 8px;text-align:right;color:#cbd5e1;font-size:10px;">—</td>
+                            ${weekTds}
+                            <td style="padding:5px 8px;text-align:center;font-family:monospace;color:#64748b;font-size:10px;">${fmt(su.monthGenNet)}</td>
+                            <td style="padding:5px 8px;text-align:center;color:#cbd5e1;font-size:10px;">—</td>
+                            <td style="padding:5px 8px;text-align:right;color:#cbd5e1;font-size:10px;">—</td>
+                          </tr>`;
+                        }).join('')}`;
                       }).join('')}
                       <tr style="background:#fef3c7;border-top:2px solid #f59e0b;border-bottom:2px solid #f59e0b;">
                         <td style="padding:11px 8px;font-weight:900;color:#92400e;font-size:11px;text-transform:uppercase;letter-spacing:1px;">👔 Manager</td>
@@ -2567,7 +2662,7 @@ export async function GET(request: Request) {
                     </tbody>
                   </table>
                 </div>
-                <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Daily Quota = each branch's own daily generic-net target. Wk Quota column = the standard 7-day reference (daily quota × 7). Every week — including Wk 1 or the last week when the month doesn't start/end on a Sun/Sat — is checked against its FULL real Sun–Sat week's sales, even the day or two that spill into the adjacent month (hover a cell for the exact range); only the date shown under each week's label stays clipped to ${monthLabel}, so the label itself never shows a previous/next-month date even though the underlying check does look at those days. Green cell = that week's generic-net sales met its (always full, never prorated) quota → +₱${WEEKLY_INCENTIVE_AMOUNT} for a full 7-day week, or +₱${EDGE_WEEK_INCENTIVE_AMOUNT} for a partial edge week (Wk 1 or the last week, whichever this month only shows part of) — its other half is that same real week's remaining days, credited the same way in the adjacent month's report, so a fully-hit split week still nets a full ₱${WEEKLY_INCENTIVE_AMOUNT} across both reports (hover a cell for its exact payout). Each week cell shows the generic-net sales for just the days that fall in this month's report; for a split week (Wk 1 or the last week, whichever this month only shows part of), a "(x/7)" next to it says how many of that real week's 7 days that is, plus a "wk total" line below with the full real week's total. A full week shows neither — it's trivially all 7 days already. Every cell ends with "x hit" out of however many days this month's report actually shows for that week (3 of 3, not 3 of 7, for a week that's only in this report for 3 days) — it's about this month's own days, same scope as the amount above it, not the full real week used for the quota/payout check. Quota itself isn't repeated per cell — see the Daily Quota / Wk Quota columns for that. Monthly (Actual vs Quota) uses the same figures as the Quota Report table; green text = the month's quota was met → +₱${MONTHLY_INCENTIVE_AMOUNT}. PA = each branch's top seller by sales this month. Snacks is a flat ₱${SNACKS_WEEKLY_BUDGET}/week budget regardless of performance. <strong>Manager</strong> uses combined totals across every branch — including its own days-hit, tested against the combined daily quota — same "whole operation" logic as the Quota Report's Manager row. <strong>The peso amounts are constants near the top of this report block</strong> — adjust them there if they're not right.</p>
+                <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Daily Quota = each branch's own daily generic-net target. Wk Quota column = the standard 7-day reference (daily quota × 7). Every week — including Wk 1 or the last week when the month doesn't start/end on a Sun/Sat — is checked against its FULL real Sun–Sat week's sales, even the day or two that spill into the adjacent month (hover a cell for the exact range); only the date shown under each week's label stays clipped to ${monthLabel}, so the label itself never shows a previous/next-month date even though the underlying check does look at those days. Green cell = that week's generic-net sales met its (always full, never prorated) quota → +₱${WEEKLY_INCENTIVE_AMOUNT} for a full 7-day week, or +₱${EDGE_WEEK_INCENTIVE_AMOUNT} for a partial edge week (Wk 1 or the last week, whichever this month only shows part of) — its other half is that same real week's remaining days, credited the same way in the adjacent month's report, so a fully-hit split week still nets a full ₱${WEEKLY_INCENTIVE_AMOUNT} across both reports (hover a cell for its exact payout). Each week cell shows the generic-net sales for just the days that fall in this month's report; for a split week (Wk 1 or the last week, whichever this month only shows part of), a "(x/7)" next to it says how many of that real week's 7 days that is, plus a "wk total" line below with the full real week's total. A full week shows neither — it's trivially all 7 days already. Every cell ends with "x hit" out of however many days this month's report actually shows for that week (3 of 3, not 3 of 7, for a week that's only in this report for 3 days) — it's about this month's own days, same scope as the amount above it, not the full real week used for the quota/payout check. Quota itself isn't repeated per cell — see the Daily Quota / Wk Quota columns for that. Monthly (Actual vs Quota) uses the same figures as the Quota Report table; green text = the month's quota was met → +₱${MONTHLY_INCENTIVE_AMOUNT}. PA = each branch's top seller by sales this month. Snacks is a flat ₱${SNACKS_WEEKLY_BUDGET}/week budget regardless of performance. <strong>Manager</strong> uses combined totals across every branch — including its own days-hit, tested against the combined daily quota — same "whole operation" logic as the Quota Report's Manager row. <strong>The peso amounts are constants near the top of this report block</strong> — adjust them there if they're not right. <em>Italic ↳ rows</em> under a branch are inferred shifts — anyone with more than one order on a given day, with their avg first/last order time that month and their own generic-net sales by week. There's no quota for these yet, so no color-coding and no incentive math on them — visibility only.</p>
               </div>
 
             </div>
