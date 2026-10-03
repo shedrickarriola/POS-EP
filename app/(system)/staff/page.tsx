@@ -368,6 +368,15 @@ export default function StaffDashboard() {
   }>({}); // ← CHANGED: per branch
   // ============================================================
   // ============================================================
+  // ==================== TRIGGER MONTHLY REPORT STATES ====================
+  const [showTriggerReportModal, setShowTriggerReportModal] = useState(false);
+  const [triggerReportMonth, setTriggerReportMonth] = useState(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  });
+  const [triggerReportLoading, setTriggerReportLoading] = useState(false);
+  // ============================================================
+  // ============================================================
   const calculateMarkup = (
     type: string | null | undefined,
     name: string | null | undefined,
@@ -438,6 +447,37 @@ export default function StaffDashboard() {
     sunday.setHours(0, 0, 0, 0);
     return sunday.toISOString().split('T')[0];
   };
+
+  // ==================== TRIGGER MONTHLY REPORT (office branches) ====================
+  // Calls the new server-side proxy route (never touches CRON_SECRET from the browser).
+  // That route re-verifies this user's role itself before it does anything.
+  const handleTriggerMonthlyReport = async () => {
+    setTriggerReportLoading(true);
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if (!token) throw new Error('Not signed in');
+
+      const res = await fetch('/api/trigger-monthly-report', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ month: triggerReportMonth }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || 'Failed to trigger report');
+
+      triggerToast(`Monthly report triggered for ${triggerReportMonth}`, 'success');
+      setShowTriggerReportModal(false);
+    } catch (err: any) {
+      triggerToast(err.message || 'Failed to trigger report', 'error');
+    } finally {
+      setTriggerReportLoading(false);
+    }
+  };
+
   const loadWeeklyData = async () => {
     const weekStart = getCurrentWeekStart();
     setCurrentWeekStart(weekStart);
@@ -4029,6 +4069,16 @@ export default function StaffDashboard() {
                 className="flex-1 md:flex-none px-6 py-4 bg-slate-900 border border-amber-500/50 hover:border-amber-500 rounded-2xl text-sm font-black uppercase tracking-widest text-amber-400 flex items-center justify-center gap-3 transition-all"
               >
                 <TrendingUp size={18} /> WEEKLY DELIVERIES
+              </button>
+            )}
+
+            {/* TRIGGER MONTHLY REPORT BUTTON (Admin/Manager only) */}
+            {isAdmin && (
+              <button
+                onClick={() => setShowTriggerReportModal(true)}
+                className="flex-1 md:flex-none px-6 py-4 bg-slate-900 border border-sky-500/50 hover:border-sky-500 rounded-2xl text-sm font-black uppercase tracking-widest text-sky-400 flex items-center justify-center gap-3 transition-all"
+              >
+                <RefreshCw size={18} /> TRIGGER MONTHLY REPORT
               </button>
             )}
             <div className="flex gap-2">
@@ -8147,6 +8197,68 @@ export default function StaffDashboard() {
                   className="px-8 py-3 text-slate-400 hover:text-white font-black uppercase text-sm tracking-widest transition-colors"
                 >
                   Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* ================================================================== */}
+        {/* ================================================================== */}
+
+        {/* ==================== TRIGGER MONTHLY REPORT MODAL ==================== */}
+        {showTriggerReportModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+            <div
+              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+              onClick={() => !triggerReportLoading && setShowTriggerReportModal(false)}
+            />
+            <div className="relative bg-slate-900 border border-sky-500/30 w-full max-w-md rounded-3xl p-6 shadow-2xl">
+              <div className="flex justify-between items-center mb-5">
+                <div>
+                  <h2 className="text-2xl font-black italic text-sky-400 uppercase tracking-tighter">
+                    TRIGGER MONTHLY REPORT
+                  </h2>
+                  <p className="text-xs text-slate-400 font-mono">
+                    Office branches — sends the monthly email for the month below
+                  </p>
+                </div>
+                <button
+                  onClick={() => !triggerReportLoading && setShowTriggerReportModal(false)}
+                  className="text-slate-500 hover:text-white"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+
+              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
+                Month
+              </label>
+              <input
+                type="month"
+                value={triggerReportMonth}
+                onChange={(e) => setTriggerReportMonth(e.target.value)}
+                disabled={triggerReportLoading}
+                className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3 text-base font-semibold text-sky-400 focus:border-sky-400 outline-none disabled:opacity-50"
+              />
+              <p className="mt-2 text-[11px] text-slate-500">
+                A month still in progress reports up through today only — same as the regular cron run.
+              </p>
+
+              <div className="pt-5 mt-3 border-t border-white/10 flex items-center justify-end gap-3">
+                <button
+                  onClick={() => setShowTriggerReportModal(false)}
+                  disabled={triggerReportLoading}
+                  className="px-6 py-3 text-slate-400 hover:text-white font-black uppercase text-sm tracking-widest transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleTriggerMonthlyReport}
+                  disabled={triggerReportLoading || !triggerReportMonth}
+                  className="px-6 py-3 bg-sky-500 hover:bg-sky-400 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-black uppercase tracking-widest text-slate-950 flex items-center gap-2 transition-all"
+                >
+                  <RefreshCw size={16} className={triggerReportLoading ? 'animate-spin' : ''} />
+                  {triggerReportLoading ? 'Sending…' : 'Trigger Report'}
                 </button>
               </div>
             </div>

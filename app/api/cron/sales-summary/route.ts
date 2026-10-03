@@ -5,6 +5,7 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const type = (searchParams.get('type') || 'EOD').toUpperCase();
   const key = searchParams.get('key');
+  const monthParam = searchParams.get('month'); // optional "YYYY-MM" override (currently used by MONTHLY_EMAIL)
 
   if (key !== process.env.CRON_SECRET) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -3856,10 +3857,29 @@ export async function GET(request: Request) {
 
       // Compute the full month range: first day → last day of current month (PHT)
       const todayDateM = new Date(todayPHT);
-      const monthStart = new Date(todayDateM.getFullYear(), todayDateM.getMonth(), 1)
+      let monthStart = new Date(todayDateM.getFullYear(), todayDateM.getMonth(), 1)
         .toISOString().split('T')[0];
-      const monthEnd = todayPHT; // last day of month (cron fires on last day)
-      const monthLabel = todayDateM.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      let monthEnd = todayPHT; // last day of month (cron fires on last day)
+      let monthLabel = todayDateM.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+      // Optional ?month=YYYY-MM override — lets this be triggered for a specific past month
+      // instead of only "current month up to today". Any missing/malformed value is ignored
+      // and falls straight back to the default above, so the existing no-param cron call is
+      // completely unaffected.
+      if (monthParam && /^\d{4}-\d{2}$/.test(monthParam)) {
+        const [yStr, mStr] = monthParam.split('-');
+        const y = Number(yStr);
+        const m = Number(mStr) - 1; // 0-indexed
+        const requestedStart = new Date(y, m, 1);
+        const todayCutoff = new Date(todayPHT + 'T00:00:00');
+        if (!isNaN(requestedStart.getTime()) && requestedStart <= todayCutoff) {
+          const requestedLastDay = new Date(y, m + 1, 0); // last calendar day of that month
+          const clippedEnd = requestedLastDay > todayCutoff ? todayCutoff : requestedLastDay;
+          monthStart = requestedStart.toISOString().split('T')[0];
+          monthEnd = clippedEnd.toISOString().split('T')[0];
+          monthLabel = requestedStart.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+        }
+      }
 
       // Build array of all dates in the month
       const monthDates: string[] = [];
@@ -3869,6 +3889,47 @@ export async function GET(request: Request) {
         monthDates.push(cursor.toISOString().split('T')[0]);
         cursor.setDate(cursor.getDate() + 1);
       }
+
+      // Sunday–Saturday week windows overlapping this month, clipped to the month's own
+      // start/end — same approach as the Drugstore Monthly Incentive Tracker, used below for
+      // the new Agent Collection Quota table. realStart/realEnd is the full, unclipped week,
+      // used to judge a week's quota fairly even when this month's slice of it is short.
+      type WeekWindow = { start: string; end: string; days: number; realStart: string; realEnd: string };
+      const weekWindows: WeekWindow[] = [];
+      {
+        const monthStartDateObj = new Date(monthStart + 'T00:00:00');
+        const monthEndDateObj = new Date(monthEnd + 'T00:00:00');
+        let wkCursor = new Date(monthStartDateObj);
+        while (wkCursor <= monthEndDateObj) {
+          const dow = wkCursor.getDay(); // 0=Sun..6=Sat
+          const windowStart = new Date(wkCursor);
+          windowStart.setDate(wkCursor.getDate() - dow);
+          const windowEnd = new Date(windowStart);
+          windowEnd.setDate(windowStart.getDate() + 6);
+          const clippedStart = windowStart < monthStartDateObj ? monthStartDateObj : windowStart;
+          const clippedEnd = windowEnd > monthEndDateObj ? monthEndDateObj : windowEnd;
+          const days = Math.round((clippedEnd.getTime() - clippedStart.getTime()) / 86400000) + 1;
+          weekWindows.push({
+            start: clippedStart.toISOString().split('T')[0],
+            end: clippedEnd.toISOString().split('T')[0],
+            days,
+            realStart: windowStart.toISOString().split('T')[0],
+            realEnd: windowEnd.toISOString().split('T')[0],
+          });
+          wkCursor = new Date(windowEnd);
+          wkCursor.setDate(windowEnd.getDate() + 1);
+        }
+      }
+      // Full span needed to fetch every edge week's complete Sun–Sat data, including the day
+      // or two on either side that belong to the adjacent month.
+      const weekRangeStart = weekWindows[0]?.realStart || monthStart;
+      const weekRangeEnd = weekWindows[weekWindows.length - 1]?.realEnd || monthEnd;
+      const fmtWeekRange = (w: { start: string; end: string }) => {
+        const s = new Date(w.start + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        if (w.start === w.end) return s;
+        const e = new Date(w.end + 'T00:00:00').toLocaleDateString('en-US', { day: 'numeric' });
+        return `${s}–${e}`;
+      };
 
       for (const org of monthlyOrgs || []) {
         if (!org.owner_email) continue;
@@ -3904,6 +3965,7 @@ export async function GET(request: Request) {
             { data: expensesData },
             { data: profilesData },
             { data: purchaseOrdersData },
+            { data: paymentsDataWide },
           ] = await Promise.all([
             supabaseAdmin
               .from('daily_reports')
@@ -3945,11 +4007,23 @@ export async function GET(request: Request) {
               .eq('branch_id', b.id)
               .in('created_date_pht', monthDates)
               .order('created_date_pht', { ascending: true }),
+
+            supabaseAdmin
+              .from('daily_payments')
+              .select(`
+                id, amount, payment_method, report_date, order_id,
+                customer_name, pr_number, notes,
+                orders ( id, order_number, dr_number, client_name, agent )
+              `)
+              .eq('branch_id', b.id)
+              .gte('report_date', weekRangeStart)
+              .lte('report_date', weekRangeEnd),
           ]);
 
           // ── Office account lookup ──
           const clientNames = [
             ...new Set((ordersData || []).map((o: any) => o.client_name).filter(Boolean)),
+            ...new Set((paymentsDataWide || []).map((p: any) => (p.orders as any)?.client_name || p.customer_name).filter(Boolean)),
           ];
           let officeMap: Record<string, boolean> = {};
           if (clientNames.length > 0) {
@@ -4056,9 +4130,13 @@ export async function GET(request: Request) {
           // Daily quota = weekly_quota / 6 (Mon–Sat, Sunday is non-working)
           // Monthly quota = daily_quota × number of Mon–Sat days in the month
           const workingDaysInMonth = (() => {
+            // Derived from monthStart (not todayDateM) so this stays correct when ?month=
+            // overrides the report to a past month — todayDateM is always the ACTUAL
+            // current month, which is only the right month to use here by default.
+            const reportMonthDate = new Date(monthStart + 'T00:00:00');
             let count = 0;
-            const d = new Date(todayDateM.getFullYear(), todayDateM.getMonth(), 1);
-            const lastDay = new Date(todayDateM.getFullYear(), todayDateM.getMonth() + 1, 0).getDate();
+            const d = new Date(reportMonthDate.getFullYear(), reportMonthDate.getMonth(), 1);
+            const lastDay = new Date(reportMonthDate.getFullYear(), reportMonthDate.getMonth() + 1, 0).getDate();
             for (let day = 1; day <= lastDay; day++) {
               d.setDate(day);
               const dow = d.getDay(); // 0 = Sun, 6 = Sat
@@ -4117,6 +4195,63 @@ export async function GET(request: Request) {
               total: v.cash + v.cheque + v.online,
             }))
             .sort((a, b) => b.total - a.total);
+
+          // ── Agent collection quota (weekly/monthly) ──
+          // Collection quota reuses the SAME number as the sales quota (agent_weekly_quota) —
+          // i.e. the target is to collect what they're expected to sell. No separate field.
+          const dailyCollQuotaMap = new Map<string, number>();
+          (profilesData || []).forEach((p: any) => {
+            if (p.full_name) {
+              dailyCollQuotaMap.set(p.full_name.trim().toUpperCase(), Number(p.agent_weekly_quota || 0) / 6);
+            }
+          });
+
+          // Per-agent, per-week collections — judged against the FULL real Sun–Sat week
+          // (including the day or two that spill into the adjacent month), same fairness
+          // approach as the Drugstore Incentive Tracker, so an edge week isn't flagged as
+          // missed just because this month's slice of it is short. monthActual (this month's
+          // slice) is what's actually displayed; actual (the full real week) decides hit/miss.
+          type AgentWeekBucket = { actual: number; monthActual: number; quota: number; hit: boolean; days: number };
+          const agentWeeklyCollMap = new Map<string, AgentWeekBucket[]>();
+          (paymentsDataWide || []).filter((p: any) => !isOfficePayment(p)).forEach((p: any) => {
+            const agent = ((p.orders as any)?.agent || 'MAIN OFFICE').trim();
+            const key = agent.toUpperCase();
+            if (!agentWeeklyCollMap.has(key)) {
+              agentWeeklyCollMap.set(key, weekWindows.map((w) => ({ actual: 0, monthActual: 0, quota: 0, hit: false, days: w.days })));
+            }
+            const buckets = agentWeeklyCollMap.get(key)!;
+            const amt = Number(p.amount || 0);
+            weekWindows.forEach((w, wi) => {
+              if (p.report_date >= w.realStart && p.report_date <= w.realEnd) {
+                buckets[wi].actual += amt;
+                if (p.report_date >= w.start && p.report_date <= w.end) {
+                  buckets[wi].monthActual += amt;
+                }
+              }
+            });
+          });
+          agentWeeklyCollMap.forEach((buckets, key) => {
+            const dq = dailyCollQuotaMap.get(key) || 0;
+            buckets.forEach((b) => {
+              b.quota = dq * 6; // weekly collection quota — 6 working days (Mon–Sat), same basis as the sales quota
+              b.hit = b.quota > 0 && b.actual >= b.quota;
+            });
+          });
+
+          const emptyWeeks = (): AgentWeekBucket[] =>
+            weekWindows.map((w) => ({ actual: 0, monthActual: 0, quota: 0, hit: false, days: w.days }));
+          const collectionQuotaRows = agentCollRows.map((r) => {
+            const key = r.agent.toUpperCase();
+            const dq = dailyCollQuotaMap.get(key) || 0;
+            return {
+              agent: r.agent,
+              dailyQuota: dq,
+              weeklyQuota: dq * 6,
+              monthlyActual: r.total,
+              monthlyQuota: dq * workingDaysInMonth,
+              weeks: agentWeeklyCollMap.get(key) || emptyWeeks(),
+            };
+          });
 
           // ── Online payments ──
           const onlinePayments = (paymentsData || [])
@@ -4528,6 +4663,63 @@ export async function GET(request: Request) {
                   </tbody>
                 </table>
               </div>
+
+              ${collectionQuotaRows.length > 0 ? `
+              <!-- AGENT COLLECTION QUOTA -->
+              <h3 style="color:#2dd4bf; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">🎯 Agent Collection Quota (Weekly / Monthly)</h3>
+              <div style="overflow-x:auto; margin-bottom:10px;">
+                <table style="width:100%; border-collapse:collapse; font-size:12px;">
+                  <thead>
+                    <tr>
+                      <th ${thL}>Agent</th>
+                      <th ${thR}>Daily Quota</th>
+                      <th ${thR}>Wk Quota</th>
+                      ${Array.from({ length: 6 }).map((_, wi) => {
+                        const w = weekWindows[wi];
+                        if (!w) return `<th style="padding:8px 6px; text-align:center; background:#1e293b; color:#475569; font-size:9px; text-transform:uppercase; letter-spacing:0.5px;">—</th>`;
+                        return `<th style="padding:8px 6px; text-align:center; background:#1e293b; color:#94a3b8; font-size:9px; text-transform:uppercase; letter-spacing:0.5px;">Wk ${wi + 1}<br><span style="font-weight:400; text-transform:none; letter-spacing:0; font-size:8px; color:#64748b;">${fmtWeekRange(w)}</span></th>`;
+                      }).join('')}
+                      <th style="padding:10px 12px; text-align:center; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Monthly (Actual vs Quota)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${collectionQuotaRows.map((r, i) => {
+                      const row = i % 2 === 0 ? trNorm : trAlt;
+                      const weekCells = Array.from({ length: 6 }).map((_, wi) => {
+                        const b = r.weeks[wi];
+                        if (!weekWindows[wi] || !b) return `<td style="padding:6px; text-align:center; font-family:monospace; font-size:10px; color:#334155;">—</td>`;
+                        const hasQuota = b.quota > 0;
+                        const color = !hasQuota ? '#64748b' : b.hit ? '#10b981' : '#ef4444';
+                        const includedSuffix = b.days < 7 ? ` <span style="font-size:8px;color:${color};">(${b.days}/7)</span>` : '';
+                        return `<td style="padding:6px; text-align:center; font-family:monospace; font-size:10px; font-weight:${hasQuota && b.hit ? '800' : '400'}; color:${color};" title="Full week ${weekWindows[wi].realStart} to ${weekWindows[wi].realEnd} — quota ${fmt(b.quota)}">${fmt(b.monthActual)}${includedSuffix}</td>`;
+                      }).join('');
+                      const monthHit = r.monthlyQuota > 0 && r.monthlyActual >= r.monthlyQuota;
+                      const monthColor = r.monthlyQuota > 0 ? (monthHit ? '#10b981' : '#ef4444') : '#64748b';
+                      return `<tr ${row}>
+                        <td ${tdL} style="padding:8px 12px; font-weight:700; color:#e2e8f0;">${r.agent}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#64748b;">${r.dailyQuota > 0 ? fmt(r.dailyQuota) : '—'}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#64748b;">${r.weeklyQuota > 0 ? fmt(r.weeklyQuota) : '—'}</td>
+                        ${weekCells}
+                        <td style="padding:8px 12px; text-align:center; font-size:11px; font-weight:700; color:${monthColor}; white-space:nowrap;">${fmt(r.monthlyActual)} / ${r.monthlyQuota > 0 ? fmt(r.monthlyQuota) : '—'}</td>
+                      </tr>`;
+                    }).join('')}
+                    ${(() => {
+                      const ta = collectionQuotaRows.reduce((s, r) => s + r.monthlyActual, 0);
+                      const tq = collectionQuotaRows.reduce((s, r) => s + r.monthlyQuota, 0);
+                      const tHit = tq > 0 && ta >= tq;
+                      return `<tr style="background:#1e293b; border-top:2px solid #475569;">
+                        <td ${tdL} style="padding:10px 12px; font-weight:900; color:#2dd4bf; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
+                        <td ${tdR}></td>
+                        <td ${tdR}></td>
+                        ${Array.from({ length: 6 }).map(() => `<td></td>`).join('')}
+                        <td style="padding:10px 12px; text-align:center; font-family:monospace; font-weight:900; color:${tq > 0 ? (tHit ? '#10b981' : '#ef4444') : '#64748b'};">${fmt(ta)} / ${tq > 0 ? fmt(tq) : '—'}</td>
+                      </tr>`;
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+              <p style="margin:-2px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Collection quota = same target as the sales quota (agent_weekly_quota ÷ 6 working days). A week is judged against its full Sun–Sat total, including any days from the adjacent month, so a short edge week isn't unfairly flagged as missed — the figure shown is just this month's slice of it. "—" means that agent has no quota set.</p>
+              ` : ''}
 
               ${onlinePayments.length > 0 ? `
               <!-- ONLINE PAYMENTS -->
