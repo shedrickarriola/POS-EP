@@ -74,6 +74,408 @@ const THEME_OVERRIDES = `
   [data-theme='light'] .text-orange-400 { color: #ea580c !important; }
 `;
 
+const formatPeso = (amount: number) =>
+  `₱${amount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
+
+// Stock-value reconciliation, using only what's actually recorded:
+// purchases and sales alone tell you what the stock SHOULD be worth;
+// the auditor's logged adjustments are the only thing that can make
+// "actual" differ from that. So `difference` always equals the
+// adjustments total — this isn't a new independent check, it's the
+// existing Adjustments number laid out as an expected → actual story
+// instead of a bare figure. (Charge to Staff is computed separately —
+// see getChargeToStaff — since it also needs Cash Variance, not just
+// the stock side.)
+const getStockValueBreakdown = (
+  totalPurchase: number,
+  costOfSales: number,
+  totalAdjustments: number,
+  startingInventoryValue: number = 0
+) => {
+  const expectedStockValue =
+    startingInventoryValue + totalPurchase - costOfSales;
+  const actualStockValue = expectedStockValue + totalAdjustments;
+  const difference = actualStockValue - expectedStockValue;
+  return { expectedStockValue, actualStockValue, difference };
+};
+
+// Charge to Staff = Cash Variance netted against Adjustments — both are
+// unit_price (selling price) basis, so this is apples-to-apples. A cash
+// surplus (unlogged sale, money still turned in) offsets the stock
+// shortage that same sale caused; whatever's left uncovered after that
+// netting is a real, unexplained loss and gets charged. A surplus that
+// more than covers the stock side comes out negative — a credit, not
+// a charge.
+const getChargeToStaff = (cashVariance: number, totalAdjustments: number) =>
+  -(cashVariance + totalAdjustments);
+
+const ReconciliationPanel = ({
+  title,
+  subtitle,
+  totalSales,
+  genericSales,
+  brandedSales,
+  discountSales,
+  expenses,
+  savings,
+  actualRemitted,
+  totalPurchase,
+  genericPurchase,
+  brandedPurchase,
+  costOfSales,
+  adjustments,
+  liveInventoryValue,
+  startingInventoryValue,
+  onSetStartingValueClick,
+  staff,
+  onSalesClick,
+  onPurchaseClick,
+  onRemittanceClick,
+  onAdjustmentsClick,
+}: {
+  title: string;
+  subtitle?: string;
+  totalSales: number;
+  genericSales: number;
+  brandedSales: number;
+  discountSales: number;
+  expenses: number;
+  savings: number;
+  actualRemitted: number;
+  totalPurchase: number;
+  genericPurchase: number;
+  brandedPurchase: number;
+  costOfSales: number;
+  adjustments: number;
+  liveInventoryValue?: number;
+  startingInventoryValue?: number;
+  onSetStartingValueClick?: () => void;
+  staff?: any[];
+  onSalesClick?: () => void;
+  onPurchaseClick?: () => void;
+  onRemittanceClick?: () => void;
+  onAdjustmentsClick?: () => void;
+}) => {
+  const expectedCash = totalSales - expenses - savings;
+  const cashExcess = actualRemitted - expectedCash;
+  const {
+    expectedStockValue,
+    actualStockValue: derivedActualStockValue,
+  } = getStockValueBreakdown(
+    totalPurchase,
+    costOfSales,
+    adjustments,
+    startingInventoryValue
+  );
+  // Actual comes straight from live inventory when available (Overall),
+  // instead of Purchases − Cost of Sales + Adjustments — so it stays
+  // correct even if Cost of Sales has a data problem. Charge to Staff
+  // is NEVER based on this: it's always −(Cash Excess + Adjustments),
+  // the auditor's real entry, so a bug here can't change what's charged.
+  const actualStockValue = liveInventoryValue ?? derivedActualStockValue;
+  const stockDifference = actualStockValue - expectedStockValue;
+  const stockDifferenceMismatch =
+    liveInventoryValue !== undefined &&
+    Math.abs(stockDifference - adjustments) > 1;
+  const chargeToStaff = getChargeToStaff(cashExcess, adjustments);
+  const netExcess = cashExcess + adjustments;
+
+  return (
+    <div className="max-w-7xl mx-auto px-6 mt-8">
+      <div className="flex items-center justify-between mb-4 px-1">
+        <h2 className="text-xs font-black uppercase tracking-widest text-slate-400">
+          {title}
+        </h2>
+        <div className="flex items-center gap-4">
+          {subtitle && <p className="text-sm text-slate-500">{subtitle}</p>}
+          {onSetStartingValueClick && (
+            <button
+              onClick={onSetStartingValueClick}
+              className="text-[11px] font-black uppercase tracking-widest text-slate-500 hover:text-slate-300 underline decoration-dotted"
+            >
+              {startingInventoryValue
+                ? 'Update Starting Value'
+                : 'Set Starting Value'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* ===== CASH PANE ===== */}
+        <div className="bg-black/20 rounded-3xl p-5 border border-white/10">
+          <p className="text-xs font-black uppercase tracking-widest text-slate-500 mb-4 px-1">
+            Cash
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <div
+              onClick={onSalesClick}
+              className={`col-span-2 bg-slate-900 rounded-2xl p-4 border border-white/10 ${
+                onSalesClick
+                  ? 'cursor-pointer hover:border-emerald-400 transition-colors'
+                  : ''
+              }`}
+            >
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">
+                Total Sales
+              </p>
+              <p className="text-xl font-black mt-1 text-emerald-400">
+                {formatPeso(totalSales)}
+              </p>
+              <div className="mt-2 space-y-0.5 text-[11px] font-medium">
+                <div className="flex justify-between">
+                  <span className="text-emerald-400">Generic</span>
+                  <span>{formatPeso(genericSales)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-amber-400">Branded</span>
+                  <span>{formatPeso(brandedSales)}</span>
+                </div>
+                <div className="flex justify-between text-red-400">
+                  <span>Discount</span>
+                  <span>-{formatPeso(discountSales)}</span>
+                </div>
+              </div>
+            </div>
+            <div className="bg-slate-900 rounded-2xl p-4 border border-white/10">
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">
+                Expenses
+              </p>
+              <p className="text-xl font-black mt-1">{formatPeso(expenses)}</p>
+            </div>
+            <div className="bg-slate-900 rounded-2xl p-4 border border-white/10">
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">
+                Savings
+              </p>
+              <p className="text-xl font-black mt-1 text-emerald-400">
+                {formatPeso(savings)}
+              </p>
+            </div>
+            <div
+              onClick={onRemittanceClick}
+              className={`col-span-2 bg-slate-900 rounded-2xl p-4 border border-white/10 ${
+                onRemittanceClick
+                  ? 'cursor-pointer hover:border-amber-400 transition-colors'
+                  : ''
+              }`}
+            >
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">
+                Expected Cash
+              </p>
+              <p className="text-xl font-black mt-1 text-amber-400">
+                {formatPeso(expectedCash)}
+              </p>
+              <p className="text-[10px] text-slate-500 mt-1">
+                Sales − Expenses − Savings
+              </p>
+            </div>
+            <div
+              onClick={onRemittanceClick}
+              className={`col-span-2 bg-slate-900 rounded-2xl p-4 border border-white/10 ${
+                onRemittanceClick
+                  ? 'cursor-pointer hover:border-emerald-400 transition-colors'
+                  : ''
+              }`}
+            >
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">
+                Actual Remitted
+              </p>
+              <p className="text-xl font-black mt-1 text-emerald-400">
+                {formatPeso(actualRemitted)}
+              </p>
+            </div>
+            <div
+              className={`col-span-2 rounded-2xl p-4 border ${
+                cashExcess >= 0
+                  ? 'bg-emerald-500/10 border-emerald-500/30'
+                  : 'bg-red-500/10 border-red-500/30'
+              }`}
+            >
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">
+                Cash Excess — Remitted vs. Expected
+              </p>
+              <p
+                className={`text-2xl font-black mt-1 ${
+                  cashExcess >= 0 ? 'text-emerald-400' : 'text-red-400'
+                }`}
+              >
+                {cashExcess >= 0 ? '+' : ''}
+                {formatPeso(cashExcess)}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* ===== STOCK PANE ===== */}
+        <div className="bg-black/20 rounded-3xl p-5 border border-white/10">
+          <p className="text-xs font-black uppercase tracking-widest text-slate-500 mb-4 px-1">
+            Stock
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <div
+              onClick={onPurchaseClick}
+              className={`col-span-2 bg-slate-900 rounded-2xl p-4 border border-white/10 ${
+                onPurchaseClick
+                  ? 'cursor-pointer hover:border-blue-400 transition-colors'
+                  : ''
+              }`}
+            >
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">
+                Purchases
+              </p>
+              <p className="text-xl font-black mt-1 text-blue-400">
+                {formatPeso(totalPurchase)}
+              </p>
+              <div className="mt-2 space-y-0.5 text-[11px] font-medium">
+                <div className="flex justify-between">
+                  <span className="text-blue-400">Generic</span>
+                  <span>{formatPeso(genericPurchase)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-purple-400">Branded</span>
+                  <span>{formatPeso(brandedPurchase)}</span>
+                </div>
+              </div>
+            </div>
+            <div className="bg-slate-900 rounded-2xl p-4 border border-white/10 col-span-2">
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">
+                {liveInventoryValue !== undefined
+                  ? 'Expected Inventory Value'
+                  : 'Expected Change in Inventory Value'}
+              </p>
+              <p className="text-xl font-black mt-1">
+                {formatPeso(expectedStockValue)}
+              </p>
+              <p className="text-[10px] text-slate-500 mt-1">
+                {liveInventoryValue !== undefined
+                  ? startingInventoryValue
+                    ? 'Starting Value + Purchases − Cost of Sales'
+                    : 'Purchases − Cost of Sales (no starting value set)'
+                  : 'Negative is normal here — it just means more sold from existing stock than was purchased this period'}
+              </p>
+            </div>
+            <div
+              onClick={onAdjustmentsClick}
+              className={`bg-slate-900 rounded-2xl p-4 border border-white/10 ${
+                onAdjustmentsClick
+                  ? 'cursor-pointer hover:border-amber-400 transition-colors'
+                  : ''
+              }`}
+            >
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">
+                Adjustments
+              </p>
+              <p className="text-xl font-black mt-1 text-amber-400">
+                {formatPeso(adjustments)}
+              </p>
+              <p className="text-[10px] text-slate-500 mt-1">
+                Auditor's correction
+              </p>
+            </div>
+            <div className="bg-slate-900 rounded-2xl p-4 border border-white/10">
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">
+                {liveInventoryValue !== undefined
+                  ? 'Actual Inventory Value'
+                  : 'Actual Change in Inventory Value'}
+              </p>
+              <p className="text-xl font-black mt-1">
+                {formatPeso(actualStockValue)}
+              </p>
+              <p className="text-[10px] text-slate-500 mt-1">
+                {liveInventoryValue !== undefined
+                  ? 'Live — straight from inventory'
+                  : 'Expected + Adjustments'}
+              </p>
+            </div>
+            <div
+              className={`col-span-2 rounded-2xl p-4 border ${
+                stockDifference >= 0
+                  ? 'bg-emerald-500/10 border-emerald-500/30'
+                  : 'bg-red-500/10 border-red-500/30'
+              }`}
+            >
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">
+                Stock Difference — Actual vs. Expected
+              </p>
+              <p
+                className={`text-2xl font-black mt-1 ${
+                  stockDifference >= 0 ? 'text-emerald-400' : 'text-red-400'
+                }`}
+              >
+                {stockDifference >= 0 ? '+' : ''}
+                {formatPeso(stockDifference)}
+              </p>
+              {stockDifferenceMismatch && (
+                <p className="text-[10px] text-amber-400 mt-1">
+                  ⚠ Doesn't match Adjustments ({formatPeso(adjustments)}) —
+                  Cost of Sales or buy_cost data is likely off.
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ===== FINAL CALCULATION ===== */}
+      <div className="mt-6 bg-slate-900 rounded-3xl p-6 border border-red-400/30">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-medium text-slate-300">
+          <span>Cash Excess {formatPeso(cashExcess)}</span>
+          <span className="text-slate-500">+</span>
+          <span>Adjustments {formatPeso(adjustments)}</span>
+          <span className="text-slate-500">=</span>
+          <span>Net {formatPeso(netExcess)}</span>
+        </div>
+        <div className="flex items-end justify-between mt-4 gap-4">
+          <div>
+            <p className="text-xs font-black uppercase tracking-widest text-slate-400">
+              Charge to Staff
+            </p>
+            <p className="text-3xl font-black mt-1 text-red-400">
+              {formatPeso(chargeToStaff)}
+            </p>
+          </div>
+          {staff && staff.length > 0 && (
+            <div className="flex flex-wrap gap-1 justify-end">
+              {staff.map((s: any, idx: number) => (
+                <span
+                  key={s.id ?? idx}
+                  className="text-[10px] bg-red-500/10 text-red-400 px-2 py-px rounded-lg"
+                >
+                  {s.name}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ===== EXPLANATION ===== */}
+      <div className="mt-4 bg-slate-900/50 rounded-2xl p-5 border border-white/5">
+        <p className="text-[11px] font-black uppercase tracking-widest text-slate-500 mb-2">
+          How this is calculated
+        </p>
+        <p className="text-sm text-slate-400 leading-relaxed">
+          <span className="text-slate-300 font-medium">Cash</span> compares
+          what should've been collected — Expected Cash, which is Sales minus
+          Expenses minus Savings — against what was actually turned in. The
+          gap is the Cash Excess.{' '}
+          <span className="text-slate-300 font-medium">Stock</span> compares
+          what the shelves should be worth from purchases and sales alone
+          (Expected Inventory Value) against what they're worth after the
+          auditor's correction (Actual Inventory Value). That gap is the
+          Stock Difference, and it always equals the Adjustments entered — a
+          separate number wouldn't show anything new, only the same thing
+          restated. A Cash Excess can cover part or all of a Stock
+          Difference — that pattern usually means an item was sold but never
+          logged, with the cash still handed in. Whatever the Stock
+          Difference the Cash Excess can't cover is what gets charged to
+          staff.
+        </p>
+      </div>
+    </div>
+  );
+};
+
 export default function WeeklyReport() {
   const router = useRouter();
   const [selectedBranch, setSelectedBranch] = useState<any>(null);
@@ -127,6 +529,9 @@ export default function WeeklyReport() {
     genericPurchase: 0,
     brandedPurchase: 0,
     totalAdjustmentsValue: 0,
+    costOfSales: 0,
+    liveInventoryValue: 0,
+    startingInventoryValue: 0,
     expectedCash: 0,
     actualRemitted: 0,
     cashVariance: 0,
@@ -167,8 +572,6 @@ export default function WeeklyReport() {
   // Iteration modal
   const [selectedIteration, setSelectedIteration] = useState<any>(null);
   const [showIterationModal, setShowIterationModal] = useState(false);
-  const [savingsPerDayInput, setSavingsPerDayInput] = useState('0');
-  const [savingsSaving, setSavingsSaving] = useState(false);
   // NEW: Iteration system
   const [iterations, setIterations] = useState<any[]>([]);
   const [nextIterationNumber, setNextIterationNumber] = useState(0);
@@ -250,8 +653,9 @@ export default function WeeklyReport() {
       ordersRes,
       purchaseRes,
       remittanceRes,
+      branchSettingsRes,
     ] = await Promise.all([
-      fetchAll('inventory', 'id, item_name, stock_quantity, branch_id'),
+      fetchAll('inventory', 'id, item_name, stock, branch_id, buy_cost'),
       fetchAll(
         'purchase_order_items',
         'quantity, inventory_id, created_date_pht'
@@ -288,7 +692,15 @@ export default function WeeklyReport() {
         .eq('branch_id', selectedBranch.id)
         .gte('report_date', firstDateStr)
         .lt('report_date', endStr),
+      supabase
+        .from('branch_settings')
+        .select('starting_inventory_value')
+        .eq('branch_id', selectedBranch.id)
+        .maybeSingle(),
     ]);
+
+    const startingInventoryValue =
+      branchSettingsRes.data?.starting_inventory_value || 0;
 
     const branchInventory = inventoryData.filter(
       (i: any) => i.branch_id === selectedBranch.id
@@ -302,6 +714,65 @@ export default function WeeklyReport() {
       branchProductIds.has(s.product_id)
     );
     const adjustments = adjustmentDataRaw;
+
+    // Cost basis for stock-value reconciliation: purchases are already
+    // cost (paid to suppliers), so sales need to be valued the same way —
+    // quantity sold × that item's buy_cost — not at selling price/revenue.
+    // Uses each item's CURRENT buy_cost, since there's no per-sale cost
+    // history stored; if costs changed over time, or an item was later
+    // removed from inventory, this will be an approximation for older
+    // sales rather than exact.
+    const buyCostByItem = new Map<string, number>();
+    branchInventory.forEach((item: any) => {
+      buyCostByItem.set(item.id, item.buy_cost || 0);
+    });
+
+    // Actual Inventory Value, read straight from the live inventory table —
+    // stock × buy_cost, right now. `stock` is the real on-hand column in
+    // this schema (not `stock_quantity`). Deliberately NOT derived from
+    // Purchases/Cost of Sales/Adjustments: it doesn't depend on
+    // order_items matching or on Cost of Sales being correct, so it stays
+    // trustworthy even while those have bugs. This is a snapshot ("what's
+    // on the shelf today"), not a period flow, so it's the same number
+    // regardless of date range — used for the Overall panel only.
+    const liveInventoryValue = branchInventory.reduce(
+      (sum: number, item: any) =>
+        sum + (item.stock || 0) * (item.buy_cost || 0),
+      0
+    );
+    const itemsMissingBuyCost = branchInventory.filter(
+      (item: any) => (item.stock || 0) > 0 && !item.buy_cost
+    ).length;
+    if (itemsMissingBuyCost > 0) {
+      console.warn(
+        `${itemsMissingBuyCost} in-stock item(s) have no buy_cost set — ` +
+          'Actual Inventory Value is undercounting them.'
+      );
+    }
+
+    const costOfSales = salesData.reduce((sum: number, s: any) => {
+      const cost = buyCostByItem.get(s.product_id) || 0;
+      return sum + (s.quantity || 0) * cost;
+    }, 0);
+
+    if (costOfSales === 0) {
+      if (salesData.length === 0) {
+        console.warn(
+          "Cost of Sales is 0: no order_items rows matched this branch's " +
+            'inventory for this period. Check whether order_items is being ' +
+            'populated alongside orders.'
+        );
+      } else {
+        const withCost = salesData.filter(
+          (s: any) => (buyCostByItem.get(s.product_id) || 0) > 0
+        ).length;
+        console.warn(
+          `Cost of Sales is 0 despite ${salesData.length} sale line items. ` +
+            `Only ${withCost} of them are for items with a buy_cost > 0 in ` +
+            "inventory — buy_cost likely isn't populated on most items."
+        );
+      }
+    }
 
     // Overall summary — using daily_reports as the source of truth
     const genericSales =
@@ -363,7 +834,7 @@ export default function WeeklyReport() {
       return sum + qty * price;
     }, 0);
 
-    setOverallSummary({
+    const freshSummary = {
       totalSales: reportedTotalSales,
       genericSales,
       brandedSales,
@@ -372,12 +843,16 @@ export default function WeeklyReport() {
       genericPurchase,
       brandedPurchase,
       totalAdjustmentsValue,
+      costOfSales,
+      liveInventoryValue,
+      startingInventoryValue,
       expectedCash: reportedTotalSales - expenses - savings,
       actualRemitted,
       cashVariance,
       expenses,
       savings,
-    });
+    };
+    setOverallSummary(freshSummary);
 
     // Generate weeks (item-by-item reconciliation)
     const generatedWeeks: any[] = [];
@@ -471,7 +946,7 @@ export default function WeeklyReport() {
         const aQty = adjustmentsWeek
           .filter((a: any) => a.inventory_id === item.id)
           .reduce((sum: number, a: any) => sum + (a.quantity || 0), 0);
-        const actual = item.stock_quantity || 0;
+        const actual = item.stock || 0;
         const beginning = actual - pQty - aQty + sQty;
         return actual - (beginning + pQty + aQty - sQty);
       });
@@ -498,7 +973,7 @@ export default function WeeklyReport() {
 
     setWeeks(generatedWeeks);
 
-    setRawData({
+    const freshRawData = {
       branchInventory,
       purchaseData,
       salesData,
@@ -508,13 +983,35 @@ export default function WeeklyReport() {
       remittanceFullData: remittanceRes.data || [],
       firstDateStr,
       todayStr,
-    });
+    };
+    setRawData(freshRawData);
 
     setLoading(false);
+
+    // Returned so callers that need this instant's true numbers (like
+    // saveCurrentIteration) don't have to rely on React state, which
+    // only reflects whatever was loaded as of the last render.
+    return { summary: freshSummary, rawData: freshRawData };
   };
 
   const saveCurrentIteration = async () => {
     if (!selectedBranch?.id || !rawData) return;
+
+    // Pull fresh numbers before saving, rather than trusting whatever was
+    // already loaded in this tab — otherwise a daily report or adjustment
+    // entered after the page was last loaded (here or in another tab)
+    // gets silently missed and locked into the saved iteration forever.
+    const fresh = await fetchWeeklyReport();
+    if (!fresh) return;
+    const { summary: overallSummary, rawData } = fresh;
+
+    const { data: freshIterationsData } = await supabase
+      .from('weekly_iterations')
+      .select('*')
+      .eq('branch_id', selectedBranch.id)
+      .order('iteration_number', { ascending: false });
+    const iterations = freshIterationsData || [];
+    const nextIterationNumber = calculateNextIterationNumber(iterations);
 
     const saved = getSavedTotals(iterations);
 
@@ -535,6 +1032,7 @@ export default function WeeklyReport() {
 
     const currentAdjustments =
       overallSummary.totalAdjustmentsValue - saved.totalAdjustmentsValue;
+    const currentCostOfSales = overallSummary.costOfSales - saved.costOfSales;
     const currentExpenses = overallSummary.expenses - saved.expenses;
     const currentSavings = overallSummary.savings - saved.savings;
     const currentActualRemitted =
@@ -543,7 +1041,14 @@ export default function WeeklyReport() {
       overallSummary.cashVariance - saved.cashVariance;
     const currentExpectedCash = currentSales - currentExpenses - currentSavings;
 
-    const currentChargeToStaff = -(currentCashVariance + currentAdjustments);
+    // Charge to Staff = Cash Variance netted against Adjustments (both
+    // unit_price basis) — see getChargeToStaff. A cash surplus from an
+    // unlogged sale offsets the stock it explains; what's left uncovered
+    // is what's actually charged.
+    const currentChargeToStaff = getChargeToStaff(
+      currentCashVariance,
+      currentAdjustments
+    );
 
     // === Date logic (already fixed) ===
     let currentStartDate = rawData.firstDateStr;
@@ -597,6 +1102,7 @@ export default function WeeklyReport() {
       branded_purchase: currentBrandedPurchase,
 
       total_adjustments_value: currentAdjustments,
+      cost_of_sales: currentCostOfSales,
       expenses: currentExpenses,
       actual_remitted: currentActualRemitted,
       cash_variance: currentCashVariance,
@@ -682,40 +1188,46 @@ export default function WeeklyReport() {
     setSelectedIteration(null);
   };
 
-  const saveSavingsPerDay = async () => {
-    if (!selectedIteration?.id || !selectedBranch?.id) return;
-    const value = parseFloat(savingsPerDayInput) || 0;
-    setSavingsSaving(true);
+  // One-time (or occasional) action: back out what this branch's inventory
+  // must have been worth before this app started tracking it, so Overall's
+  // Expected Inventory Value accounts for stock that was already on the
+  // shelf. Deliberately NOT recalculated automatically — locking it in
+  // once, rather than every page load, is what keeps Expected vs Actual
+  // able to catch future problems instead of always trivially matching.
+  const setStartingInventoryValue = async () => {
+    if (!selectedBranch?.id) return;
 
-    const { error } = await supabase
-      .from('weekly_iterations')
-      .update({ savings_per_day: value })
-      .eq('id', selectedIteration.id)
-      .eq('branch_id', selectedBranch.id);
+    const computed =
+      overallSummary.liveInventoryValue -
+      overallSummary.totalPurchase +
+      overallSummary.costOfSales -
+      overallSummary.totalAdjustmentsValue;
+
+    const confirmed = window.confirm(
+      `This locks in ${formatCurrency(computed)} as ${selectedBranch.name || 'this branch'}'s starting inventory value, ` +
+        "calculated from today's live inventory minus everything ever purchased, sold, and adjusted through this app.\n\n" +
+        "Only do this once buy_cost is filled in for your items — otherwise today's gaps get baked in permanently. Continue?"
+    );
+    if (!confirmed) return;
+
+    const { error } = await supabase.from('branch_settings').upsert(
+      {
+        branch_id: selectedBranch.id,
+        starting_inventory_value: computed,
+        starting_inventory_value_set_at: new Date().toISOString(),
+      },
+      { onConflict: 'branch_id' }
+    );
 
     if (error) {
-      console.error('Failed to save savings value:', error);
-      alert('❌ Failed to save savings value');
-      setSavingsSaving(false);
+      console.error(error);
+      alert('❌ Failed to set starting inventory value');
       return;
     }
 
-    const updatedIteration = { ...selectedIteration, savings_per_day: value };
-    setSelectedIteration(updatedIteration);
-    setIterations((prev) =>
-      prev.map((item) =>
-        item.id === selectedIteration.id ? updatedIteration : item
-      )
-    );
-    setSavingsSaving(false);
+    alert(`✅ Starting inventory value set to ${formatCurrency(computed)}`);
+    fetchWeeklyReport();
   };
-
-  // Reset the savings input whenever a different iteration is opened
-  useEffect(() => {
-    if (selectedIteration) {
-      setSavingsPerDayInput(String(selectedIteration.savings_per_day ?? 0));
-    }
-  }, [selectedIteration]);
 
   useEffect(() => {
     if (selectedBranch?.id) fetchWeeklyReport();
@@ -887,7 +1399,7 @@ export default function WeeklyReport() {
         .filter((a: any) => a.inventory_id === item.id)
         .reduce((sum: number, a: any) => sum + (a.quantity || 0), 0);
 
-      const actualEndingStock = item.stock_quantity || 0;
+      const actualEndingStock = item.stock || 0;
       const beginningStock =
         actualEndingStock - purchasesQty - adjustmentQty + salesQty;
 
@@ -947,6 +1459,7 @@ export default function WeeklyReport() {
         genericPurchase: 0,
         brandedPurchase: 0,
         totalAdjustmentsValue: 0,
+        costOfSales: 0,
         expenses: 0,
         savings: 0,
         actualRemitted: 0,
@@ -971,6 +1484,7 @@ export default function WeeklyReport() {
         (sum, i) => sum + (i.total_adjustments_value || 0),
         0
       ),
+      costOfSales: iters.reduce((sum, i) => sum + (i.cost_of_sales || 0), 0),
       expenses: iters.reduce((sum, i) => sum + (i.expenses || 0), 0),
       savings: iters.reduce((sum, i) => sum + (i.daily_savings_total || 0), 0),
       actualRemitted: iters.reduce(
@@ -1110,435 +1624,92 @@ export default function WeeklyReport() {
         </div>
       </div>
 
-      {/* OVERALL SUMMARY CARDS */}
-      {/* OVERALL SUMMARY CARDS */}
-      {/* OVERALL SUMMARY CARDS - VISIBLE ONLY TO OWNERS */}
       {isOwner && (
-        <div className="max-w-7xl mx-auto px-6 pt-8">
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-            {/* Total Sales card */}
-            <div
-              onClick={() => {
-                setModalPeriod(null);
-                setShowBreakdown('sales');
-                setModalView('daily');
-              }}
-              className="bg-slate-900 rounded-3xl p-6 border border-white/10 cursor-pointer hover:border-emerald-400 transition-colors"
-            >
-              <div className="flex justify-between items-start">
-                <div>
-                  <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-                    Total Sales
-                  </p>
-                  <p className="text-3xl font-black mt-2">
-                    {formatCurrency(overallSummary.totalSales)}
-                  </p>
-                  <div className="mt-4 space-y-1 text-sm font-medium">
-                    <div className="flex justify-between">
-                      <span className="text-emerald-400">Generic</span>
-                      <span>{formatCurrency(overallSummary.genericSales)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-amber-400">Branded</span>
-                      <span>{formatCurrency(overallSummary.brandedSales)}</span>
-                    </div>
-                    <div className="flex justify-between text-red-400">
-                      <span>Discount</span>
-                      <span>
-                        -{formatCurrency(overallSummary.discountSales)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-                <ShoppingCart size={28} className="text-emerald-400" />
-              </div>
-            </div>
-
-            {/* Total Purchase card */}
-            <div
-              onClick={() => {
-                setModalPeriod(null);
-                setShowBreakdown('purchase');
-                setModalView('daily');
-              }}
-              className="bg-slate-900 rounded-3xl p-6 border border-white/10 cursor-pointer hover:border-blue-400 transition-colors"
-            >
-              <div className="flex justify-between items-start">
-                <div>
-                  <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-                    Total Purchase
-                  </p>
-                  <p className="text-3xl font-black mt-2">
-                    {formatCurrency(overallSummary.totalPurchase)}
-                  </p>
-                  <div className="mt-4 space-y-1 text-sm font-medium">
-                    <div className="flex justify-between">
-                      <span className="text-blue-400">Generic</span>
-                      <span>
-                        {formatCurrency(overallSummary.genericPurchase)}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-purple-400">Branded</span>
-                      <span>
-                        {formatCurrency(overallSummary.brandedPurchase)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-                <Package size={28} className="text-blue-400" />
-              </div>
-            </div>
-
-            {/* Expected Cash card */}
-            <div
-              onClick={() => {
-                setModalPeriod(null);
-                setShowRemittance(true);
-              }}
-              className="bg-slate-900 rounded-3xl p-6 border border-white/10 cursor-pointer hover:border-amber-400 transition-colors"
-            >
-              <div className="flex justify-between items-start">
-                <div>
-                  <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-                    Expected Cash
-                  </p>
-                  <p className="text-3xl font-black mt-2">
-                    {formatCurrency(overallSummary.expectedCash)}
-                  </p>
-                </div>
-                <DollarSign size={28} className="text-amber-400" />
-              </div>
-            </div>
-
-            {/* Actual Remitted card */}
-            <div
-              onClick={() => {
-                setModalPeriod(null);
-                setShowRemittance(true);
-              }}
-              className="bg-slate-900 rounded-3xl p-6 border border-white/10 cursor-pointer hover:border-emerald-400 transition-colors"
-            >
-              <div className="flex justify-between items-start">
-                <div>
-                  <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-                    Actual Remitted
-                  </p>
-                  <p className="text-3xl font-black mt-2">
-                    {formatCurrency(overallSummary.actualRemitted)}
-                  </p>
-                </div>
-                <CreditCard size={28} className="text-emerald-400" />
-              </div>
-            </div>
-
-            {/* Cash Variance card */}
-            <div
-              className={`rounded-3xl p-6 border ${
-                overallSummary.cashVariance >= 0
-                  ? 'bg-emerald-500/10 border-emerald-500/30'
-                  : 'bg-red-500/10 border-red-500/30'
-              }`}
-            >
-              <div className="flex justify-between items-start">
-                <div>
-                  <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-                    Cash Variance
-                  </p>
-                  <p
-                    className={`text-3xl font-black mt-2 ${
-                      overallSummary.cashVariance >= 0
-                        ? 'text-emerald-400'
-                        : 'text-red-400'
-                    }`}
-                  >
-                    {overallSummary.cashVariance >= 0 ? '+' : ''}
-                    {formatCurrency(overallSummary.cashVariance)}
-                  </p>
-                </div>
-                {overallSummary.cashVariance >= 0 ? (
-                  <TrendingUp size={28} className="text-emerald-400" />
-                ) : (
-                  <TrendingDown size={28} className="text-red-400" />
-                )}
-              </div>
-            </div>
-
-            {/* Total Adjustments card */}
-            <div
-              onClick={() => openAdjustmentsModal(null, 'All Adjustments')}
-              className="bg-slate-900 rounded-3xl p-6 border border-white/10 cursor-pointer hover:border-amber-400 transition-colors"
-            >
-              <div className="flex justify-between items-start">
-                <div>
-                  <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-                    Total Adjustments
-                  </p>
-                  <p className="text-3xl font-black mt-2 text-amber-400">
-                    {formatCurrency(overallSummary.totalAdjustmentsValue)}
-                  </p>
-                </div>
-                <AlertCircle size={28} className="text-amber-400" />
-              </div>
-            </div>
-          </div>
-        </div>
+        <ReconciliationPanel
+          title="OVERALL RECONCILIATION"
+          totalSales={overallSummary.totalSales}
+          genericSales={overallSummary.genericSales}
+          brandedSales={overallSummary.brandedSales}
+          discountSales={overallSummary.discountSales}
+          expenses={overallSummary.expenses}
+          savings={overallSummary.savings}
+          actualRemitted={overallSummary.actualRemitted}
+          totalPurchase={overallSummary.totalPurchase}
+          genericPurchase={overallSummary.genericPurchase}
+          brandedPurchase={overallSummary.brandedPurchase}
+          costOfSales={overallSummary.costOfSales}
+          adjustments={overallSummary.totalAdjustmentsValue}
+          liveInventoryValue={overallSummary.liveInventoryValue}
+          startingInventoryValue={overallSummary.startingInventoryValue}
+          onSetStartingValueClick={setStartingInventoryValue}
+          onSalesClick={() => {
+            setModalPeriod(null);
+            setShowBreakdown('sales');
+            setModalView('daily');
+          }}
+          onPurchaseClick={() => {
+            setModalPeriod(null);
+            setShowBreakdown('purchase');
+            setModalView('daily');
+          }}
+          onRemittanceClick={() => {
+            setModalPeriod(null);
+            setShowRemittance(true);
+          }}
+          onAdjustmentsClick={() =>
+            openAdjustmentsModal(null, 'All Adjustments')
+          }
+        />
       )}
 
       {/* CURRENT OPEN PERIOD - Grand Total minus total of all saved iterations */}
-      {/* CURRENT OPEN PERIOD (UNRECONCILED) - Exact same structure as Grand Total */}
+      <ReconciliationPanel
+        title="CURRENT OPEN PERIOD (UNRECONCILED)"
+        subtitle="Grand Total − Sum of all saved iterations • What to charge staff now"
+        totalSales={
+          overallSummary.totalSales - getSavedTotals(iterations).totalSales
+        }
+        genericSales={
+          overallSummary.genericSales - getSavedTotals(iterations).genericSales
+        }
+        brandedSales={
+          overallSummary.brandedSales - getSavedTotals(iterations).brandedSales
+        }
+        discountSales={
+          overallSummary.discountSales -
+          getSavedTotals(iterations).discountSales
+        }
+        expenses={
+          overallSummary.expenses - getSavedTotals(iterations).expenses
+        }
+        savings={overallSummary.savings - getSavedTotals(iterations).savings}
+        actualRemitted={
+          overallSummary.actualRemitted -
+          getSavedTotals(iterations).actualRemitted
+        }
+        totalPurchase={
+          overallSummary.totalPurchase -
+          getSavedTotals(iterations).totalPurchase
+        }
+        genericPurchase={
+          overallSummary.genericPurchase -
+          getSavedTotals(iterations).genericPurchase
+        }
+        brandedPurchase={
+          overallSummary.brandedPurchase -
+          getSavedTotals(iterations).brandedPurchase
+        }
+        costOfSales={
+          overallSummary.costOfSales - getSavedTotals(iterations).costOfSales
+        }
+        adjustments={
+          overallSummary.totalAdjustmentsValue -
+          getSavedTotals(iterations).totalAdjustmentsValue
+        }
+        staff={currentResponsibleStaff}
+      />
       <div className="max-w-7xl mx-auto px-6 mt-10">
-        <div className="flex items-center justify-between mb-4 px-1">
-          <h2 className="text-xs font-black uppercase tracking-widest text-emerald-400">
-            CURRENT OPEN PERIOD (UNRECONCILED)
-          </h2>
-          <p className="text-sm text-slate-400">
-            Grand Total − Sum of all saved iterations • What to charge staff now
-          </p>
-        </div>
-
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-          {/* Current Sales - EXACT same style as top card */}
-          <div className="bg-slate-900 rounded-3xl p-6 border border-white/10">
-            <div className="flex justify-between items-start">
-              <div>
-                <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-                  Current Sales
-                </p>
-                <p className="text-3xl font-black mt-2 text-emerald-400">
-                  {formatCurrency(
-                    overallSummary.totalSales -
-                      getSavedTotals(iterations).totalSales
-                  )}
-                </p>
-                <div className="mt-4 space-y-1 text-sm font-medium">
-                  <div className="flex justify-between">
-                    <span className="text-emerald-400">Generic</span>
-                    <span>
-                      {formatCurrency(
-                        overallSummary.genericSales -
-                          getSavedTotals(iterations).genericSales
-                      )}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-amber-400">Branded</span>
-                    <span>
-                      {formatCurrency(
-                        overallSummary.brandedSales -
-                          getSavedTotals(iterations).brandedSales
-                      )}
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-red-400">
-                    <span>Discount</span>
-                    <span>
-                      -
-                      {formatCurrency(
-                        overallSummary.discountSales -
-                          getSavedTotals(iterations).discountSales
-                      )}
-                    </span>
-                  </div>
-                </div>
-              </div>
-              <ShoppingCart size={28} className="text-emerald-400" />
-            </div>
-          </div>
-
-          {/* Current Purchase - same style */}
-          <div className="bg-slate-900 rounded-3xl p-6 border border-white/10">
-            <div className="flex justify-between items-start">
-              <div>
-                <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-                  Current Purchase
-                </p>
-                <p className="text-3xl font-black mt-2 text-blue-400">
-                  {formatCurrency(
-                    overallSummary.totalPurchase -
-                      getSavedTotals(iterations).totalPurchase
-                  )}
-                </p>
-                <div className="mt-4 space-y-1 text-sm font-medium">
-                  <div className="flex justify-between">
-                    <span className="text-blue-400">Generic</span>
-                    <span>
-                      {formatCurrency(
-                        overallSummary.genericPurchase -
-                          getSavedTotals(iterations).genericPurchase
-                      )}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-purple-400">Branded</span>
-                    <span>
-                      {formatCurrency(
-                        overallSummary.brandedPurchase -
-                          getSavedTotals(iterations).brandedPurchase
-                      )}
-                    </span>
-                  </div>
-                </div>
-              </div>
-              <Package size={28} className="text-blue-400" />
-            </div>
-          </div>
-
-          {/* Current Expected Cash */}
-          {/* Current Expected Cash - NOW WITH BREAKDOWN (exactly like the top card) */}
-          <div className="bg-slate-900 rounded-3xl p-6 border border-white/10">
-            <div className="flex justify-between items-start">
-              <div>
-                <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-                  Current Expected Cash
-                </p>
-                <p className="text-3xl font-black mt-2 text-amber-400">
-                  {formatCurrency(
-                    overallSummary.totalSales -
-                      getSavedTotals(iterations).totalSales -
-                      (overallSummary.expenses -
-                        getSavedTotals(iterations).expenses) -
-                      (overallSummary.savings -
-                        getSavedTotals(iterations).savings)
-                  )}
-                </p>
-              </div>
-              <DollarSign size={28} className="text-amber-400" />
-            </div>
-          </div>
-
-          {/* Current Actual Remitted */}
-          <div className="bg-slate-900 rounded-3xl p-6 border border-white/10">
-            <div className="flex justify-between items-start">
-              <div>
-                <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-                  Current Actual Remitted
-                </p>
-                <p className="text-3xl font-black mt-2 text-emerald-400">
-                  {formatCurrency(
-                    overallSummary.actualRemitted -
-                      getSavedTotals(iterations).actualRemitted
-                  )}
-                </p>
-              </div>
-              <CreditCard size={28} className="text-emerald-400" />
-            </div>
-          </div>
-
-          {/* Current Cash Variance */}
-          <div
-            className={`rounded-3xl p-6 border ${
-              overallSummary.cashVariance -
-                getSavedTotals(iterations).cashVariance >=
-              0
-                ? 'bg-emerald-500/10 border-emerald-500/30'
-                : 'bg-red-500/10 border-red-500/30'
-            }`}
-          >
-            <div className="flex justify-between items-start">
-              <div>
-                <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-                  Current Cash Variance
-                </p>
-                <p
-                  className={`text-3xl font-black mt-2 ${
-                    overallSummary.cashVariance -
-                      getSavedTotals(iterations).cashVariance >=
-                    0
-                      ? 'text-emerald-400'
-                      : 'text-red-400'
-                  }`}
-                >
-                  {overallSummary.cashVariance -
-                    getSavedTotals(iterations).cashVariance >=
-                  0
-                    ? '+'
-                    : ''}
-                  {formatCurrency(
-                    overallSummary.cashVariance -
-                      getSavedTotals(iterations).cashVariance
-                  )}
-                </p>
-              </div>
-              {overallSummary.cashVariance -
-                getSavedTotals(iterations).cashVariance >=
-              0 ? (
-                <TrendingUp size={28} className="text-emerald-400" />
-              ) : (
-                <TrendingDown size={28} className="text-red-400" />
-              )}
-            </div>
-          </div>
-
-          {/* Current Adjustments + Charge to Staff */}
-          <div className="bg-slate-900 rounded-3xl p-6 border border-white/10">
-            <div className="flex justify-between items-start">
-              <div>
-                <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-                  Current Adjustments
-                </p>
-                <p className="text-3xl font-black mt-2 text-amber-400">
-                  {formatCurrency(
-                    overallSummary.totalAdjustmentsValue -
-                      getSavedTotals(iterations).totalAdjustmentsValue
-                  )}
-                </p>
-              </div>
-              <AlertCircle size={28} className="text-amber-400" />
-            </div>
-          </div>
-
-          {/* Charge to Staff (Current) */}
-          {/* CHARGE TO STAFF (CURRENT) - NEW FORMULA: Cash Variance - Adjustments */}
-          {/* CHARGE TO STAFF (CURRENT) - Corrected Formula */}
-          {/* CHARGE TO STAFF (CURRENT) - with responsible staff names */}
-          {/* CHARGE TO STAFF (CURRENT) - with staff names */}
-          {/* CHARGE TO STAFF (CURRENT) */}
-          {/* CHARGE TO STAFF (CURRENT) */}
-          <div className="bg-slate-900 rounded-3xl p-6 border border-red-400/30">
-            <div className="flex justify-between items-start">
-              <div className="flex-1">
-                <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-                  Charge to Staff (Current)
-                </p>
-                <p className="text-3xl font-black mt-2 text-red-400">
-                  {formatCurrency(
-                    -(
-                      overallSummary.cashVariance -
-                      getSavedTotals(iterations).cashVariance +
-                      (overallSummary.totalAdjustmentsValue -
-                        getSavedTotals(iterations).totalAdjustmentsValue)
-                    )
-                  )}
-                </p>
-
-                {currentResponsibleStaff &&
-                  currentResponsibleStaff.length > 0 && (
-                    <div className="mt-4">
-                      <p className="text-xs text-red-400/70 mb-2">
-                        Responsible:
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        {currentResponsibleStaff.map((staff: any) => (
-                          <span
-                            key={staff.id}
-                            className="bg-red-500/10 text-red-400 text-xs px-3 py-1 rounded-2xl"
-                          >
-                            {staff.name}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-              </div>
-              <AlertCircle size={28} className="text-red-400 mt-1" />
-            </div>
-          </div>
-        </div>
-      </div>
-      {/* ITERATIONS TABLE */}
-      <div className="max-w-7xl mx-auto px-6 mt-10">
-        <div className="flex items-center justify-between mb-4 px-1">
+        <div className="flex items-center justify-between mb-1 px-1">
           <h2 className="text-xs font-black uppercase tracking-widest text-slate-400">
             ITERATIONS (Latest First)
           </h2>
@@ -1550,6 +1721,11 @@ export default function WeeklyReport() {
             SAVE AS ITERATION {nextIterationNumber} (CURRENT PERIOD)
           </button>
         </div>
+        <p className="text-[11px] text-slate-500 mb-4 px-1">
+          Expected/Actual Stock are each iteration's own change, not a
+          running balance — negative is normal and just means more sold from
+          existing stock than was purchased that stretch.
+        </p>
 
         <div className="bg-slate-900 rounded-3xl overflow-hidden border border-white/10">
           <table className="w-full">
@@ -1557,11 +1733,15 @@ export default function WeeklyReport() {
               <tr className="bg-slate-950 text-xs font-black uppercase text-slate-400">
                 <th className="text-left p-5">Iteration</th>
                 <th className="text-left p-5">Period</th>
+                <th className="text-right p-5">Days</th>
                 <th className="text-right p-5">Sales</th>
                 <th className="text-right p-5">Purchase</th>
-                <th className="text-right p-5">Adj. Value</th>
-                <th className="text-right p-5">Stock Var</th>
+                <th className="text-right p-5">Adj. / Stock Diff</th>
+                <th className="text-right p-5">Expected Stock</th>
+                <th className="text-right p-5">Actual Stock</th>
+                <th className="text-right p-5">Savings</th>
                 <th className="text-right p-5">Cash Var</th>
+                <th className="text-right p-5">Excess</th>
                 <th className="text-right p-5 bg-amber-500/10">
                   Charge to Staff
                 </th>
@@ -1591,6 +1771,9 @@ export default function WeeklyReport() {
                       year: 'numeric',
                     })}
                   </td>
+                  <td className="p-5 text-right font-mono text-slate-400">
+                    {getIterationDays(iter)}
+                  </td>
                   <td className="p-5 text-right font-mono text-emerald-400">
                     {formatCurrency(iter.total_sales || 0)}
                   </td>
@@ -1602,36 +1785,65 @@ export default function WeeklyReport() {
                       Math.abs(iter.total_adjustments_value || 0)
                     )}
                   </td>
-                  <td className="p-5 text-right font-mono">
-                    {(iter.stock_variance || 0) >= 0 ? '+' : ''}
-                    {iter.stock_variance || 0}
-                  </td>
-                  <td className="p-5 text-right font-mono">
-                    {(iter.cash_variance || 0) >= 0 ? '+' : ''}
-                    {formatCurrency(iter.cash_variance || 0)}
-                  </td>
-
-                  {/* CHARGE TO STAFF + RESPONSIBLE STAFF NAMES */}
-                  <td className="p-5 text-right">
-                    <div className="font-mono font-black text-red-400">
-                      {formatCurrency(iter.charge_to_staff || 0)}
-                    </div>
-                    {iter.responsible_staff &&
-                      iter.responsible_staff.length > 0 && (
-                        <div className="flex flex-wrap gap-1 justify-end mt-2">
-                          {iter.responsible_staff.map(
-                            (staff: any, idx: number) => (
-                              <span
-                                key={idx}
-                                className="text-[10px] bg-red-500/10 text-red-400 px-2 py-px rounded-lg"
-                              >
-                                {staff.name}
-                              </span>
-                            )
+                  {(() => {
+                    const breakdown = getStockValueBreakdown(
+                      iter.total_purchase || 0,
+                      iter.cost_of_sales || 0,
+                      iter.total_adjustments_value || 0
+                    );
+                    const chargeToStaff = getChargeToStaff(
+                      iter.cash_variance || 0,
+                      iter.total_adjustments_value || 0
+                    );
+                    return (
+                      <>
+                        <td className="p-5 text-right font-mono">
+                          {formatCurrency(breakdown.expectedStockValue)}
+                        </td>
+                        <td className="p-5 text-right font-mono">
+                          {formatCurrency(breakdown.actualStockValue)}
+                        </td>
+                        <td className="p-5 text-right font-mono text-emerald-400">
+                          {formatCurrency(iter.daily_savings_total || 0)}
+                        </td>
+                        <td className="p-5 text-right font-mono">
+                          {(iter.cash_variance || 0) >= 0 ? '+' : ''}
+                          {formatCurrency(iter.cash_variance || 0)}
+                        </td>
+                        <td className="p-5 text-right font-mono">
+                          {breakdown.difference + (iter.cash_variance || 0) >=
+                          0
+                            ? '+'
+                            : ''}
+                          {formatCurrency(
+                            breakdown.difference + (iter.cash_variance || 0)
                           )}
-                        </div>
-                      )}
-                  </td>
+                        </td>
+
+                        {/* CHARGE TO STAFF + RESPONSIBLE STAFF NAMES */}
+                        <td className="p-5 text-right">
+                          <div className="font-mono font-black text-red-400">
+                            {formatCurrency(chargeToStaff)}
+                          </div>
+                          {iter.responsible_staff &&
+                            iter.responsible_staff.length > 0 && (
+                              <div className="flex flex-wrap gap-1 justify-end mt-2">
+                                {iter.responsible_staff.map(
+                                  (staff: any, idx: number) => (
+                                    <span
+                                      key={idx}
+                                      className="text-[10px] bg-red-500/10 text-red-400 px-2 py-px rounded-lg"
+                                    >
+                                      {staff.name}
+                                    </span>
+                                  )
+                                )}
+                              </div>
+                            )}
+                        </td>
+                      </>
+                    );
+                  })()}
 
                   {/* DELETE BUTTON */}
                   <td className="p-5 text-center">
@@ -2560,13 +2772,19 @@ export default function WeeklyReport() {
           onClick={closeIterationModal}
         >
           <div
-            className="bg-slate-900 rounded-3xl max-w-4xl w-full mx-4 max-h-[90vh] flex flex-col"
+            className="bg-slate-900 rounded-3xl max-w-6xl w-full mx-4 max-h-[90vh] flex flex-col overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="p-6 border-b border-white/10 flex justify-between items-center">
-              <h2 className="text-xl font-black uppercase">
-                {selectedIteration.label}
-              </h2>
+              <div>
+                <h2 className="text-xl font-black uppercase">
+                  {selectedIteration.label}
+                </h2>
+                <p className="text-xs text-slate-500 mt-1">
+                  {getIterationDays(selectedIteration)} day
+                  {getIterationDays(selectedIteration) === 1 ? '' : 's'}
+                </p>
+              </div>
               <button
                 onClick={closeIterationModal}
                 className="text-slate-400 hover:text-white text-3xl"
@@ -2576,160 +2794,249 @@ export default function WeeklyReport() {
             </div>
 
             <div className="p-8">
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
-                <div className="bg-slate-800 rounded-2xl p-6">
-                  <p className="text-xs font-black uppercase text-slate-400">
-                    Total Sales
-                  </p>
-                  <p className="text-4xl font-black text-emerald-400 mt-2">
-                    {formatCurrency(selectedIteration.total_sales || 0)}
-                  </p>
-                </div>
-                <div className="bg-slate-800 rounded-2xl p-6">
-                  <p className="text-xs font-black uppercase text-slate-400">
-                    Total Purchase
-                  </p>
-                  <p className="text-4xl font-black text-blue-400 mt-2">
-                    {formatCurrency(selectedIteration.total_purchase || 0)}
-                  </p>
-                </div>
-                <div
-                  onClick={() => {
-                    setShowIterationModal(false);
-                    setTimeout(() => {
-                      setModalPeriod({
-                        start: selectedIteration.start_date,
-                        end: selectedIteration.end_date,
-                      });
-                      setShowRemittance(true);
-                    }, 150);
-                  }}
-                  className="bg-slate-800 rounded-2xl p-6 cursor-pointer hover:bg-slate-700 transition-colors"
-                >
-                  <p className="text-xs font-black uppercase text-slate-400">
-                    Expected Cash
-                  </p>
-                  <p className="text-4xl font-black text-amber-400 mt-2">
-                    {formatCurrency(
-                      selectedIteration.expected_cash ??
-                        (selectedIteration.total_sales || 0) -
-                          (selectedIteration.expenses || 0) -
-                          (selectedIteration.daily_savings_total || 0)
-                    )}
-                  </p>
-                </div>
-                <div
-                  onClick={() => {
-                    setShowIterationModal(false);
-                    setTimeout(() => {
-                      setModalPeriod({
-                        start: selectedIteration.start_date,
-                        end: selectedIteration.end_date,
-                      });
-                      setShowRemittance(true);
-                    }, 150);
-                  }}
-                  className="bg-slate-800 rounded-2xl p-6 cursor-pointer hover:bg-slate-700 transition-colors"
-                >
-                  <p className="text-xs font-black uppercase text-slate-400">
-                    Remittance
-                  </p>
-                  <p className="text-4xl font-black text-emerald-400 mt-2">
-                    {formatCurrency(selectedIteration.actual_remitted || 0)}
-                  </p>
-                </div>
-                <div className="bg-slate-800 rounded-2xl p-6">
-                  <p className="text-xs font-black uppercase text-slate-400">
-                    Adjustments
-                  </p>
-                  <p className="text-4xl font-black text-amber-400 mt-2">
-                    {formatCurrency(
-                      selectedIteration.total_adjustments_value || 0
-                    )}
-                  </p>
-                </div>
-                <div className="bg-slate-800 rounded-2xl p-6">
-                  <p className="text-xs font-black uppercase text-slate-400">
-                    Cash Variance
-                  </p>
-                  <p
-                    className={`text-4xl font-black mt-2 ${
-                      selectedIteration.cash_variance >= 0
-                        ? 'text-emerald-400'
-                        : 'text-red-400'
-                    }`}
-                  >
-                    {selectedIteration.cash_variance >= 0 ? '+' : ''}
-                    {formatCurrency(selectedIteration.cash_variance || 0)}
-                  </p>
-                </div>
-                <div className="bg-slate-800 rounded-2xl p-6">
-                  <p className="text-xs font-black uppercase text-slate-400">
-                    Charge to Staff
-                  </p>
-                  <p className="text-4xl font-black text-red-400 mt-2">
-                    {formatCurrency(selectedIteration.charge_to_staff || 0)}
-                  </p>
-                </div>
-                <div className="bg-slate-800 rounded-2xl p-6">
-                  <p className="text-xs font-black uppercase text-slate-400">
-                    Saved On
-                  </p>
-                  <p className="text-xl font-medium mt-2 text-slate-300">
-                    {new Date(
-                      selectedIteration.saved_at || selectedIteration.created_at
-                    ).toLocaleString('en-US')}
-                  </p>
-                </div>
-              </div>
+              {(() => {
+                const totalSales = selectedIteration.total_sales || 0;
+                const expenses = selectedIteration.expenses || 0;
+                const savings = selectedIteration.daily_savings_total || 0;
+                const expectedCash = totalSales - expenses - savings;
+                const actualRemitted = selectedIteration.actual_remitted || 0;
+                const cashExcess = actualRemitted - expectedCash;
 
-              {/* Savings for this iteration */}
-              <div className="mt-6 bg-slate-800 rounded-2xl p-6">
-                <p className="text-xs font-black uppercase text-slate-400 mb-4">
-                  Savings For This Iteration
-                </p>
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-6 items-end">
-                  <div>
-                    <p className="text-xs font-black uppercase text-slate-500">
-                      Days In Iteration
+                const totalPurchase = selectedIteration.total_purchase || 0;
+                const adjustments =
+                  selectedIteration.total_adjustments_value || 0;
+                const breakdown = getStockValueBreakdown(
+                  totalPurchase,
+                  selectedIteration.cost_of_sales || 0,
+                  adjustments
+                );
+                const chargeToStaff = getChargeToStaff(
+                  cashExcess,
+                  adjustments
+                );
+                const netExcess = cashExcess + breakdown.difference;
+
+                const goToRemittance = () => {
+                  setShowIterationModal(false);
+                  setTimeout(() => {
+                    setModalPeriod({
+                      start: selectedIteration.start_date,
+                      end: selectedIteration.end_date,
+                    });
+                    setShowRemittance(true);
+                  }, 150);
+                };
+
+                return (
+                  <>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                      {/* CASH PANE */}
+                      <div className="bg-black/20 rounded-3xl p-5 border border-white/10">
+                        <p className="text-xs font-black uppercase tracking-widest text-slate-500 mb-4 px-1">
+                          Cash
+                        </p>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="bg-slate-800 rounded-2xl p-4 col-span-2">
+                            <p className="text-[11px] font-black uppercase text-slate-400">
+                              Total Sales
+                            </p>
+                            <p className="text-2xl font-black text-emerald-400 mt-1">
+                              {formatCurrency(totalSales)}
+                            </p>
+                          </div>
+                          <div className="bg-slate-800 rounded-2xl p-4">
+                            <p className="text-[11px] font-black uppercase text-slate-400">
+                              Expenses
+                            </p>
+                            <p className="text-xl font-black mt-1">
+                              {formatCurrency(expenses)}
+                            </p>
+                          </div>
+                          <div className="bg-slate-800 rounded-2xl p-4">
+                            <p className="text-[11px] font-black uppercase text-slate-400">
+                              Savings
+                            </p>
+                            <p className="text-xl font-black text-emerald-400 mt-1">
+                              {formatCurrency(savings)}
+                            </p>
+                          </div>
+                          <div
+                            onClick={goToRemittance}
+                            className="bg-slate-800 rounded-2xl p-4 col-span-2 cursor-pointer hover:bg-slate-700 transition-colors"
+                          >
+                            <p className="text-[11px] font-black uppercase text-slate-400">
+                              Expected Cash
+                            </p>
+                            <p className="text-xl font-black text-amber-400 mt-1">
+                              {formatCurrency(expectedCash)}
+                            </p>
+                            <p className="text-[10px] text-slate-500 mt-1">
+                              Sales − Expenses − Savings
+                            </p>
+                          </div>
+                          <div
+                            onClick={goToRemittance}
+                            className="bg-slate-800 rounded-2xl p-4 col-span-2 cursor-pointer hover:bg-slate-700 transition-colors"
+                          >
+                            <p className="text-[11px] font-black uppercase text-slate-400">
+                              Actual Remitted
+                            </p>
+                            <p className="text-xl font-black text-emerald-400 mt-1">
+                              {formatCurrency(actualRemitted)}
+                            </p>
+                          </div>
+                          <div
+                            className={`col-span-2 rounded-2xl p-4 ${
+                              cashExcess >= 0
+                                ? 'bg-emerald-500/10'
+                                : 'bg-red-500/10'
+                            }`}
+                          >
+                            <p className="text-[11px] font-black uppercase text-slate-400">
+                              Cash Excess — Remitted vs. Expected
+                            </p>
+                            <p
+                              className={`text-2xl font-black mt-1 ${
+                                cashExcess >= 0
+                                  ? 'text-emerald-400'
+                                  : 'text-red-400'
+                              }`}
+                            >
+                              {cashExcess >= 0 ? '+' : ''}
+                              {formatCurrency(cashExcess)}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* STOCK PANE */}
+                      <div className="bg-black/20 rounded-3xl p-5 border border-white/10">
+                        <p className="text-xs font-black uppercase tracking-widest text-slate-500 mb-4 px-1">
+                          Stock
+                        </p>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="bg-slate-800 rounded-2xl p-4 col-span-2">
+                            <p className="text-[11px] font-black uppercase text-slate-400">
+                              Purchases
+                            </p>
+                            <p className="text-2xl font-black text-blue-400 mt-1">
+                              {formatCurrency(totalPurchase)}
+                            </p>
+                          </div>
+                          <div className="bg-slate-800 rounded-2xl p-4 col-span-2">
+                            <p className="text-[11px] font-black uppercase text-slate-400">
+                              Expected Change in Inventory Value
+                            </p>
+                            <p className="text-xl font-black mt-1">
+                              {formatCurrency(breakdown.expectedStockValue)}
+                            </p>
+                            <p className="text-[10px] text-slate-500 mt-1">
+                              Negative is normal here — it just means more
+                              sold from existing stock than was purchased
+                              this period
+                            </p>
+                          </div>
+                          <div className="bg-slate-800 rounded-2xl p-4">
+                            <p className="text-[11px] font-black uppercase text-slate-400">
+                              Adjustments
+                            </p>
+                            <p className="text-xl font-black text-amber-400 mt-1">
+                              {formatCurrency(adjustments)}
+                            </p>
+                          </div>
+                          <div className="bg-slate-800 rounded-2xl p-4">
+                            <p className="text-[11px] font-black uppercase text-slate-400">
+                              Actual Change in Inventory Value
+                            </p>
+                            <p className="text-xl font-black mt-1">
+                              {formatCurrency(breakdown.actualStockValue)}
+                            </p>
+                          </div>
+                          <div
+                            className={`col-span-2 rounded-2xl p-4 ${
+                              breakdown.difference >= 0
+                                ? 'bg-emerald-500/10'
+                                : 'bg-red-500/10'
+                            }`}
+                          >
+                            <p className="text-[11px] font-black uppercase text-slate-400">
+                              Stock Difference — Actual vs. Expected
+                            </p>
+                            <p
+                              className={`text-2xl font-black mt-1 ${
+                                breakdown.difference >= 0
+                                  ? 'text-emerald-400'
+                                  : 'text-red-400'
+                              }`}
+                            >
+                              {breakdown.difference >= 0 ? '+' : ''}
+                              {formatCurrency(breakdown.difference)}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* FINAL CALCULATION */}
+                    <div className="mt-6 bg-slate-800 rounded-3xl p-6 border border-red-400/30">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-medium text-slate-300">
+                        <span>Cash Excess {formatCurrency(cashExcess)}</span>
+                        <span className="text-slate-500">+</span>
+                        <span>
+                          Stock Difference{' '}
+                          {formatCurrency(breakdown.difference)}
+                        </span>
+                        <span className="text-slate-500">=</span>
+                        <span>Net {formatCurrency(netExcess)}</span>
+                      </div>
+                      <p className="text-xs font-black uppercase tracking-widest text-slate-400 mt-4">
+                        Charge to Staff
+                      </p>
+                      <p className="text-3xl font-black text-red-400 mt-1">
+                        {formatCurrency(chargeToStaff)}
+                      </p>
+                    </div>
+
+                    {/* EXPLANATION */}
+                    <div className="mt-4 bg-slate-800/50 rounded-2xl p-5 border border-white/5">
+                      <p className="text-[11px] font-black uppercase tracking-widest text-slate-500 mb-2">
+                        How this is calculated
+                      </p>
+                      <p className="text-sm text-slate-400 leading-relaxed">
+                        <span className="text-slate-300 font-medium">
+                          Cash
+                        </span>{' '}
+                        compares what should've been collected — Expected
+                        Cash, which is Sales minus Expenses minus Savings —
+                        against what was actually turned in. The gap is the
+                        Cash Excess.{' '}
+                        <span className="text-slate-300 font-medium">
+                          Stock
+                        </span>{' '}
+                        compares what the shelves should be worth from
+                        purchases and sales alone (Expected Inventory Value)
+                        against what they're worth after the auditor's
+                        correction (Actual Inventory Value). That gap is the
+                        Stock Difference, and it always equals the
+                        Adjustments entered. A Cash Excess can cover part or
+                        all of a Stock Difference — that pattern usually
+                        means an item was sold but never logged, with the
+                        cash still handed in. Whatever the Stock Difference
+                        the Cash Excess can't cover is what gets charged to
+                        staff.
+                      </p>
+                    </div>
+
+                    <p className="text-xs text-slate-600 mt-4">
+                      Saved{' '}
+                      {new Date(
+                        selectedIteration.saved_at ||
+                          selectedIteration.created_at
+                      ).toLocaleString('en-US')}
                     </p>
-                    <p className="text-2xl font-black mt-2 text-slate-200">
-                      {getIterationDays(selectedIteration)}
-                    </p>
-                  </div>
-                  <div>
-                    <label className="text-xs font-black uppercase text-slate-500 block mb-2">
-                      Savings / Day
-                    </label>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      value={savingsPerDayInput}
-                      onChange={(e) => setSavingsPerDayInput(e.target.value)}
-                      className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-2 text-lg font-bold text-white focus:outline-none focus:border-emerald-400"
-                      placeholder="0.00"
-                    />
-                  </div>
-                  <div>
-                    <p className="text-xs font-black uppercase text-slate-500">
-                      Savings Total
-                    </p>
-                    <p className="text-2xl font-black mt-2 text-emerald-400">
-                      {formatCurrency(
-                        (parseFloat(savingsPerDayInput) || 0) *
-                          getIterationDays(selectedIteration)
-                      )}
-                    </p>
-                  </div>
-                </div>
-                <button
-                  onClick={saveSavingsPerDay}
-                  disabled={savingsSaving}
-                  className="mt-4 w-full py-3 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-black font-black uppercase text-sm rounded-2xl transition-colors"
-                >
-                  {savingsSaving ? 'Saving...' : 'Save Savings Value'}
-                </button>
-              </div>
+                  </>
+                );
+              })()}
             </div>
 
             <div className="p-6 border-t border-white/10">
