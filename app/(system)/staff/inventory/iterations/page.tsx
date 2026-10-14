@@ -356,10 +356,11 @@ const ReconciliationPanel = ({
             </div>
             <div
               onClick={onAdjustmentsClick}
-              className={`bg-slate-900 rounded-2xl p-4 border border-white/10 ${
+              role={onAdjustmentsClick ? 'button' : undefined}
+              className={`bg-slate-900 rounded-2xl p-4 border ${
                 onAdjustmentsClick
-                  ? 'cursor-pointer hover:border-amber-400 transition-colors'
-                  : ''
+                  ? 'border-amber-400/40 cursor-pointer hover:border-amber-400 active:border-amber-400 transition-colors'
+                  : 'border-white/10'
               }`}
             >
               <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">
@@ -371,6 +372,12 @@ const ReconciliationPanel = ({
               <p className="text-[10px] text-slate-500 mt-1">
                 Auditor's correction
               </p>
+              {/* Hover styling never shows on a touchscreen, so say it outright */}
+              {onAdjustmentsClick && (
+                <p className="text-[10px] font-bold text-amber-400 mt-1">
+                  Tap to see which items ›
+                </p>
+              )}
             </div>
             <div className="bg-slate-900 rounded-2xl p-4 border border-white/10">
               <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">
@@ -421,7 +428,17 @@ const ReconciliationPanel = ({
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-medium text-slate-300">
           <span>Cash Excess {formatPeso(cashExcess)}</span>
           <span className="text-slate-500">+</span>
-          <span>Adjustments {formatPeso(adjustments)}</span>
+          {onAdjustmentsClick ? (
+            <button
+              type="button"
+              onClick={onAdjustmentsClick}
+              className="underline decoration-dotted decoration-amber-400/70 underline-offset-4 hover:text-white"
+            >
+              Adjustments {formatPeso(adjustments)} ›
+            </button>
+          ) : (
+            <span>Adjustments {formatPeso(adjustments)}</span>
+          )}
           <span className="text-slate-500">=</span>
           <span>Net {formatPeso(netExcess)}</span>
         </div>
@@ -536,6 +553,7 @@ export default function WeeklyReport() {
     actualRemitted: 0,
     cashVariance: 0,
     expenses: 0,
+    savings: 0,
   });
 
   const [loading, setLoading] = useState(true);
@@ -569,6 +587,17 @@ export default function WeeklyReport() {
   const [adjustments, setAdjustments] = useState<any[]>([]);
   const [adjustmentsList, setAdjustmentsList] = useState<any[]>([]);
   const [adjustmentsModalTitle, setAdjustmentsModalTitle] = useState('');
+  const [adjustmentsModalSubtitle, setAdjustmentsModalSubtitle] = useState('');
+  // The number on the card that was tapped, so the popup can say so if its
+  // list doesn't add up to it. null = nothing to compare against.
+  const [adjustmentsCardTotal, setAdjustmentsCardTotal] = useState<
+    number | null
+  >(null);
+  // The list is drawn 100 rows at a time: "All Adjustments" can run to
+  // thousands of rows, and drawing them all at once freezes a tablet for
+  // many seconds — which looks exactly like the tap did nothing. The totals
+  // at the top are always computed from every entry, not just the rows shown.
+  const [adjustmentsVisibleCount, setAdjustmentsVisibleCount] = useState(100);
   // Iteration modal
   const [selectedIteration, setSelectedIteration] = useState<any>(null);
   const [showIterationModal, setShowIterationModal] = useState(false);
@@ -1003,7 +1032,10 @@ export default function WeeklyReport() {
     // gets silently missed and locked into the saved iteration forever.
     const fresh = await fetchWeeklyReport();
     if (!fresh) return;
-    const { summary: overallSummary, rawData } = fresh;
+    // NOTE: not named `rawData` — that would shadow the state variable the
+    // guard on the first line of this function reads, and reading a `const`
+    // before its declaration line throws, which silently killed the Save button.
+    const { summary: overallSummary, rawData: freshRawData } = fresh;
 
     const { data: freshIterationsData } = await supabase
       .from('weekly_iterations')
@@ -1051,7 +1083,7 @@ export default function WeeklyReport() {
     );
 
     // === Date logic (already fixed) ===
-    let currentStartDate = rawData.firstDateStr;
+    let currentStartDate = freshRawData.firstDateStr;
     if (iterations.length > 0) {
       const lastIteration = iterations[0];
       const lastEnd = new Date(lastIteration.end_date);
@@ -1425,28 +1457,58 @@ export default function WeeklyReport() {
     setModalLoading(false);
   };
 
+  // Opens the Adjustments details popup. A period filters by each entry's own
+  // date — the literal YYYY-MM-DD at the start of created_date_pht, the same
+  // date the rest of this page compares against — so there's no UTC shifting
+  // and no dependence on how a browser parses timestamp strings (Safari is
+  // picky). `opts.cardTotal` is the number on the card that was tapped, so
+  // the popup can flag it if its list doesn't add up to that number.
   const openAdjustmentsModal = (
     period: { start: string; end: string } | null,
-    title: string
+    title: string,
+    opts?: { subtitle?: string; cardTotal?: number }
   ) => {
     const raw = rawData;
     if (!raw) return;
     let filtered = raw.adjustments || [];
     if (period) {
+      const periodStart = String(period.start || '').slice(0, 10);
+      const periodEnd = String(period.end || '').slice(0, 10);
       filtered = filtered.filter((a: any) => {
-        const dateStr = a.created_date_pht
-          ? new Date(a.created_date_pht).toISOString().split('T')[0]
-          : '';
-        return dateStr >= period.start && dateStr <= period.end;
+        const dateStr = String(a.created_date_pht || '').slice(0, 10);
+        return dateStr >= periodStart && dateStr <= periodEnd;
       });
     }
     setAdjustmentsList(filtered);
     setAdjustmentsModalTitle(title);
+    setAdjustmentsModalSubtitle(opts?.subtitle || '');
+    setAdjustmentsCardTotal(opts?.cardTotal ?? null);
+    setAdjustmentsVisibleCount(100);
     setShowAdjustmentsModal(true);
   };
 
   const formatCurrency = (amount: number) =>
     `₱${amount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
+
+  // Same date style as the Period column in the Iterations table.
+  const formatShortDate = (dateStr: string) =>
+    new Date(dateStr).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+
+  // First day of the current open period: the day after the latest saved
+  // iteration ended (or the very first transaction when none are saved yet).
+  // Same rule the responsible-staff lookup above uses.
+  const getCurrentPeriodStart = () => {
+    if (iterations.length > 0) {
+      const lastEnd = new Date(iterations[0].end_date);
+      lastEnd.setDate(lastEnd.getDate() + 1);
+      return lastEnd.toISOString().split('T')[0];
+    }
+    return rawData?.firstDateStr || '2020-01-01';
+  };
 
   const getSavedTotals = (iters: any[]) => {
     if (!iters || iters.length === 0)
@@ -1707,6 +1769,21 @@ export default function WeeklyReport() {
           getSavedTotals(iterations).totalAdjustmentsValue
         }
         staff={currentResponsibleStaff}
+        onAdjustmentsClick={() =>
+          openAdjustmentsModal(
+            // Open-ended: nothing can be dated after "now", and a far-off end
+            // keeps an entry made early this morning from being cut off by
+            // the UTC-vs-Manila date difference.
+            { start: getCurrentPeriodStart(), end: '9999-12-31' },
+            'Current Period — Adjustments',
+            {
+              subtitle: `${formatShortDate(getCurrentPeriodStart())} – today`,
+              cardTotal:
+                overallSummary.totalAdjustmentsValue -
+                getSavedTotals(iterations).totalAdjustmentsValue,
+            }
+          )
+        }
       />
       <div className="max-w-7xl mx-auto px-6 mt-10">
         <div className="flex items-center justify-between mb-1 px-1">
@@ -1727,7 +1804,7 @@ export default function WeeklyReport() {
           existing stock than was purchased that stretch.
         </p>
 
-        <div className="bg-slate-900 rounded-3xl overflow-hidden border border-white/10">
+        <div className="bg-slate-900 rounded-3xl overflow-x-auto border border-white/10">
           <table className="w-full">
             <thead>
               <tr className="bg-slate-950 text-xs font-black uppercase text-slate-400">
@@ -2382,9 +2459,10 @@ export default function WeeklyReport() {
       {/* DETAILED ADJUSTMENTS MODAL */}
       {/* DETAILED ADJUSTMENTS MODAL - IMPROVED WITH POSITIVE/NEGATIVE BREAKDOWN */}
       {/* DETAILED ADJUSTMENTS MODAL - NOW FULLY MONETARY (VALUE-BASED) */}
+      {/* z-[150]: sits above the iteration popup (z-[140]) so it can open from inside it */}
       {showAdjustmentsModal && (
         <div
-          className="fixed inset-0 bg-black/70 flex items-center justify-center z-[130]"
+          className="fixed inset-0 bg-black/70 flex items-center justify-center z-[150]"
           onClick={() => setShowAdjustmentsModal(false)}
         >
           <div
@@ -2392,9 +2470,18 @@ export default function WeeklyReport() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="p-6 border-b border-white/10 flex justify-between items-center">
-              <h2 className="text-xl font-black uppercase">
-                {adjustmentsModalTitle}
-              </h2>
+              <div>
+                <h2 className="text-xl font-black uppercase">
+                  {adjustmentsModalTitle}
+                </h2>
+                <p className="text-xs text-slate-500 mt-1">
+                  {adjustmentsModalSubtitle
+                    ? `${adjustmentsModalSubtitle} · `
+                    : ''}
+                  {adjustmentsList.length}{' '}
+                  {adjustmentsList.length === 1 ? 'entry' : 'entries'}
+                </p>
+              </div>
               <button
                 onClick={() => setShowAdjustmentsModal(false)}
                 className="text-slate-400 hover:text-white text-3xl"
@@ -2403,6 +2490,10 @@ export default function WeeklyReport() {
               </button>
             </div>
 
+            {/* One scroll area for the summary AND the list, so on a short
+                screen the summary scrolls away instead of squeezing the
+                list down to a row or two */}
+            <div className="flex-1 overflow-auto">
             {/* MONETARY SUMMARY - Positive / Negative / Gross / Net Value */}
             <div className="px-6 pt-6 pb-4 border-b border-white/10 bg-slate-950/50">
               {(() => {
@@ -2422,29 +2513,50 @@ export default function WeeklyReport() {
                   0
                 );
                 const grossValue = positiveValue + negativeValue;
+                // Does this list add up to the card that was tapped?
+                const cardMismatch =
+                  adjustmentsCardTotal !== null &&
+                  Math.abs(netValue - adjustmentsCardTotal) > 0.5;
 
                 return (
                   <div className="space-y-6">
-                    {/* GROSS TOTAL - matches the card (113905) */}
+                    {/* NET TOTAL - the same number as the Adjustments card,
+                        and the one Charge to Staff actually uses */}
                     <div className="text-center">
                       <p className="text-amber-400 text-xs font-black uppercase tracking-widest">
-                        Gross Adjustment Value
+                        Net Adjustment Value
                       </p>
-                      <p className="text-4xl font-black text-amber-400 mt-1">
-                        {formatCurrency(grossValue)}
+                      <p
+                        className={`text-4xl font-black mt-1 ${
+                          netValue >= 0 ? 'text-emerald-400' : 'text-red-400'
+                        }`}
+                      >
+                        {netValue >= 0 ? '+' : ''}
+                        {formatCurrency(netValue)}
                       </p>
                       <p className="text-xs text-slate-500 mt-1">
-                        Total movement (before netting)
+                        Same number as the Adjustments card — this is what goes
+                        into Charge to Staff
                       </p>
+                      {cardMismatch && adjustmentsCardTotal !== null && (
+                        <p className="text-xs text-amber-400 mt-2">
+                          ⚠ The card shows {formatCurrency(adjustmentsCardTotal)}
+                          , but the entries below add up to{' '}
+                          {formatCurrency(netValue)}. That usually means an
+                          adjustment was added or edited after a period was
+                          saved, or it's dated on the day one period ends and
+                          the next begins.
+                        </p>
+                      )}
                     </div>
 
-                    {/* Positive / Negative / Net */}
-                    <div className="grid grid-cols-3 gap-6 text-center">
+                    {/* Positive / Negative / Gross */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-6 text-center">
                       <div className="bg-emerald-500/10 rounded-2xl p-4">
                         <p className="text-emerald-400 text-xs font-black uppercase tracking-widest">
                           Positive Adj. Value
                         </p>
-                        <p className="text-4xl font-black text-emerald-400 mt-1">
+                        <p className="text-3xl font-black text-emerald-400 mt-1">
                           +{formatCurrency(positiveValue)}
                         </p>
                       </div>
@@ -2452,25 +2564,19 @@ export default function WeeklyReport() {
                         <p className="text-red-400 text-xs font-black uppercase tracking-widest">
                           Negative Adj. Value
                         </p>
-                        <p className="text-4xl font-black text-red-400 mt-1">
+                        <p className="text-3xl font-black text-red-400 mt-1">
                           -{formatCurrency(negativeValue)}
                         </p>
                       </div>
-                      <div
-                        className={`rounded-2xl p-4 ${
-                          netValue >= 0 ? 'bg-emerald-500/10' : 'bg-red-500/10'
-                        }`}
-                      >
+                      <div className="rounded-2xl p-4 bg-slate-800">
                         <p className="text-slate-400 text-xs font-black uppercase tracking-widest">
-                          Net Adj. Value
+                          Gross Adj. Value
                         </p>
-                        <p
-                          className={`text-4xl font-black mt-1 ${
-                            netValue >= 0 ? 'text-emerald-400' : 'text-red-400'
-                          }`}
-                        >
-                          {netValue >= 0 ? '+' : ''}
-                          {formatCurrency(Math.abs(netValue))}
+                        <p className="text-3xl font-black text-amber-400 mt-1">
+                          {formatCurrency(grossValue)}
+                        </p>
+                        <p className="text-[10px] text-slate-500 mt-1">
+                          Total movement, before netting
                         </p>
                       </div>
                     </div>
@@ -2480,13 +2586,12 @@ export default function WeeklyReport() {
             </div>
             {/* DEBUG INFO (you can remove this later) */}
 
-            <div className="flex-1 overflow-auto p-6">
+            <div className="p-6">
               <table className="w-full text-sm">
                 <thead className="bg-slate-950 sticky top-0">
                   <tr className="text-xs font-black uppercase text-slate-400">
                     <th className="text-left p-4">Item Name</th>
-                    <th className="text-right p-4">Adj. Value</th>{' '}
-                    {/* ← CHANGED */}
+                    <th className="text-right p-4">Adj. Value</th>
                     <th className="text-right p-4">Unit Price</th>
                     <th className="text-right p-4">Buy Cost</th>
                     <th className="text-right p-4">Total Selling</th>
@@ -2495,24 +2600,41 @@ export default function WeeklyReport() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/10">
-                  {adjustmentsList.map((adj: any, i: number) => {
+                  {[...adjustmentsList]
+                    // newest first, so the latest entries are on top
+                    .sort((a: any, b: any) =>
+                      String(b.created_date_pht || '').localeCompare(
+                        String(a.created_date_pht || '')
+                      )
+                    )
+                    .slice(0, adjustmentsVisibleCount)
+                    .map((adj: any, i: number) => {
                     const qty = adj.quantity || 0;
                     const unitPrice = adj.unit_price || 0;
                     const buyCost = adj.buy_cost || 0;
                     const adjValue = qty * unitPrice; // ← NEW: monetary value
                     const item = adj.inventory || {};
+                    const entryDate = String(adj.created_date_pht || '').slice(
+                      0,
+                      10
+                    );
                     return (
-                      <tr key={i} className="hover:bg-white/5">
+                      <tr key={adj.id ?? i} className="hover:bg-white/5">
                         <td className="p-4 font-medium">
                           {item.item_name || 'Deleted / Unknown Item'}
+                          <div className="text-[11px] font-normal text-slate-500 mt-0.5">
+                            {entryDate ? formatShortDate(entryDate) : 'No date'}
+                            {' · '}Qty {qty > 0 ? '+' : ''}
+                            {qty}
+                          </div>
                         </td>
                         <td
-                          className={`p-4 text-right font-mono font-semibold text-lg ${
+                          className={`p-4 text-right whitespace-nowrap font-mono font-semibold text-lg ${
                             adjValue >= 0 ? 'text-emerald-400' : 'text-red-400'
                           }`}
                         >
                           {adjValue >= 0 ? '+' : ''}
-                          {formatCurrency(Math.abs(adjValue))}
+                          {formatCurrency(adjValue)}
                         </td>
                         <td className="p-4 text-right font-mono">
                           {formatCurrency(unitPrice)}
@@ -2532,6 +2654,35 @@ export default function WeeklyReport() {
                   })}
                 </tbody>
               </table>
+              {adjustmentsList.length > adjustmentsVisibleCount && (
+                <div className="mt-4 flex flex-col sm:flex-row items-center justify-between gap-3">
+                  <p className="text-xs text-slate-500">
+                    Showing the latest{' '}
+                    {adjustmentsVisibleCount.toLocaleString('en-US')} of{' '}
+                    {adjustmentsList.length.toLocaleString('en-US')} entries —
+                    the totals above already include all of them
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setAdjustmentsVisibleCount((c) => c + 100)}
+                      className="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-xl text-xs font-black uppercase"
+                    >
+                      Show 100 more
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAdjustmentsVisibleCount(adjustmentsList.length)
+                      }
+                      className="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-xl text-xs font-black uppercase"
+                    >
+                      Show all
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
             </div>
 
             <div className="p-6 border-t border-white/10">
@@ -2827,6 +2978,24 @@ export default function WeeklyReport() {
                   }, 150);
                 };
 
+                // Opens the item-by-item list ON TOP of this popup (the
+                // details popup sits above it), so closing it lands right
+                // back here instead of dropping you out to the table.
+                const goToAdjustments = () =>
+                  openAdjustmentsModal(
+                    {
+                      start: selectedIteration.start_date,
+                      end: selectedIteration.end_date,
+                    },
+                    `Iteration ${selectedIteration.iteration_number} — Adjustments`,
+                    {
+                      subtitle: `${formatShortDate(
+                        selectedIteration.start_date
+                      )} – ${formatShortDate(selectedIteration.end_date)}`,
+                      cardTotal: adjustments,
+                    }
+                  );
+
                 return (
                   <>
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -2936,12 +3105,19 @@ export default function WeeklyReport() {
                               this period
                             </p>
                           </div>
-                          <div className="bg-slate-800 rounded-2xl p-4">
+                          <div
+                            onClick={goToAdjustments}
+                            role="button"
+                            className="bg-slate-800 rounded-2xl p-4 border border-amber-400/40 cursor-pointer hover:bg-slate-700 active:bg-slate-700 transition-colors"
+                          >
                             <p className="text-[11px] font-black uppercase text-slate-400">
                               Adjustments
                             </p>
                             <p className="text-xl font-black text-amber-400 mt-1">
                               {formatCurrency(adjustments)}
+                            </p>
+                            <p className="text-[10px] font-bold text-amber-400 mt-1">
+                              Tap to see which items ›
                             </p>
                           </div>
                           <div className="bg-slate-800 rounded-2xl p-4">
