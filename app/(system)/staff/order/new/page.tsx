@@ -2052,10 +2052,18 @@ export default function NewOrderPOS() {
 
       validItems.forEach((item) => {
         const qty = Number(item.qty || 1);
-        const unitPrice = Number(item.price_piece || 0);
+        const basePrice = Number(item.price_piece || 0);
+        const adjPercent = Number(item.discount_percent || 0);
+        // Markup (negative adj%) is baked into the printed unit price so the
+        // customer never sees the original per-piece price or a markup line.
+        // Discount (positive adj%) keeps the base price and shows the peso
+        // discount in its own column.
+        const isMarkup = adjPercent < 0;
+        const unitPrice = isMarkup
+          ? basePrice * (1 - adjPercent / 100)
+          : basePrice;
         const gross = qty * unitPrice;
-        const discountAmount =
-          gross * (Number(item.discount_percent || 0) / 100);
+        const discountAmount = isMarkup ? 0 : gross * (adjPercent / 100);
         const lineTotal = gross - discountAmount;
         const itemName = (item.item_name || '').trim();
         const lotNumber = (item.lot_number || '').trim().toUpperCase();
@@ -2106,7 +2114,7 @@ export default function NewOrderPOS() {
         }
 
         doc.text(unitPrice.toFixed(2), 160, currentY, { align: 'right' });
-        doc.text('0.00', 177, currentY, { align: 'right' });
+        doc.text(discountAmount.toFixed(2), 177, currentY, { align: 'right' });
         doc.text(lineTotal.toFixed(2), 195, currentY, { align: 'right' });
 
         grandTotal += lineTotal;
