@@ -2488,7 +2488,10 @@ export default function StaffDashboard() {
       await supabase
         .from('orders')
         .update({ status: 'FOR DELIVERY' })
-        .eq('id', orderId);
+        .eq('id', orderId)
+        // Only the first PRINT (from FOR PREPARATION) moves the order forward;
+        // REPRINTs from FOR DELIVERY / FOR COLLECTION leave the status alone.
+        .eq('status', 'PENDING');
 
       const { data: order } = await supabase
         .from('orders')
@@ -2513,6 +2516,7 @@ export default function StaffDashboard() {
           quantity,
           unit_price,
           subtotal,
+          discount,
           lot_number,
           expiry_date,
           inventory (item_name)
@@ -2651,8 +2655,20 @@ export default function StaffDashboard() {
 
       items.forEach((item: any) => {
         const qty = Number(item.quantity || 1);
-        const unitPrice = Number(item.unit_price || 0);
+        const baseUnitPrice = Number(item.unit_price || 0);
         const lineTotal = Number(item.subtotal || 0);
+        // order_items.discount is positive for a discount and negative for a
+        // markup. Fall back to (gross - subtotal) for rows without it.
+        const storedDiscount =
+          item.discount === null || item.discount === undefined
+            ? qty * baseUnitPrice - lineTotal
+            : Number(item.discount);
+        // Markup is baked into the printed unit price (customer never sees the
+        // base price); a discount keeps the base price and shows the peso amount.
+        const isMarkup = storedDiscount < 0;
+        const unitPrice =
+          isMarkup && qty > 0 ? lineTotal / qty : baseUnitPrice;
+        const discountAmount = isMarkup ? 0 : storedDiscount;
         const itemName = (item.inventory?.item_name || '').trim();
         const lotNumber = (item.lot_number || '').trim().toUpperCase(); // ← UPPERCASE
         const expiryDate = item.expiry_date || '';
@@ -2704,7 +2720,7 @@ export default function StaffDashboard() {
 
         // Amounts aligned to the first line of the row
         doc.text(unitPrice.toFixed(2), 160, currentY, { align: 'right' });
-        doc.text('0.00', 177, currentY, { align: 'right' });
+        doc.text(discountAmount.toFixed(2), 177, currentY, { align: 'right' });
         doc.text(lineTotal.toFixed(2), 195, currentY, { align: 'right' });
 
         grandTotal += lineTotal;
