@@ -115,6 +115,40 @@ interface ReceivableOrderDetail {
   payment_method: string | null;
 }
 
+// --- IMAGE COMPRESSION FOR AI SCAN ---
+// Next.js server actions reject bodies over 1 MB, and Vercel rejects
+// function requests over ~4.5 MB; full-size phone photos exceed both.
+// 1600px on the long side at JPEG 0.7 stays readable for invoice OCR
+// and usually lands around 200-500 KB.
+const compressImage = (
+  file: File,
+  maxDim = 1600,
+  quality = 0.7
+): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        URL.revokeObjectURL(url);
+        return reject(new Error('Canvas not supported'));
+      }
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Could not read image'));
+    };
+    img.src = url;
+  });
+
 // --- LEVENSHTEIN DISTANCE UTILITY ---
 const getLevenshteinDistance = (a: string, b: string): number => {
   const matrix = Array.from({ length: a.length + 1 }, () =>
@@ -780,21 +814,43 @@ export default function NewOrderPOS() {
   };
 
   const handleAiUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const input = e.target;
+    const file = input.files?.[0];
     if (!file) return;
     setIsScanning(true);
     try {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = async () => {
-        const base64Data = (reader.result as string).split(',')[1];
-        const extracted = await parseInvoiceImage(base64Data, file.type);
-        processAiResults(extracted);
-        setIsScanning(false);
-      };
-    } catch (err) {
-      console.error(err);
+      // Compress first: full-size photos exceed the 1 MB server action limit
+      const dataUrl = await compressImage(file);
+      const base64Data = dataUrl.split(',')[1];
+      const extracted: any = await parseInvoiceImage(base64Data, 'image/jpeg');
+      console.log('AI raw response:', extracted);
+
+      // Surface failures instead of silently doing nothing
+      if (!extracted || extracted?.error) {
+        alert(
+          `AI scan failed.\n\n${extracted?.error || 'Empty response from AI'}`
+        );
+        return;
+      }
+
+      // Same shapes processAiResults accepts: array, { items }, { data }
+      const list = Array.isArray(extracted)
+        ? extracted
+        : extracted?.items || extracted?.data || [];
+      if (!list.length) {
+        alert('AI scan ran but found no line items on this invoice.');
+        return;
+      }
+
+      processAiResults(extracted);
+    } catch (err: any) {
+      console.error('AI Extraction Failed:', err);
+      alert(`AI scan failed: ${err?.message || 'Unknown error'}`);
+    } finally {
+      // Always clear the overlay, and reset the input so the same
+      // photo can be picked again after a failure
       setIsScanning(false);
+      input.value = '';
     }
   };
 
