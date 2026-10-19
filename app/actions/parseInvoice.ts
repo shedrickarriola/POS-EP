@@ -1,112 +1,94 @@
 'use server';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
-// gemini-2.5-flash reached its scheduled shutdown on Oct 16, 2026.
-// Keep the model name in one place so the next migration is a one-line change.
-const MODEL = 'gemini-3.5-flash';
+const getApiKey = () => process.env.GEMINI_API_KEY;
 
-type ScanError = { error: string };
-
-const getClient = (): GoogleGenAI | null => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return null;
-  return new GoogleGenAI({ apiKey });
-};
-
-// Strips ```json fences in case the model wraps its output despite JSON mode.
-const parseJsonArray = (raw: string | undefined): any[] | ScanError => {
-  const text = (raw ?? '')
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/, '')
-    .trim();
-
-  if (!text) return { error: 'AI returned an empty response.' };
-
-  try {
-    const parsed = JSON.parse(text);
-    if (Array.isArray(parsed)) return parsed;
-    // Some responses come back as { items: [...] }
-    if (Array.isArray(parsed?.items)) return parsed.items;
-    return { error: 'AI response was not a list of items.' };
-  } catch {
-    return { error: `AI returned invalid JSON: ${text.slice(0, 200)}` };
-  }
-};
-
-export async function parseInvoiceImage(
-  base64Data: string,
-  mimeType: string
-): Promise<any[] | ScanError> {
-  const ai = getClient();
-  if (!ai) {
+export async function parseInvoiceImage(base64Data: string, mimeType: string) {
+  const apiKey = getApiKey();
+  if (!apiKey) {
     console.error('GEMINI_API_KEY is missing');
-    return { error: 'GEMINI_API_KEY is missing on the server.' };
+    return null;
   }
 
   if (typeof base64Data !== 'string' || base64Data.length < 50) {
-    return { error: 'Invalid image data (too short or not a string).' };
-  }
-
-  // Strip the "data:image/jpeg;base64," prefix if present
-  const pureBase64 = base64Data.includes(',')
-    ? base64Data.split(',')[1]
-    : base64Data;
-
-  if (!pureBase64 || pureBase64.length < 20) {
-    return { error: 'Image data is empty after cleaning.' };
+    console.error(
+      'SERVER ERROR: Invalid base64 input (too short or not a string)'
+    );
+    return null;
   }
 
   try {
-    const response = await ai.models.generateContent({
-      model: MODEL,
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: 'Extract pharmacy items (item_name, qty, invoice_price) from this image. Return ONLY a valid JSON array of objects. Do not include any extra text.',
-            },
-            {
-              inlineData: {
-                data: pureBase64.trim(),
-                mimeType: mimeType?.toLowerCase().trim() || 'image/jpeg',
-              },
-            },
-          ],
-        },
-      ],
-      config: {
+    // ✅ Properly extract only the pure base64 part
+    let pureBase64 = base64Data;
+
+    if (base64Data.includes(',')) {
+      pureBase64 = base64Data.split(',')[1]; // Take everything after the comma
+    }
+
+    // Extra safety
+    if (!pureBase64 || pureBase64.length < 20) {
+      console.error(
+        'SERVER ERROR: Cleaned base64 string is empty or too short'
+      );
+      return null;
+    }
+
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-3.5-flash',
+      generationConfig: {
         responseMimeType: 'application/json',
         temperature: 0.1,
       },
     });
 
-    return parseJsonArray(response.text);
+    const result = await model.generateContent([
+      {
+        text: 'Extract pharmacy items (item_name, qty, invoice_price) from this image. Return ONLY a valid JSON array of objects. Do not include any extra text.',
+      },
+      {
+        inlineData: {
+          data: pureBase64.trim(), // Must be pure base64 string
+          mimeType: mimeType.toLowerCase().trim() || 'image/jpeg',
+        },
+      },
+    ]);
+
+    const response = await result.response;
+    const text = response.text().trim();
+
+    if (!text) return null;
+
+    return JSON.parse(text);
   } catch (error: any) {
-    const msg = error?.message || String(error);
-    console.error('IMAGE SCAN ERROR:', msg);
-    return { error: msg };
+    console.error('IMAGE SCAN ERROR:', error.message || error);
+    if (error?.message?.includes('base64')) {
+      console.error(
+        'Base64 issue detected. Check how the data is being sent from client.'
+      );
+    }
+    return null;
   }
 }
 
-export async function parseInvoiceText(
-  pastedText: string
-): Promise<any[] | ScanError> {
-  const ai = getClient();
-  if (!ai) return { error: 'GEMINI_API_KEY is missing on the server.' };
+export async function parseInvoiceText(pastedText: string) {
+  const apiKey = getApiKey();
+  if (!apiKey) return null;
 
   try {
-    const response = await ai.models.generateContent({
-      model: MODEL,
-      contents: `Extract pharmacy items as JSON array with keys (item_name, qty, invoice_price): ${pastedText}`,
-      config: { responseMimeType: 'application/json' },
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-3.5-flash',
+      generationConfig: { responseMimeType: 'application/json' },
     });
 
-    return parseJsonArray(response.text);
+    const result = await model.generateContent(
+      `Extract pharmacy items as JSON array with keys (item_name, qty, invoice_price): ${pastedText}`
+    );
+    const response = await result.response;
+    return JSON.parse(response.text());
   } catch (error: any) {
-    const msg = error?.message || String(error);
-    console.error('TEXT SCAN ERROR:', msg);
-    return { error: msg };
+    console.error('TEXT SCAN ERROR:', error.message);
+    return null;
   }
 }
