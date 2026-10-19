@@ -131,6 +131,42 @@ const getLevenshteinDistance = (a: string, b: string): number => {
   return matrix[s1.length][s2.length];
 };
 /**
+ * Shrinks a phone photo before it is sent to the server action.
+ * Next.js server actions reject bodies over 1 MB, and Vercel rejects
+ * function requests over ~4.5 MB; full-size photos as base64 exceed both.
+ * 1600px on the long side at JPEG 0.7 stays readable for invoice OCR
+ * and usually lands around 200-500 KB.
+ */
+const compressImage = (
+  file: File,
+  maxDim = 1600,
+  quality = 0.7
+): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        URL.revokeObjectURL(url);
+        return reject(new Error('Canvas not supported'));
+      }
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Could not read image'));
+    };
+    img.src = url;
+  });
+
+/**
  * Normalizes medicine names by removing structural noise, standardizing units,
  * and stripping special characters (like quotes) that interfere with matching.
  */
@@ -761,7 +797,30 @@ export default function NewPurchaseOrder() {
       }
 
       try {
-        const extracted = await parseInvoiceImage(fileData, file.type);
+        // Compress first: full-size photos exceed the 1 MB server action limit
+        const smallImage = await compressImage(file);
+        const extracted: any = await parseInvoiceImage(
+          smallImage,
+          'image/jpeg'
+        );
+        console.log('AI raw response:', extracted);
+
+        // Surface failures instead of silently doing nothing
+        if (!Array.isArray(extracted)) {
+          alert(
+            `AI scan returned no items.\n\n${
+              extracted?.error ||
+              JSON.stringify(extracted)?.slice(0, 300) ||
+              'Empty response'
+            }`
+          );
+          return; // finally still runs: closes overlay, resets file input
+        }
+
+        if (extracted.length === 0) {
+          alert('AI scan ran but found no line items on this invoice.');
+          return;
+        }
 
         if (extracted && Array.isArray(extracted)) {
           const aiMappedItems = extracted
@@ -911,8 +970,9 @@ export default function NewPurchaseOrder() {
           setItems(aiMappedItems);
           setSearchTerms(aiMappedItems.map((i: any) => i.item_name));
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error('AI Extraction Failed:', err);
+        alert(`AI scan failed: ${err?.message || 'Unknown error'}`);
       } finally {
         setIsScanning(false);
         if (e.target) e.target.value = '';
