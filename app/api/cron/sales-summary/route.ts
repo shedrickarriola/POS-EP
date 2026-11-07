@@ -3146,26 +3146,37 @@ export async function GET(request: Request) {
             .filter((r) => r.total > 0)
             .sort((a, b) => b.total - a.total);
 
-          // ── Agent quota checker (office incentives, generic-net basis) ──
+          // ── Agent quota checker (office incentives, COLLECTION generic-net basis) ──
+          // Incentives are based on what the agent COLLECTED (daily_payments by report_date), not
+          // on sales. Only the generic-net part of each payment counts: payment × (generic −
+          // discount) ÷ SO net, so branded never raises it (whole discount treated as generic).
+          // Payments with no linked SO can't be split, so they don't count toward the quota.
           // Daily quota = agent_weekly_quota ÷ 6 (Mon–Sat; Sunday has no daily quota, but
-          // Sunday sales still count toward the week). All three incentives stack.
-          const OFFICE_DAILY_INCENTIVE = 200; // per agent, per Mon–Sat day generic-net ≥ daily quota
-          const OFFICE_WEEKLY_INCENTIVE = 500; // per agent, if the week's generic-net ≥ weekly quota
+          // Sunday collections still count toward the week). All three incentives stack.
+          const OFFICE_DAILY_INCENTIVE = 200; // per agent, per Mon–Sat day generic-net collected ≥ daily quota
+          const OFFICE_WEEKLY_INCENTIVE = 500; // per agent, if the week's generic-net collected ≥ weekly quota
+          const collGenNet = (p: any) => {
+            const ord = p.orders as any;
+            const oGen = Number(ord?.generic_amt || 0);
+            const oBrd = Number(ord?.branded_amt || 0);
+            const oDisc = Number(ord?.discount_total || 0);
+            const oNet = oGen + oBrd - oDisc;
+            return ord && oNet > 0 ? Number(p.amount || 0) * ((oGen - oDisc) / oNet) : 0;
+          };
           const agentDayNetMap = new Map<string, { displayName: string; days: number[] }>();
-          (ordersData || [])
-            .filter((o: any) => !isOfficeOrder(o))
-            .forEach((o: any) => {
-              const display = (o.agent || 'MAIN OFFICE').trim();
+          (paymentsData || [])
+            .filter((p: any) => !isOfficePayment(p))
+            .forEach((p: any) => {
+              const display = ((p.orders as any)?.agent || 'MAIN OFFICE').trim();
               const key = display.toUpperCase();
-              const di = weekDates.indexOf(o.created_date_pht);
+              const di = weekDates.indexOf(p.report_date);
               if (di < 0) return;
               if (!agentDayNetMap.has(key))
                 agentDayNetMap.set(key, {
                   displayName: agentSalesMap.get(key)?.displayName || display,
                   days: weekDates.map(() => 0),
                 });
-              agentDayNetMap.get(key)!.days[di] +=
-                Number(o.generic_amt || 0) - Number(o.discount_total || 0);
+              agentDayNetMap.get(key)!.days[di] += collGenNet(p);
             });
           const isWorkingDay = (dateStr: string) =>
             new Date(dateStr + 'T00:00:00').getDay() !== 0;
@@ -3595,7 +3606,7 @@ export async function GET(request: Request) {
               </div>
 
               <!-- AGENT SALES + QUOTA -->
-              <h3 style="color:#10b981; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">📦 Weekly Sales by Agent</h3>
+              <h3 style="color:#94a3b8; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">📦 Weekly Sales by Agent <span style="font-size:9px; letter-spacing:1px; color:#64748b; font-weight:400;">— reference only, no incentive</span></h3>
               <div style="overflow-x:auto; margin-bottom:28px;">
                 <table style="width:100%; border-collapse:collapse; font-size:13px;">
                   <thead>
@@ -3619,21 +3630,21 @@ export async function GET(request: Request) {
                         const barPct = Math.min(rawPct, 100);
                         const barColor =
                           rawPct >= 100
-                            ? '#10b981'
+                            ? '#94a3b8'
                             : rawPct >= 75
-                            ? '#f59e0b'
+                            ? '#7c8ba1'
                             : rawPct >= 50
-                            ? '#f97316'
-                            : '#ef4444';
+                            ? '#64748b'
+                            : '#475569';
                         const pctColor =
                           rawPct >= 100
-                            ? '#10b981'
+                            ? '#94a3b8'
                             : rawPct >= 75
-                            ? '#f59e0b'
-                            : '#ef4444';
+                            ? '#7c8ba1'
+                            : '#475569';
                         const metBadge =
                           rawPct >= 100
-                            ? ' <span style="background:#064e3b;color:#10b981;font-size:9px;font-weight:900;padding:1px 6px;border-radius:99px;">✓ MET</span>'
+                            ? ' <span style="background:#334155;color:#cbd5e1;font-size:9px;font-weight:900;padding:1px 6px;border-radius:99px;">✓ MET</span>'
                             : '';
                         const row = i % 2 === 0 ? trNorm : trAlt;
                         return `<tr ${row}>
@@ -3649,10 +3660,10 @@ export async function GET(request: Request) {
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fdba74;">${fmt(
                           r.discount
                         )}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#10b981; font-weight:900;">${fmt(
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#94a3b8; font-weight:900;">${fmt(
                           r.total
                         )}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900;">${fmt(
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#cbd5e1; font-weight:900;">${fmt(
                           r.genNet
                         )}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#64748b;">${
@@ -3675,7 +3686,7 @@ export async function GET(request: Request) {
                       })
                       .join('')}
                     <tr style="background:#1e293b; border-top:2px solid #475569;">
-                      <td ${tdL} style="padding:10px 12px; font-weight:900; color:#10b981; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
+                      <td ${tdL} style="padding:10px 12px; font-weight:900; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(
             agentSalesRows.reduce((s, r) => s + r.generic, 0)
           )}</td>
@@ -3685,10 +3696,10 @@ export async function GET(request: Request) {
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fdba74; font-weight:900;">${fmt(
             agentSalesRows.reduce((s, r) => s + r.discount, 0)
           )}</td>
-                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#10b981; font-weight:900;">${fmt(
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#94a3b8; font-weight:900;">${fmt(
             agentSalesRows.reduce((s, r) => s + r.total, 0)
           )}</td>
-                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900;">${fmt(
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#cbd5e1; font-weight:900;">${fmt(
             agentSalesRows.reduce((s, r) => s + r.genNet, 0)
           )}</td>
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#64748b; font-weight:900;">${fmt(
@@ -3702,7 +3713,7 @@ export async function GET(request: Request) {
 
               ${quotaCheckRows.length > 0 ? `
               <!-- AGENT QUOTA CHECKER (WEEKLY INCENTIVES) -->
-              <h3 style="color:#2dd4bf; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">🎯 Agent Quota Checker — Generic Net (Weekly Payout)</h3>
+              <h3 style="color:#2dd4bf; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">🎯 Agent Quota Checker — Collections, Generic Net (Weekly Payout)</h3>
               <div style="overflow-x:auto; margin-bottom:10px;">
                 <table style="width:100%; border-collapse:collapse; font-size:12px;">
                   <thead>
@@ -3757,7 +3768,7 @@ export async function GET(request: Request) {
                   </tbody>
                 </table>
               </div>
-              <p style="margin:-2px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Quota basis = Generic Net (generic − discount). Branded sales don't count, and the whole discount is treated as generic discount. Office-account orders are excluded. Daily quota = agent_weekly_quota ÷ 6 working days (Mon–Sat). Sunday has no daily quota, but Sunday sales still count toward the week. Payout: +₱${OFFICE_DAILY_INCENTIVE} for each Mon–Sat day hit (green ✓), +₱${OFFICE_WEEKLY_INCENTIVE} if the week's generic net meets the weekly quota. They stack, and the ₱1,000 monthly bonus is checked in the Monthly Report. "—" = no quota set for that agent.</p>
+              <p style="margin:-2px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Quota basis = <strong>COLLECTIONS</strong>, generic net only: each payment counts only for its generic − discount share of the linked SO (branded never counts, the whole discount is treated as generic discount; payments with no linked SO don't count). Collections are dated by report date. Office accounts are excluded. Sales are not used for incentives. Daily quota = agent_weekly_quota ÷ 6 working days (Mon–Sat). Sunday has no daily quota, but Sunday collections still count toward the week. Payout: +₱${OFFICE_DAILY_INCENTIVE} for each Mon–Sat day hit (green ✓), +₱${OFFICE_WEEKLY_INCENTIVE} if the week's generic-net collections meet the weekly quota. They stack, and the ₱1,000 monthly bonus is checked in the Monthly Report. "—" = no quota set for that agent.</p>
               ` : ''}
 
               <!-- AGENT COLLECTIONS -->
@@ -3770,6 +3781,7 @@ export async function GET(request: Request) {
                       <th ${thR}>Generic</th>
                       <th ${thR}>Branded</th>
                       <th ${thR}>Discount</th>
+                      <th style="padding:10px 12px; text-align:right; background:#134e4a; color:#5eead4; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Generic Net<br><span style="font-size:8px; letter-spacing:0; text-transform:none; color:#99f6e4;">quota basis</span></th>
                       <th ${thR}>Cash</th>
                       <th ${thR}>Cheque</th>
                       <th ${thR}>Online</th>
@@ -3792,6 +3804,9 @@ export async function GET(request: Request) {
                         )}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fdba74;">${fmt(
                           r.discount
+                        )}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(
+                          r.generic - r.discount
                         )}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${
                           r.cash > 0
@@ -3838,6 +3853,9 @@ export async function GET(request: Request) {
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fdba74; font-weight:900;">${fmt(
                         tdisc
                       )}</td>
+                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(
+                        tg - tdisc
+                      )}</td>
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(
                         tc
                       )}</td>
@@ -3857,9 +3875,7 @@ export async function GET(request: Request) {
               </div>
               ${(() => {
                 const ua = agentCollRows.reduce((s, r) => s + r.unallocated, 0);
-                return ua > 0
-                  ? `<p style="margin:-20px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Generic / Branded / Discount on collections are split pro-rata from each payment's linked SO. ${fmt(ua)} came from payments with no linked SO (legacy / standalone), so it's in the Total but not in the split.</p>`
-                  : '';
+                return `<p style="margin:-20px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Generic / Branded / Discount on collections are split pro-rata from each payment's linked SO. <strong>Generic Net (generic − discount) is what the Agent Quota Checker uses</strong> — branded collections are shown but never raise it.${ua > 0 ? ` ${fmt(ua)} came from payments with no linked SO (legacy / standalone), so it's in the Total but not in the split, and doesn't count toward the quota.` : ''}</p>`;
               })()}
 
               ${
@@ -4169,7 +4185,6 @@ export async function GET(request: Request) {
             { data: profilesData },
             { data: purchaseOrdersData },
             { data: paymentsDataWide },
-            { data: ordersDataWide },
           ] = await Promise.all([
             supabaseAdmin
               .from('daily_reports')
@@ -4222,22 +4237,12 @@ export async function GET(request: Request) {
               .eq('branch_id', b.id)
               .gte('report_date', weekRangeStart)
               .lte('report_date', weekRangeEnd),
-
-            // Orders across the FULL Sun–Sat edge weeks (may spill into adjacent months) —
-            // used only by the Agent Quota Checker so a split week is judged on its real 7 days.
-            supabaseAdmin
-              .from('orders')
-              .select('id, generic_amt, discount_total, client_name, created_date_pht, agent')
-              .eq('branch_id', b.id)
-              .gte('created_date_pht', weekRangeStart)
-              .lte('created_date_pht', weekRangeEnd),
           ]);
 
           // ── Office account lookup ──
           const clientNames = [
             ...new Set((ordersData || []).map((o: any) => o.client_name).filter(Boolean)),
             ...new Set((paymentsDataWide || []).map((p: any) => (p.orders as any)?.client_name || p.customer_name).filter(Boolean)),
-            ...new Set((ordersDataWide || []).map((o: any) => o.client_name).filter(Boolean)),
           ];
           let officeMap: Record<string, boolean> = {};
           if (clientNames.length > 0) {
@@ -4496,7 +4501,7 @@ export async function GET(request: Request) {
             };
           });
 
-          // ── Agent quota checker (office incentives, generic-net basis) ──
+          // ── Agent quota checker (office incentives, COLLECTION generic-net basis) ──
           // Same rules as the Weekly Report's checker: daily quota = agent_weekly_quota ÷ 6 (Mon–Sat),
           // ₱200 per day hit, ₱500 per week hit, plus ₱1,000 if the month's generic net meets the
           // monthly quota. All stack. Daily/weekly figures here cover the weeks whose Saturday falls
@@ -4520,15 +4525,25 @@ export async function GET(request: Request) {
           (profilesData || []).forEach((p: any) => {
             if (p.full_name) weeklyQuotaMap.set(p.full_name.trim().toUpperCase(), Number(p.agent_weekly_quota || 0));
           });
+          // COLLECTION basis: generic-net part of each payment (payment × (generic − discount) ÷ SO
+          // net), by report_date. Branded never counts; payments with no linked SO don't count.
+          const collGenNet = (p: any) => {
+            const ord = p.orders as any;
+            const oGen = Number(ord?.generic_amt || 0);
+            const oBrd = Number(ord?.branded_amt || 0);
+            const oDisc = Number(ord?.discount_total || 0);
+            const oNet = oGen + oBrd - oDisc;
+            return ord && oNet > 0 ? Number(p.amount || 0) * ((oGen - oDisc) / oNet) : 0;
+          };
           const agentNetByDate = new Map<string, { displayName: string; byDate: Map<string, number> }>();
-          (ordersDataWide || []).filter((o: any) => !isOfficeOrder(o)).forEach((o: any) => {
-            const display = (o.agent || 'MAIN OFFICE').trim();
+          (paymentsDataWide || []).filter((p: any) => !isOfficePayment(p)).forEach((p: any) => {
+            const display = ((p.orders as any)?.agent || 'MAIN OFFICE').trim();
             const key = display.toUpperCase();
             if (!agentNetByDate.has(key)) {
               agentNetByDate.set(key, { displayName: agentSalesMap.get(key)?.displayName || display, byDate: new Map() });
             }
             const m = agentNetByDate.get(key)!.byDate;
-            m.set(o.created_date_pht, (m.get(o.created_date_pht) || 0) + Number(o.generic_amt || 0) - Number(o.discount_total || 0));
+            m.set(p.report_date, (m.get(p.report_date) || 0) + collGenNet(p));
           });
           const monthlyQuotaCheckRows = Array.from(agentNetByDate.entries())
             .map(([key, v]) => {
@@ -4890,7 +4905,7 @@ export async function GET(request: Request) {
               </div>
 
               <!-- AGENT SALES + QUOTA -->
-              <h3 style="color:#10b981; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">📦 Monthly Sales by Agent</h3>
+              <h3 style="color:#94a3b8; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">📦 Monthly Sales by Agent <span style="font-size:9px; letter-spacing:1px; color:#64748b; font-weight:400;">— reference only, no incentive</span></h3>
               <div style="overflow-x:auto; margin-bottom:28px;">
                 <table style="width:100%; border-collapse:collapse; font-size:13px;">
                   <thead>
@@ -4910,17 +4925,17 @@ export async function GET(request: Request) {
                     ${agentSalesRows.map((r, i) => {
                       const rawPct = r.quota > 0 ? (r.genNet / r.quota) * 100 : 0;
                       const barPct = Math.min(rawPct, 100);
-                      const barColor = rawPct >= 100 ? '#10b981' : rawPct >= 75 ? '#f59e0b' : rawPct >= 50 ? '#f97316' : '#ef4444';
-                      const pctColor = rawPct >= 100 ? '#10b981' : rawPct >= 75 ? '#f59e0b' : '#ef4444';
-                      const metBadge = rawPct >= 100 ? ' <span style="background:#064e3b;color:#10b981;font-size:9px;font-weight:900;padding:1px 6px;border-radius:99px;">✓ MET</span>' : '';
+                      const barColor = rawPct >= 100 ? '#94a3b8' : rawPct >= 75 ? '#7c8ba1' : rawPct >= 50 ? '#64748b' : '#475569';
+                      const pctColor = rawPct >= 100 ? '#94a3b8' : rawPct >= 75 ? '#7c8ba1' : '#475569';
+                      const metBadge = rawPct >= 100 ? ' <span style="background:#334155;color:#cbd5e1;font-size:9px;font-weight:900;padding:1px 6px;border-radius:99px;">✓ MET</span>' : '';
                       const row = i % 2 === 0 ? trNorm : trAlt;
                       return `<tr ${row}>
                         <td ${tdL} style="padding:8px 12px; font-weight:700; color:#e2e8f0;">${r.agent}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${fmt(r.generic)}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd;">${fmt(r.branded)}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fdba74;">${fmt(r.discount)}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#10b981; font-weight:900;">${fmt(r.total)}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900;">${fmt(r.genNet)}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#94a3b8; font-weight:900;">${fmt(r.total)}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#cbd5e1; font-weight:900;">${fmt(r.genNet)}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#64748b;">${r.quota > 0 ? fmt(r.quota) : '—'}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:${pctColor}; font-weight:700;">${r.quota > 0 ? rawPct.toFixed(1) + '%' : '—'}${metBadge}</td>
                         <td style="padding:8px 12px;">
@@ -4932,12 +4947,12 @@ export async function GET(request: Request) {
                       </tr>`;
                     }).join('')}
                     <tr style="background:#1e293b; border-top:2px solid #475569;">
-                      <td ${tdL} style="padding:10px 12px; font-weight:900; color:#10b981; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
+                      <td ${tdL} style="padding:10px 12px; font-weight:900; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(agentSalesRows.reduce((s, r) => s + r.generic, 0))}</td>
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(agentSalesRows.reduce((s, r) => s + r.branded, 0))}</td>
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fdba74; font-weight:900;">${fmt(agentSalesRows.reduce((s, r) => s + r.discount, 0))}</td>
-                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#10b981; font-weight:900;">${fmt(agentSalesRows.reduce((s, r) => s + r.total, 0))}</td>
-                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900;">${fmt(agentSalesRows.reduce((s, r) => s + r.genNet, 0))}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#94a3b8; font-weight:900;">${fmt(agentSalesRows.reduce((s, r) => s + r.total, 0))}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#cbd5e1; font-weight:900;">${fmt(agentSalesRows.reduce((s, r) => s + r.genNet, 0))}</td>
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#64748b; font-weight:900;">${fmt(agentSalesRows.reduce((s, r) => s + r.quota, 0))}</td>
                       <td></td><td></td>
                     </tr>
@@ -4947,7 +4962,7 @@ export async function GET(request: Request) {
 
               ${monthlyQuotaCheckRows.length > 0 ? `
               <!-- AGENT QUOTA CHECKER (MONTHLY INCENTIVES) -->
-              <h3 style="color:#2dd4bf; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">🎯 Agent Quota Checker — Generic Net (Monthly)</h3>
+              <h3 style="color:#2dd4bf; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">🎯 Agent Quota Checker — Collections, Generic Net (Monthly)</h3>
               <div style="overflow-x:auto; margin-bottom:10px;">
                 <table style="width:100%; border-collapse:collapse; font-size:12px;">
                   <thead>
@@ -5008,7 +5023,7 @@ export async function GET(request: Request) {
                   </tbody>
                 </table>
               </div>
-              <p style="margin:-2px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Quota basis = Generic Net (generic − discount). Branded doesn't count, the whole discount is treated as generic discount, and office-account orders are excluded. Daily quota = agent_weekly_quota ÷ 6 (Mon–Sat). Monthly quota = daily quota × ${workingDaysInMonth} working days. Payout: +₱${OFFICE_DAILY_INCENTIVE} per Mon–Sat day hit, +₱${OFFICE_WEEKLY_INCENTIVE} per week hit, +₱${OFFICE_MONTHLY_INCENTIVE} if the month is hit. They all stack. <strong>Daily ₱ and Weekly ₱ were already listed in this month's Saturday Weekly Reports</strong> (weeks whose Saturday falls in ${monthLabel}, each judged on its full Sun–Sat week); only <strong>Monthly ₱</strong> is new here. A week ending next month shows "paid next month" and is counted there. Each week cell shows this month's slice of generic net, with "(x/7)" and the full-week total for a split week.</p>
+              <p style="margin:-2px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Quota basis = <strong>COLLECTIONS</strong>, generic net only: each payment counts only for its generic − discount share of the linked SO (branded never counts, the whole discount is treated as generic discount; payments with no linked SO don't count). Collections are dated by report date, office accounts excluded. Sales are not used for incentives. Daily quota = agent_weekly_quota ÷ 6 (Mon–Sat). Monthly quota = daily quota × ${workingDaysInMonth} working days. Payout: +₱${OFFICE_DAILY_INCENTIVE} per Mon–Sat day hit, +₱${OFFICE_WEEKLY_INCENTIVE} per week hit, +₱${OFFICE_MONTHLY_INCENTIVE} if the month is hit. They all stack. <strong>Daily ₱ and Weekly ₱ were already listed in this month's Saturday Weekly Reports</strong> (weeks whose Saturday falls in ${monthLabel}, each judged on its full Sun–Sat week); only <strong>Monthly ₱</strong> is new here. A week ending next month shows "paid next month" and is counted there. Each week cell shows this month's slice of generic-net collections, with "(x/7)" and the full-week total for a split week.</p>
               ` : ''}
 
               <!-- AGENT COLLECTIONS -->
@@ -5021,6 +5036,7 @@ export async function GET(request: Request) {
                       <th ${thR}>Generic</th>
                       <th ${thR}>Branded</th>
                       <th ${thR}>Discount</th>
+                      <th style="padding:10px 12px; text-align:right; background:#134e4a; color:#5eead4; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Generic Net<br><span style="font-size:8px; letter-spacing:0; text-transform:none; color:#99f6e4;">quota basis</span></th>
                       <th ${thR}>Cash</th>
                       <th ${thR}>Cheque</th>
                       <th ${thR}>Online</th>
@@ -5035,6 +5051,7 @@ export async function GET(request: Request) {
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${fmt(r.generic)}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd;">${fmt(r.branded)}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fdba74;">${fmt(r.discount)}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(r.generic - r.discount)}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.cash > 0 ? fmt(r.cash) : '<span style="color:#1e293b;">—</span>'}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fcd34d;">${r.cheque > 0 ? fmt(r.cheque) : '<span style="color:#1e293b;">—</span>'}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#7dd3fc;">${r.online > 0 ? fmt(r.online) : '<span style="color:#1e293b;">—</span>'}</td>
@@ -5053,6 +5070,7 @@ export async function GET(request: Request) {
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(tg)}</td>
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(tb)}</td>
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fdba74; font-weight:900;">${fmt(tdisc)}</td>
+                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(tg - tdisc)}</td>
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(tc)}</td>
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fcd34d; font-weight:900;">${fmt(tch)}</td>
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#7dd3fc; font-weight:900;">${fmt(to)}</td>
@@ -5064,9 +5082,7 @@ export async function GET(request: Request) {
               </div>
               ${(() => {
                 const ua = agentCollRows.reduce((s, r) => s + r.unallocated, 0);
-                return ua > 0
-                  ? `<p style="margin:-20px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Generic / Branded / Discount on collections are split pro-rata from each payment's linked SO. ${fmt(ua)} came from payments with no linked SO (legacy / standalone), so it's in the Total but not in the split.</p>`
-                  : '';
+                return `<p style="margin:-20px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Generic / Branded / Discount on collections are split pro-rata from each payment's linked SO. <strong>Generic Net (generic − discount) is what the Agent Quota Checker uses</strong> — branded collections are shown but never raise it.${ua > 0 ? ` ${fmt(ua)} came from payments with no linked SO (legacy / standalone), so it's in the Total but not in the split, and doesn't count toward the quota.` : ''}</p>`;
               })()}
 
               ${collectionQuotaRows.length > 0 ? `
