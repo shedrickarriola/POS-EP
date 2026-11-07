@@ -3090,10 +3090,15 @@ export async function GET(request: Request) {
           ]);
 
           // ── Office account lookup ──
+          // Includes clients from this week's PAYMENTS too, so a payment on an older office-account
+          // order (an "Others" order from a previous week) is still recognised and excluded.
           const clientNames = [
-            ...new Set(
-              (ordersData || []).map((o: any) => o.client_name).filter(Boolean)
-            ),
+            ...new Set([
+              ...(ordersData || []).map((o: any) => o.client_name).filter(Boolean),
+              ...(paymentsData || [])
+                .map((p: any) => (p.orders as any)?.client_name || p.customer_name)
+                .filter(Boolean),
+            ]),
           ];
           let officeMap: Record<string, boolean> = {};
           if (clientNames.length > 0) {
