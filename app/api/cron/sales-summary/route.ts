@@ -838,7 +838,24 @@ export async function GET(request: Request) {
               return { ...v, dailyQuota, hit, earned: hit ? OFFICE_DAILY_INCENTIVE : 0 };
             })
             .sort((a, b) => b.counted - a.counted);
-          const agentQuotaTodayTotal = agentQuotaTodayRows.reduce((s, r) => s + r.earned, 0);
+          // Office (branch) quota: everyone's counted generic-net collections combined vs the branch's
+          // daily_generic_quota. Same ₱200/day incentive, Mon–Sat only.
+          const officeDailyQuotaToday = Number(b.daily_generic_quota || 0);
+          const officeCountedToday = agentQuotaTodayRows.reduce((s, r) => s + r.counted, 0);
+          const officeHitToday = isWorkingDayToday && officeDailyQuotaToday > 0 && officeCountedToday >= officeDailyQuotaToday;
+          const officeQuotaToday = {
+            name: '🏢 OFFICE (branch)',
+            isOffice: true,
+            counted: officeCountedToday,
+            collected: agentQuotaTodayRows.reduce((s, r) => s + r.collected, 0),
+            pdc: agentQuotaTodayRows.reduce((s, r) => s + r.pdc, 0),
+            pdcFull: agentQuotaTodayRows.reduce((s, r) => s + r.pdcFull, 0),
+            dailyQuota: officeDailyQuotaToday,
+            hit: officeHitToday,
+            earned: officeHitToday ? OFFICE_DAILY_INCENTIVE : 0,
+          };
+          const agentQuotaTodayTotal =
+            agentQuotaTodayRows.reduce((s, r) => s + r.earned, 0) + officeQuotaToday.earned;
 
           // === FULL HTML ===
           const reportNotes = report?.notes?.trim() || '';
@@ -1049,7 +1066,7 @@ export async function GET(request: Request) {
                       <div style="color:#854d0e;font-size:11px;font-weight:800;letter-spacing:2px;text-transform:uppercase;">💵 Daily Incentive Earned Today</div>
                       <div style="color:#a16207;font-size:11px;margin-top:3px;">${
                         isWorkingDayToday
-                          ? `${agentQuotaTodayRows.filter((r) => r.hit).length} agent(s) hit • ₱${OFFICE_DAILY_INCENTIVE} each • paid with the Saturday Weekly Report`
+                          ? `${agentQuotaTodayRows.filter((r) => r.hit).length} agent(s) hit • office ${officeQuotaToday.hit ? 'hit ✓' : officeDailyQuotaToday > 0 ? 'not hit' : 'no quota set'} • ₱${OFFICE_DAILY_INCENTIVE} each • paid with the Saturday Weekly Report`
                           : 'Sunday — no daily quota (collections still count toward the week)'
                       }</div>
                     </div>
@@ -1067,9 +1084,9 @@ export async function GET(request: Request) {
                         </tr>
                       </thead>
                       <tbody>
-                        ${agentQuotaTodayRows
+                        ${[...agentQuotaTodayRows, officeQuotaToday]
                           .map((r: any, idx: number) => {
-                            const rowBg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
+                            const rowBg = r.isOffice ? '#e0f2fe' : idx % 2 === 0 ? '#ffffff' : '#f8fafc';
                             const status = !isWorkingDayToday
                               ? '<span style="color:#94a3b8;font-weight:700;">SUNDAY</span>'
                               : r.dailyQuota <= 0
@@ -1094,7 +1111,7 @@ export async function GET(request: Request) {
                       </tbody>
                     </table>
                   </div>
-                  <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Counts only the generic-net part of today's collections (generic − discount; branded never counts). Cash, online and dated cheques count; post-dated cheques don't. Office accounts and payments with no linked SO are excluded. Daily quota = weekly quota ÷ 6 (Mon–Sat). The ₱${OFFICE_DAILY_INCENTIVE} is paid out with the Saturday Weekly Report.</p>
+                  <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Counts only the generic-net part of today's collections (generic − discount; branded never counts). Cash, online and dated cheques count; post-dated cheques don't. Office accounts and payments with no linked SO are excluded. Agent daily quota = weekly quota ÷ 6 (Mon–Sat). <strong>OFFICE</strong> row = everyone's counted generic net combined vs the branch's daily generic quota (Mon–Sat). The ₱${OFFICE_DAILY_INCENTIVE} is paid out with the Saturday Weekly Report.</p>
                 </div>
                 `
                     : ''
@@ -3355,6 +3372,7 @@ export async function GET(request: Request) {
               const weeklyPay = weekHit ? OFFICE_WEEKLY_INCENTIVE : 0;
               return {
                 agent: v.displayName,
+                isOffice: false,
                 days: v.days,
                 dayHits,
                 dailyQuota,
@@ -3370,6 +3388,36 @@ export async function GET(request: Request) {
               };
             })
             .sort((a, b) => b.weekNet - a.weekNet);
+
+          // Office (branch) quota: everyone's counted generic-net collections combined vs the branch's
+          // daily_generic_quota. Weekly quota = daily × 6 (Mon–Sat). Same ₱200/day + ₱500/week.
+          const officeDailyQuota = Number(b.daily_generic_quota || 0);
+          const officeWeeklyQuota = officeDailyQuota * 6;
+          const officeDays = weekDates.map((_, di) => quotaCheckRows.reduce((s, r) => s + r.days[di], 0));
+          const officeDayHits = officeDays.map(
+            (net, di) => officeDailyQuota > 0 && isWorkingDay(weekDates[di]) && net >= officeDailyQuota
+          );
+          const officeDaysHit = officeDayHits.filter(Boolean).length;
+          const officeWeekNet = officeDays.reduce((s, n) => s + n, 0);
+          const officeWeekHit = officeWeeklyQuota > 0 && officeWeekNet >= officeWeeklyQuota;
+          const officeQuotaRow = {
+            agent: '🏢 OFFICE',
+            isOffice: true,
+            days: officeDays,
+            dayHits: officeDayHits,
+            dailyQuota: officeDailyQuota,
+            weeklyQuota: officeWeeklyQuota,
+            daysHit: officeDaysHit,
+            weekNet: officeWeekNet,
+            weekHit: officeWeekHit,
+            dailyPay: officeDaysHit * OFFICE_DAILY_INCENTIVE,
+            weeklyPay: officeWeekHit ? OFFICE_WEEKLY_INCENTIVE : 0,
+            totalPay: officeDaysHit * OFFICE_DAILY_INCENTIVE + (officeWeekHit ? OFFICE_WEEKLY_INCENTIVE : 0),
+            excludedPdc: quotaCheckRows.reduce((s, r) => s + r.excludedPdc, 0),
+            excludedPdcFull: quotaCheckRows.reduce((s, r) => s + r.excludedPdcFull, 0),
+          };
+          // Everything that gets paid: each agent + the office
+          const quotaPayRows = [...quotaCheckRows, officeQuotaRow];
 
           // ── Agent collections ──
           // Generic / Branded / Discount split of a collection is allocated pro-rata from the
@@ -3891,15 +3939,16 @@ export async function GET(request: Request) {
               <!-- AGENT QUOTA CHECKER (WEEKLY INCENTIVES) -->
               <h3 style="color:#2dd4bf; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">🎯 Agent Quota Checker — Collections, Generic Net (Weekly Payout)</h3>
               ${(() => {
-                const tPay = quotaCheckRows.reduce((s, r) => s + r.totalPay, 0);
-                const tDaily = quotaCheckRows.reduce((s, r) => s + r.dailyPay, 0);
-                const tWeekly = quotaCheckRows.reduce((s, r) => s + r.weeklyPay, 0);
+                const tPay = quotaPayRows.reduce((s, r) => s + r.totalPay, 0);
+                const tDaily = quotaPayRows.reduce((s, r) => s + r.dailyPay, 0);
+                const tWeekly = quotaPayRows.reduce((s, r) => s + r.weeklyPay, 0);
                 const earners = quotaCheckRows.filter((r) => r.totalPay > 0).length;
+                const officeEarned = officeQuotaRow.totalPay;
                 return `<div style="background:linear-gradient(135deg,#422006,#713f12); border:2px solid #facc15; border-radius:12px; padding:18px 20px; margin-bottom:14px;">
                   <table style="width:100%; border-collapse:collapse;"><tr>
                     <td style="vertical-align:middle;">
                       <div style="color:#fde047; font-size:11px; font-weight:800; letter-spacing:2px; text-transform:uppercase;">💵 Total Incentive to Give This Week</div>
-                      <div style="color:#fef9c3; font-size:11px; margin-top:4px;">${earners} agent${earners === 1 ? '' : 's'} earned • Daily ${fmt(tDaily)} + Weekly ${fmt(tWeekly)}</div>
+                      <div style="color:#fef9c3; font-size:11px; margin-top:4px;">${earners} agent${earners === 1 ? '' : 's'} earned • Office ${officeEarned > 0 ? fmt(officeEarned) : '₱0'} • Daily ${fmt(tDaily)} + Weekly ${fmt(tWeekly)}</div>
                     </td>
                     <td style="text-align:right; vertical-align:middle; color:#facc15; font-size:30px; font-weight:900; font-family:monospace; white-space:nowrap;">${fmt(tPay)}</td>
                   </tr></table>
@@ -3924,8 +3973,8 @@ export async function GET(request: Request) {
                     </tr>
                   </thead>
                   <tbody>
-                    ${quotaCheckRows.map((r, i) => {
-                      const row = i % 2 === 0 ? trNorm : trAlt;
+                    ${quotaPayRows.map((r, i) => {
+                      const row = r.isOffice ? 'style="background:#082f49; border-top:2px solid #0ea5e9;"' : i % 2 === 0 ? trNorm : trAlt;
                       const hasQuota = r.weeklyQuota > 0;
                       const dayCells = r.days.map((net, di) => {
                         const working = isWorkingDay(weekDates[di]);
@@ -3939,7 +3988,7 @@ export async function GET(request: Request) {
                         ${dayCells}
                         <td style="padding:8px; text-align:center; font-family:monospace; font-weight:700; color:${r.daysHit > 0 ? '#10b981' : '#64748b'};">${hasQuota ? r.daysHit + ' / 6' : '—'}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.dailyPay > 0 ? fmt(r.dailyPay) : '—'}</td>
-                        <td style="padding:8px; text-align:center; font-family:monospace; font-size:11px; font-weight:700; color:${weekColor};">${fmt(r.weekNet)}${r.weekHit ? ' ✓' : ''}<br><span style="font-size:9px; font-weight:400; color:#64748b;">quota ${hasQuota ? fmt(r.weeklyQuota) : '—'}</span>${r.excludedPdcFull > 0 ? `<br><span style="font-size:9px; font-weight:400; color:#f59e0b;">PDC not included: ${fmt(r.excludedPdcFull)}<br>(generic part ${fmt(r.excludedPdc)})</span>` : ''}</td>
+                        <td style="padding:8px; text-align:center; font-family:monospace; font-size:11px; font-weight:700; color:${weekColor};">${fmt(r.weekNet)}${r.weekHit ? ' ✓' : ''}<br><span style="font-size:9px; font-weight:400; color:#64748b;">quota ${hasQuota ? fmt(r.weeklyQuota) : '—'}</span>${r.excludedPdcFull > 0 ? `<br><span style="font-size:9px; font-weight:400; color:#f59e0b;">PDC not included: ${fmt(r.excludedPdcFull)}</span>` : ''}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.weeklyPay > 0 ? fmt(r.weeklyPay) : '—'}</td>
                         <td style="padding:8px 12px; text-align:right; font-family:monospace; color:#fde047; font-weight:900; font-size:14px; background:#422006; border-left:2px solid #facc15;">${fmt(r.totalPay)}</td>
                       </tr>`;
@@ -3947,16 +3996,16 @@ export async function GET(request: Request) {
                     <tr style="background:#1e293b; border-top:2px solid #475569;">
                       <td ${tdL} style="padding:10px 12px; font-weight:900; color:#2dd4bf; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
                       ${weekDates.map(() => `<td></td>`).join('')}
-                      <td style="padding:10px 8px; text-align:center; font-family:monospace; color:#10b981; font-weight:900;">${quotaCheckRows.reduce((s, r) => s + r.daysHit, 0)}</td>
-                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(quotaCheckRows.reduce((s, r) => s + r.dailyPay, 0))}</td>
+                      <td style="padding:10px 8px; text-align:center; font-family:monospace; color:#10b981; font-weight:900;">${quotaPayRows.reduce((s, r) => s + r.daysHit, 0)}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(quotaPayRows.reduce((s, r) => s + r.dailyPay, 0))}</td>
                       <td style="padding:10px 8px; text-align:center; font-family:monospace; color:#e2e8f0; font-weight:900;">${fmt(quotaCheckRows.reduce((s, r) => s + r.weekNet, 0))}</td>
-                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(quotaCheckRows.reduce((s, r) => s + r.weeklyPay, 0))}</td>
-                      <td style="padding:10px 12px; text-align:right; font-family:monospace; color:#422006; font-weight:900; font-size:15px; background:#facc15;">${fmt(quotaCheckRows.reduce((s, r) => s + r.totalPay, 0))}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(quotaPayRows.reduce((s, r) => s + r.weeklyPay, 0))}</td>
+                      <td style="padding:10px 12px; text-align:right; font-family:monospace; color:#422006; font-weight:900; font-size:15px; background:#facc15;">${fmt(quotaPayRows.reduce((s, r) => s + r.totalPay, 0))}</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
-              <p style="margin:-2px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Quota basis = <strong>COLLECTIONS</strong>, generic net only: each payment counts only for its generic − discount share of the linked SO (branded never counts, the whole discount is treated as generic discount; payments with no linked SO don't count). <strong>CASH, ONLINE and DATED cheques count</strong> — a cheque counts when its cheque date is on/before the day it was collected; post-dated cheques (PDC) don't count and are listed in amber as "not counted". Collections are dated by report date. Office accounts are excluded. Sales are not used for incentives. Daily quota = agent_weekly_quota ÷ 6 working days (Mon–Sat). Sunday has no daily quota, but Sunday collections still count toward the week. Payout: +₱${OFFICE_DAILY_INCENTIVE} for each Mon–Sat day hit (green ✓), +₱${OFFICE_WEEKLY_INCENTIVE} if the week's generic-net collections meet the weekly quota. They stack, and the ₱1,000 monthly bonus is checked in the Monthly Report. "—" = no quota set for that agent.</p>
+              <p style="margin:-2px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Quota basis = <strong>COLLECTIONS</strong>, generic net only: each payment counts only for its generic − discount share of the linked SO (branded never counts, the whole discount is treated as generic discount; payments with no linked SO don't count). <strong>CASH, ONLINE and DATED cheques count</strong> — a cheque counts when its cheque date is on/before the day it was collected; post-dated cheques (PDC) don't count and are listed in amber as "not counted". Collections are dated by report date. Office accounts are excluded. Sales are not used for incentives. Agent daily quota = agent_weekly_quota ÷ 6 working days (Mon–Sat). <strong>OFFICE</strong> row = everyone's counted generic net combined vs the branch's daily generic quota (weekly = daily × 6), same ₱200/day and ₱500/week. Sunday has no daily quota, but Sunday collections still count toward the week. Payout: +₱${OFFICE_DAILY_INCENTIVE} for each Mon–Sat day hit (green ✓), +₱${OFFICE_WEEKLY_INCENTIVE} if the week's generic-net collections meet the weekly quota. They stack, and the ₱1,000 monthly bonus is checked in the Monthly Report. "—" = no quota set for that agent.</p>
               ` : ''}
 
               <!-- AGENT COLLECTIONS -->
@@ -4729,7 +4778,7 @@ export async function GET(request: Request) {
               const weeklyPay = weeksHit * OFFICE_WEEKLY_INCENTIVE;
               const monthlyPay = monthHit ? OFFICE_MONTHLY_INCENTIVE : 0;
               return {
-                agent: v.displayName, dailyQuota, weeklyQuota, weeks, daysHit, weeksHit,
+                agent: v.displayName, isOffice: false, dailyQuota, weeklyQuota, weeks, daysHit, weeksHit,
                 monthNet, monthlyQuota, monthHit, dailyPay, weeklyPay, monthlyPay,
                 totalPay: dailyPay + weeklyPay + monthlyPay,
                 excludedPdc: v.pdc,
@@ -4738,6 +4787,55 @@ export async function GET(request: Request) {
             })
             .filter((r) => r.monthNet !== 0 || r.weeks.some((w) => w.weekNet !== 0) || r.excludedPdcFull > 0)
             .sort((a, b) => b.monthNet - a.monthNet);
+
+          // Office (branch) quota: everyone's counted generic-net collections combined vs the branch's
+          // daily_generic_quota. Weekly = daily × 6, monthly = daily × Mon–Sat days. ₱200 / ₱500 / ₱1,000.
+          const officeByDate = new Map<string, number>();
+          let officePdc = 0;
+          let officePdcFull = 0;
+          agentNetByDate.forEach((v) => {
+            v.byDate.forEach((n, ds) => officeByDate.set(ds, (officeByDate.get(ds) || 0) + n));
+            officePdc += v.pdc;
+            officePdcFull += v.pdcFull;
+          });
+          const oDailyQuota = Number(b.daily_generic_quota || 0);
+          const oWeeklyQuota = oDailyQuota * 6;
+          const oNetOn = (ds: string) => officeByDate.get(ds) || 0;
+          const oWeeks = weekWindows.map((w) => {
+            const realDates = datesBetween(w.realStart, w.realEnd);
+            const weekNet = realDates.reduce((s, ds) => s + oNetOn(ds), 0);
+            const monthSliceNet = datesBetween(w.start, w.end).reduce((s, ds) => s + oNetOn(ds), 0);
+            const daysHit = realDates.filter((ds) => oDailyQuota > 0 && isWorkingDayM(ds) && oNetOn(ds) >= oDailyQuota).length;
+            const weekHit = oWeeklyQuota > 0 && weekNet >= oWeeklyQuota;
+            const paidThisMonth = w.realEnd >= monthStart && w.realEnd <= monthEnd;
+            return { weekNet, monthSliceNet, daysHit, weekHit, paidThisMonth };
+          });
+          const oPaidWeeks = oWeeks.filter((w) => w.paidThisMonth);
+          const oDaysHit = oPaidWeeks.reduce((s, w) => s + w.daysHit, 0);
+          const oWeeksHit = oPaidWeeks.filter((w) => w.weekHit).length;
+          const oMonthNet = monthDates.reduce((s, ds) => s + oNetOn(ds), 0);
+          const oMonthlyQuota = oDailyQuota * workingDaysInMonth;
+          const oMonthHit = oMonthlyQuota > 0 && oMonthNet >= oMonthlyQuota;
+          const officeMonthlyRow = {
+            agent: '🏢 OFFICE',
+            isOffice: true,
+            dailyQuota: oDailyQuota,
+            weeklyQuota: oWeeklyQuota,
+            weeks: oWeeks,
+            daysHit: oDaysHit,
+            weeksHit: oWeeksHit,
+            monthNet: oMonthNet,
+            monthlyQuota: oMonthlyQuota,
+            monthHit: oMonthHit,
+            dailyPay: oDaysHit * OFFICE_DAILY_INCENTIVE,
+            weeklyPay: oWeeksHit * OFFICE_WEEKLY_INCENTIVE,
+            monthlyPay: oMonthHit ? OFFICE_MONTHLY_INCENTIVE : 0,
+            totalPay: oDaysHit * OFFICE_DAILY_INCENTIVE + oWeeksHit * OFFICE_WEEKLY_INCENTIVE + (oMonthHit ? OFFICE_MONTHLY_INCENTIVE : 0),
+            excludedPdc: officePdc,
+            excludedPdcFull: officePdcFull,
+          };
+          // Everything that gets paid: each agent + the office
+          const monthlyPayRows = [...monthlyQuotaCheckRows, officeMonthlyRow];
 
           // ── Online payments ──
           const onlinePayments = (paymentsData || [])
@@ -5128,16 +5226,17 @@ export async function GET(request: Request) {
               <!-- AGENT QUOTA CHECKER (MONTHLY INCENTIVES) -->
               <h3 style="color:#2dd4bf; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">🎯 Agent Quota Checker — Collections, Generic Net (Monthly)</h3>
               ${(() => {
-                const tMonthly = monthlyQuotaCheckRows.reduce((s, r) => s + r.monthlyPay, 0);
-                const tDaily = monthlyQuotaCheckRows.reduce((s, r) => s + r.dailyPay, 0);
-                const tWeekly = monthlyQuotaCheckRows.reduce((s, r) => s + r.weeklyPay, 0);
+                const tMonthly = monthlyPayRows.reduce((s, r) => s + r.monthlyPay, 0);
+                const tDaily = monthlyPayRows.reduce((s, r) => s + r.dailyPay, 0);
+                const tWeekly = monthlyPayRows.reduce((s, r) => s + r.weeklyPay, 0);
                 const tAll = tMonthly + tDaily + tWeekly;
                 const earners = monthlyQuotaCheckRows.filter((r) => r.monthlyPay > 0).length;
+                const officeMonthHit = officeMonthlyRow.monthHit;
                 return `<div style="background:linear-gradient(135deg,#422006,#713f12); border:2px solid #facc15; border-radius:12px; padding:18px 20px; margin-bottom:14px;">
                   <table style="width:100%; border-collapse:collapse;"><tr>
                     <td style="vertical-align:middle;">
                       <div style="color:#fde047; font-size:11px; font-weight:800; letter-spacing:2px; text-transform:uppercase;">💵 Monthly Bonus to Give Now</div>
-                      <div style="color:#fef9c3; font-size:11px; margin-top:4px;">${earners} agent${earners === 1 ? '' : 's'} hit the month • ₱${OFFICE_MONTHLY_INCENTIVE.toLocaleString()} each</div>
+                      <div style="color:#fef9c3; font-size:11px; margin-top:4px;">${earners} agent${earners === 1 ? '' : 's'} hit the month • office ${officeMonthHit ? 'hit ✓' : oDailyQuota > 0 ? 'not hit' : 'no quota set'} • ₱${OFFICE_MONTHLY_INCENTIVE.toLocaleString()} each</div>
                     </td>
                     <td style="text-align:right; vertical-align:middle; color:#facc15; font-size:30px; font-weight:900; font-family:monospace; white-space:nowrap;">${fmt(tMonthly)}</td>
                   </tr></table>
@@ -5163,8 +5262,8 @@ export async function GET(request: Request) {
                     </tr>
                   </thead>
                   <tbody>
-                    ${monthlyQuotaCheckRows.map((r, i) => {
-                      const row = i % 2 === 0 ? trNorm : trAlt;
+                    ${monthlyPayRows.map((r, i) => {
+                      const row = r.isOffice ? 'style="background:#082f49; border-top:2px solid #0ea5e9;"' : i % 2 === 0 ? trNorm : trAlt;
                       const hasQuota = r.weeklyQuota > 0;
                       const weekCells = weekWindows.map((_, wi) => {
                         const w = r.weeks[wi];
@@ -5181,7 +5280,7 @@ export async function GET(request: Request) {
                       return `<tr ${row}>
                         <td style="padding:8px 12px; text-align:left; font-weight:700; color:#e2e8f0; white-space:nowrap;">${r.agent}<br><span style="font-weight:400; font-size:10px; color:#94a3b8; font-family:monospace;">${hasQuota ? `Daily ${fmt(r.dailyQuota)}<br>Wk ${fmt(r.weeklyQuota)}<br>Month ${fmt(r.monthlyQuota)}` : 'No quota set'}</span></td>
                         ${weekCells}
-                        <td style="padding:8px; text-align:center; font-family:monospace; font-size:11px; font-weight:700; color:${monthColor};">${fmt(r.monthNet)}${r.monthHit ? ' ✓' : ''}<br><span style="font-size:9px; font-weight:400; color:#64748b;">quota ${hasQuota ? fmt(r.monthlyQuota) : '—'}</span>${r.excludedPdcFull > 0 ? `<br><span style="font-size:9px; font-weight:400; color:#f59e0b;">PDC not included: ${fmt(r.excludedPdcFull)}<br>(generic part ${fmt(r.excludedPdc)})</span>` : ''}</td>
+                        <td style="padding:8px; text-align:center; font-family:monospace; font-size:11px; font-weight:700; color:${monthColor};">${fmt(r.monthNet)}${r.monthHit ? ' ✓' : ''}<br><span style="font-size:9px; font-weight:400; color:#64748b;">quota ${hasQuota ? fmt(r.monthlyQuota) : '—'}</span>${r.excludedPdcFull > 0 ? `<br><span style="font-size:9px; font-weight:400; color:#f59e0b;">PDC not included: ${fmt(r.excludedPdcFull)}</span>` : ''}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.dailyPay > 0 ? fmt(r.dailyPay) : '—'}<br><span style="font-size:9px;color:#64748b;">${hasQuota ? r.daysHit + ' day' + (r.daysHit === 1 ? '' : 's') : ''}</span></td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.weeklyPay > 0 ? fmt(r.weeklyPay) : '—'}<br><span style="font-size:9px;color:#64748b;">${hasQuota ? r.weeksHit + ' wk' + (r.weeksHit === 1 ? '' : 's') : ''}</span></td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fbbf24; font-weight:700;">${r.monthlyPay > 0 ? fmt(r.monthlyPay) : '—'}</td>
@@ -5192,15 +5291,15 @@ export async function GET(request: Request) {
                       <td ${tdL} style="padding:10px 12px; font-weight:900; color:#2dd4bf; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
                       ${weekWindows.map(() => `<td></td>`).join('')}
                       <td style="padding:10px 8px; text-align:center; font-family:monospace; color:#e2e8f0; font-weight:900;">${fmt(monthlyQuotaCheckRows.reduce((s, r) => s + r.monthNet, 0))}</td>
-                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(monthlyQuotaCheckRows.reduce((s, r) => s + r.dailyPay, 0))}</td>
-                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(monthlyQuotaCheckRows.reduce((s, r) => s + r.weeklyPay, 0))}</td>
-                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fbbf24; font-weight:900;">${fmt(monthlyQuotaCheckRows.reduce((s, r) => s + r.monthlyPay, 0))}</td>
-                      <td style="padding:10px 12px; text-align:right; font-family:monospace; color:#422006; font-weight:900; font-size:15px; background:#facc15;">${fmt(monthlyQuotaCheckRows.reduce((s, r) => s + r.totalPay, 0))}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(monthlyPayRows.reduce((s, r) => s + r.dailyPay, 0))}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(monthlyPayRows.reduce((s, r) => s + r.weeklyPay, 0))}</td>
+                      <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fbbf24; font-weight:900;">${fmt(monthlyPayRows.reduce((s, r) => s + r.monthlyPay, 0))}</td>
+                      <td style="padding:10px 12px; text-align:right; font-family:monospace; color:#422006; font-weight:900; font-size:15px; background:#facc15;">${fmt(monthlyPayRows.reduce((s, r) => s + r.totalPay, 0))}</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
-              <p style="margin:-2px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Quota basis = <strong>COLLECTIONS</strong>, generic net only: each payment counts only for its generic − discount share of the linked SO (branded never counts, the whole discount is treated as generic discount; payments with no linked SO don't count). <strong>CASH, ONLINE and DATED cheques count</strong> — a cheque counts when its cheque date is on/before the day it was collected; post-dated cheques (PDC) don't count and are listed in amber as "not counted". Collections are dated by report date, office accounts excluded. Sales are not used for incentives. Daily quota = agent_weekly_quota ÷ 6 (Mon–Sat). Monthly quota = daily quota × ${workingDaysInMonth} working days. Payout: +₱${OFFICE_DAILY_INCENTIVE} per Mon–Sat day hit, +₱${OFFICE_WEEKLY_INCENTIVE} per week hit, +₱${OFFICE_MONTHLY_INCENTIVE} if the month is hit. They all stack. <strong>Daily ₱ and Weekly ₱ were already listed in this month's Saturday Weekly Reports</strong> (weeks whose Saturday falls in ${monthLabel}, each judged on its full Sun–Sat week); only <strong>Monthly ₱</strong> is new here. A week ending next month shows "paid next month" and is counted there. Each week cell shows this month's slice of generic-net collections, with "(x/7)" and the full-week total for a split week.</p>
+              <p style="margin:-2px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Quota basis = <strong>COLLECTIONS</strong>, generic net only: each payment counts only for its generic − discount share of the linked SO (branded never counts, the whole discount is treated as generic discount; payments with no linked SO don't count). <strong>CASH, ONLINE and DATED cheques count</strong> — a cheque counts when its cheque date is on/before the day it was collected; post-dated cheques (PDC) don't count and are listed in amber as "not counted". Collections are dated by report date, office accounts excluded. Sales are not used for incentives. Agent daily quota = agent_weekly_quota ÷ 6 (Mon–Sat). Monthly quota = daily quota × ${workingDaysInMonth} working days. <strong>OFFICE</strong> row = everyone's counted generic net combined vs the branch's daily generic quota (weekly = daily × 6, monthly = daily × ${workingDaysInMonth}), same ₱200 / ₱500 / ₱1,000. Payout: +₱${OFFICE_DAILY_INCENTIVE} per Mon–Sat day hit, +₱${OFFICE_WEEKLY_INCENTIVE} per week hit, +₱${OFFICE_MONTHLY_INCENTIVE} if the month is hit. They all stack. <strong>Daily ₱ and Weekly ₱ were already listed in this month's Saturday Weekly Reports</strong> (weeks whose Saturday falls in ${monthLabel}, each judged on its full Sun–Sat week); only <strong>Monthly ₱</strong> is new here. A week ending next month shows "paid next month" and is counted there. Each week cell shows this month's slice of generic-net collections, with "(x/7)" and the full-week total for a split week.</p>
               ` : ''}
 
               <!-- AGENT COLLECTIONS -->
