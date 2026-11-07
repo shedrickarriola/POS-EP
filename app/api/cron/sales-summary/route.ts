@@ -813,18 +813,23 @@ export async function GET(request: Request) {
             const oNet = oGen + oBrd - oDisc;
             return p.orders && oNet > 0 ? Number(p.amount || 0) * ((oGen - oDisc) / oNet) : 0;
           };
-          const agentTodayMap = new Map<string, { name: string; counted: number; pdc: number; collected: number }>();
+          const agentTodayMap = new Map<string, { name: string; counted: number; pdc: number; pdcFull: number; collected: number }>();
           (allPaymentsRaw || [])
             .filter((p: any) => !isOfficePayment(p))
             .forEach((p: any) => {
               const display = (p.orders?.agent || 'MAIN OFFICE').trim();
               const key = display.toUpperCase();
               if (!agentTodayMap.has(key))
-                agentTodayMap.set(key, { name: dailyQuotaMap.get(key)?.name || display, counted: 0, pdc: 0, collected: 0 });
+                agentTodayMap.set(key, { name: dailyQuotaMap.get(key)?.name || display, counted: 0, pdc: 0, pdcFull: 0, collected: 0 });
               const e = agentTodayMap.get(key)!;
+              if (isPostDatedCheque(p)) {
+                // PDC: not included in Collected or the quota — tracked separately
+                e.pdcFull += Number(p.amount || 0);
+                e.pdc += genNetOfPayment(p);
+                return;
+              }
               e.collected += Number(p.amount || 0);
               if (isQuotaCountableToday(p)) e.counted += genNetOfPayment(p);
-              else if ((p.payment_method || '').toUpperCase() === 'CHEQUE') e.pdc += genNetOfPayment(p);
             });
           const agentQuotaTodayRows = Array.from(agentTodayMap.entries())
             .map(([key, v]) => {
@@ -1076,7 +1081,7 @@ export async function GET(request: Request) {
                             <tr style="background:${rowBg};border-bottom:1px solid #f1f5f9;">
                               <td style="padding:9px 10px;font-weight:700;color:#111827;">${r.name}<br><span style="font-weight:400;font-size:10px;color:#6b7280;">${r.dailyQuota > 0 ? `Daily quota ₱${r.dailyQuota.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : 'No quota set'}</span></td>
                               <td style="padding:9px 10px;text-align:right;color:#6b7280;">₱${r.collected.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
-                              <td style="padding:9px 10px;text-align:right;font-weight:800;color:#0f766e;">₱${r.counted.toLocaleString(undefined, { maximumFractionDigits: 2 })}${r.pdc > 0 ? `<br><span style="font-weight:400;font-size:10px;color:#d97706;">not counted: PDC ₱${r.pdc.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>` : ''}</td>
+                              <td style="padding:9px 10px;text-align:right;font-weight:800;color:#0f766e;">₱${r.counted.toLocaleString(undefined, { maximumFractionDigits: 2 })}${r.pdcFull > 0 ? `<br><span style="font-weight:400;font-size:10px;color:#d97706;">PDC not included: ₱${r.pdcFull.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>` : ''}</td>
                               <td style="padding:9px 10px;text-align:center;">${status}</td>
                               <td style="padding:9px 10px;text-align:right;font-weight:900;color:#854d0e;background:#fefce8;">${r.earned > 0 ? `₱${r.earned.toLocaleString()}` : '—'}</td>
                             </tr>`;
@@ -3314,7 +3319,7 @@ export async function GET(request: Request) {
           const collGenNet = (p: any) => (isQuotaCountable(p) ? rawGenNet(p) : 0);
           const isPdc = (p: any) =>
             (p.payment_method || '').toUpperCase() === 'CHEQUE' && !!p.cheque_date && String(p.cheque_date).slice(0, 10) > p.report_date;
-          const agentDayNetMap = new Map<string, { displayName: string; days: number[]; pdc: number }>();
+          const agentDayNetMap = new Map<string, { displayName: string; days: number[]; pdc: number; pdcFull: number }>();
           (paymentsData || [])
             .filter((p: any) => !isOfficePayment(p))
             .forEach((p: any) => {
@@ -3327,10 +3332,11 @@ export async function GET(request: Request) {
                   displayName: agentSalesMap.get(key)?.displayName || display,
                   days: weekDates.map(() => 0),
                   pdc: 0,
+                  pdcFull: 0,
                 });
               const entry = agentDayNetMap.get(key)!;
               entry.days[di] += collGenNet(p);
-              if (isPdc(p)) entry.pdc += rawGenNet(p);
+              if (isPdc(p)) { entry.pdc += rawGenNet(p); entry.pdcFull += Number(p.amount || 0); }
             });
           const isWorkingDay = (dateStr: string) =>
             new Date(dateStr + 'T00:00:00').getDay() !== 0;
@@ -3360,6 +3366,7 @@ export async function GET(request: Request) {
                 weeklyPay,
                 totalPay: dailyPay + weeklyPay,
                 excludedPdc: v.pdc,
+                excludedPdcFull: v.pdcFull,
               };
             })
             .sort((a, b) => b.weekNet - a.weekNet);
@@ -3371,7 +3378,7 @@ export async function GET(request: Request) {
           // stay in the Total and are counted in `unallocated` instead.
           const agentCollMap = new Map<
             string,
-            { cash: number; cheque: number; online: number; generic: number; branded: number; discount: number; unallocated: number; quotaGenNet: number }
+            { cash: number; cheque: number; online: number; generic: number; branded: number; discount: number; unallocated: number; quotaGenNet: number; pdc: number }
           >();
           paymentsCounted
             .filter((p: any) => !isOfficePayment(p))
@@ -3379,7 +3386,7 @@ export async function GET(request: Request) {
               const agent = ((p.orders as any)?.agent || 'MAIN OFFICE').trim();
               const key = agent.toUpperCase();
               if (!agentCollMap.has(key))
-                agentCollMap.set(key, { cash: 0, cheque: 0, online: 0, generic: 0, branded: 0, discount: 0, unallocated: 0, quotaGenNet: 0 });
+                agentCollMap.set(key, { cash: 0, cheque: 0, online: 0, generic: 0, branded: 0, discount: 0, unallocated: 0, quotaGenNet: 0, pdc: 0 });
               const entry = agentCollMap.get(key)!;
               const method = (p.payment_method || 'CASH').toUpperCase();
               const amt = Number(p.amount || 0);
@@ -3403,6 +3410,13 @@ export async function GET(request: Request) {
                 entry.unallocated += amt;
               }
             });
+          // Post-dated cheques: NOT included in any column above, shown separately in the PDC column.
+          pdcNotCounted.forEach((p: any) => {
+            const key = ((p.orders as any)?.agent || 'MAIN OFFICE').trim().toUpperCase();
+            if (!agentCollMap.has(key))
+              agentCollMap.set(key, { cash: 0, cheque: 0, online: 0, generic: 0, branded: 0, discount: 0, unallocated: 0, quotaGenNet: 0, pdc: 0 });
+            agentCollMap.get(key)!.pdc += Number(p.amount || 0);
+          });
           const agentCollRows = Array.from(agentCollMap.entries())
             .map(([key, v]) => ({
               agent: key.charAt(0) + key.slice(1).toLowerCase(),
@@ -3414,6 +3428,7 @@ export async function GET(request: Request) {
               discount: v.discount,
               unallocated: v.unallocated,
               quotaGenNet: v.quotaGenNet,
+              pdc: v.pdc,
               total: v.cash + v.cheque + v.online,
             }))
             .sort((a, b) => b.total - a.total);
@@ -3493,7 +3508,7 @@ export async function GET(request: Request) {
           // BUILD HTML FOR THIS BRANCH
           // ────────────────────────────────────────────
           const fmt = (n: number) =>
-            `₱${n.toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
+            `₱${n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
           const pct = (val: number, quota: number) =>
             quota > 0 ? `${((val / quota) * 100).toFixed(1)}%` : '—';
 
@@ -3903,7 +3918,7 @@ export async function GET(request: Request) {
                       }).join('')}
                       <th style="padding:10px 8px; text-align:center; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Days Hit</th>
                       <th ${thR}>Daily ₱</th>
-                      <th style="padding:10px 8px; text-align:center; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Week (Net / Quota)</th>
+                      <th style="padding:10px 8px; text-align:center; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Week (Counted / Quota)</th>
                       <th ${thR}>Weekly ₱</th>
                       <th style="padding:10px 12px; text-align:right; background:#713f12; color:#fde047; font-size:11px; text-transform:uppercase; letter-spacing:1px; border-left:2px solid #facc15;">💵 Total Payout</th>
                     </tr>
@@ -3924,7 +3939,7 @@ export async function GET(request: Request) {
                         ${dayCells}
                         <td style="padding:8px; text-align:center; font-family:monospace; font-weight:700; color:${r.daysHit > 0 ? '#10b981' : '#64748b'};">${hasQuota ? r.daysHit + ' / 6' : '—'}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.dailyPay > 0 ? fmt(r.dailyPay) : '—'}</td>
-                        <td style="padding:8px; text-align:center; font-family:monospace; font-size:11px; font-weight:700; color:${weekColor};">${fmt(r.weekNet)}${r.weekHit ? ' ✓' : ''}<br><span style="font-size:9px; font-weight:400; color:#64748b;">of ${hasQuota ? fmt(r.weeklyQuota) : '—'}</span>${r.excludedPdc > 0 ? `<br><span style="font-size:9px; font-weight:400; color:#f59e0b;">not counted: PDC ${fmt(r.excludedPdc)}</span>` : ''}</td>
+                        <td style="padding:8px; text-align:center; font-family:monospace; font-size:11px; font-weight:700; color:${weekColor};">${fmt(r.weekNet)}${r.weekHit ? ' ✓' : ''}<br><span style="font-size:9px; font-weight:400; color:#64748b;">quota ${hasQuota ? fmt(r.weeklyQuota) : '—'}</span>${r.excludedPdcFull > 0 ? `<br><span style="font-size:9px; font-weight:400; color:#f59e0b;">PDC not included: ${fmt(r.excludedPdcFull)}<br>(generic part ${fmt(r.excludedPdc)})</span>` : ''}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.weeklyPay > 0 ? fmt(r.weeklyPay) : '—'}</td>
                         <td style="padding:8px 12px; text-align:right; font-family:monospace; color:#fde047; font-weight:900; font-size:14px; background:#422006; border-left:2px solid #facc15;">${fmt(r.totalPay)}</td>
                       </tr>`;
@@ -3947,18 +3962,19 @@ export async function GET(request: Request) {
               <!-- AGENT COLLECTIONS -->
               <h3 style="color:#a855f7; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">💰 Weekly Collections by Agent</h3>
               <div style="overflow-x:auto; margin-bottom:28px;">
-                <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <table style="width:100%; border-collapse:collapse; font-size:11.5px; white-space:nowrap;">
                   <thead>
                     <tr>
-                      <th ${thL}>Agent</th>
-                      <th ${thR}>Generic</th>
-                      <th ${thR}>Branded</th>
-                      <th ${thR}>Discount</th>
-                      <th style="padding:10px 12px; text-align:right; background:#134e4a; color:#5eead4; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Generic Net<br><span style="font-size:8px; letter-spacing:0; text-transform:none; color:#99f6e4;">quota basis · cash, online, dated chq</span></th>
-                      <th ${thR}>Cash</th>
-                      <th ${thR}>Cheque</th>
-                      <th ${thR}>Online</th>
-                      <th ${thR}>Total</th>
+                      <th style="padding:9px 7px; text-align:left; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Agent</th>
+                      <th style="padding:9px 7px; text-align:right; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Generic</th>
+                      <th style="padding:9px 7px; text-align:right; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Branded</th>
+                      <th style="padding:9px 7px; text-align:right; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Discount</th>
+                      <th style="padding:9px 7px; text-align:right; background:#134e4a; color:#5eead4; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Generic Net<br><span style="font-size:8px; letter-spacing:0; text-transform:none; color:#99f6e4;">quota basis · cash, online, dated chq</span></th>
+                      <th style="padding:9px 7px; text-align:right; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Cash</th>
+                      <th style="padding:9px 7px; text-align:right; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Cheque</th>
+                      <th style="padding:9px 7px; text-align:right; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Online</th>
+                      <th style="padding:9px 7px; text-align:right; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Total</th>
+                      <th style="padding:9px 7px; text-align:right; background:#422006; color:#fbbf24; font-size:11px; text-transform:uppercase; letter-spacing:1px;">PDC<br><span style="font-size:8px; letter-spacing:0; text-transform:none; color:#fcd34d;">not included</span></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3966,39 +3982,40 @@ export async function GET(request: Request) {
                       .map((r, i) => {
                         const row = i % 2 === 0 ? trNorm : trAlt;
                         return `<tr ${row}>
-                        <td ${tdL} style="padding:8px 12px; font-weight:700; color:#e2e8f0;">${
+                        <td style="text-align:left; padding:7px 7px; font-weight:700; color:#e2e8f0;">${
                           r.agent
                         }</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${fmt(
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#6ee7b7;">${fmt(
                           r.generic
                         )}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd;">${fmt(
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#c4b5fd;">${fmt(
                           r.branded
                         )}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fdba74;">${fmt(
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#fdba74;">${fmt(
                           r.discount
                         )}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(
                           r.quotaGenNet
                         )}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#6ee7b7;">${
                           r.cash > 0
                             ? fmt(r.cash)
                             : '<span style="color:#1e293b;">—</span>'
                         }</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fcd34d;">${
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#fcd34d;">${
                           r.cheque > 0
                             ? fmt(r.cheque)
                             : '<span style="color:#1e293b;">—</span>'
                         }</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#7dd3fc;">${
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#7dd3fc;">${
                           r.online > 0
                             ? fmt(r.online)
                             : '<span style="color:#1e293b;">—</span>'
                         }</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(
                           r.total
                         )}</td>
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#fbbf24; background:#1c1203; font-weight:700;">${r.pdc > 0 ? fmt(r.pdc) : '—'}</td>
                       </tr>`;
                       })
                       .join('')}
@@ -4016,31 +4033,32 @@ export async function GET(request: Request) {
                       const tb = agentCollRows.reduce((s, r) => s + r.branded, 0);
                       const tdisc = agentCollRows.reduce((s, r) => s + r.discount, 0);
                       return `<tr style="background:#1e293b; border-top:2px solid #475569;">
-                        <td ${tdL} style="padding:10px 12px; font-weight:900; color:#a855f7; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(
+                        <td style="text-align:left; padding:9px 7px; font-weight:900; color:#a855f7; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(
                         tg
                       )}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(
                         tb
                       )}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fdba74; font-weight:900;">${fmt(
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#fdba74; font-weight:900;">${fmt(
                         tdisc
                       )}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(
                         agentCollRows.reduce((s, r) => s + r.quotaGenNet, 0)
                       )}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(
                         tc
                       )}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fcd34d; font-weight:900;">${fmt(
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#fcd34d; font-weight:900;">${fmt(
                         tch
                       )}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#7dd3fc; font-weight:900;">${fmt(
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#7dd3fc; font-weight:900;">${fmt(
                         to
                       )}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(
                         tc + tch + to
                       )}</td>
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#fbbf24; background:#1c1203; font-weight:900;">${fmt(agentCollRows.reduce((s, r) => s + r.pdc, 0))}</td>
                       </tr>`;
                     })()}
                   </tbody>
@@ -4048,7 +4066,7 @@ export async function GET(request: Request) {
               </div>
               ${(() => {
                 const ua = agentCollRows.reduce((s, r) => s + r.unallocated, 0);
-                return `<p style="margin:-20px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Generic / Branded / Discount on collections are split pro-rata from each payment's linked SO. <strong>Generic Net (generic − discount) is what the Agent Quota Checker uses</strong>, counting CASH, ONLINE and DATED cheques (cheque date on/before the collection date). Post-dated cheques aren't counted anywhere (not in Cheque, Total or the quota), and branded never raises it.${ua > 0 ? ` ${fmt(ua)} came from payments with no linked SO (legacy / standalone), so it's in the Total but not in the split, and doesn't count toward the quota.` : ''}</p>`;
+                return `<p style="margin:-20px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Generic / Branded / Discount on collections are split pro-rata from each payment's linked SO. <strong>Generic Net (generic − discount) is what the Agent Quota Checker uses</strong>, counting CASH, ONLINE and DATED cheques (cheque date on/before the collection date). Post-dated cheques are NOT included in Cheque, Total or the quota — their full amount is shown on its own in the amber PDC column so you can see what's pending. Branded never raises the quota.${ua > 0 ? ` ${fmt(ua)} came from payments with no linked SO (legacy / standalone), so it's in the Total but not in the split, and doesn't count toward the quota.` : ''}</p>`;
               })()}
 
               ${
@@ -4583,11 +4601,11 @@ export async function GET(request: Request) {
           // linked SO's own mix (payment ÷ SO net), so the three always net back to the amount
           // collected. Payments with no linked SO (legacy / standalone) can't be split — they
           // stay in the Total and are counted in `unallocated` instead.
-          const agentCollMap = new Map<string, { cash: number; cheque: number; online: number; generic: number; branded: number; discount: number; unallocated: number; quotaGenNet: number }>();
+          const agentCollMap = new Map<string, { cash: number; cheque: number; online: number; generic: number; branded: number; discount: number; unallocated: number; quotaGenNet: number; pdc: number }>();
           paymentsCounted.filter((p: any) => !isOfficePayment(p)).forEach((p: any) => {
             const agent = ((p.orders as any)?.agent || 'MAIN OFFICE').trim();
             const key = agent.toUpperCase();
-            if (!agentCollMap.has(key)) agentCollMap.set(key, { cash: 0, cheque: 0, online: 0, generic: 0, branded: 0, discount: 0, unallocated: 0, quotaGenNet: 0 });
+            if (!agentCollMap.has(key)) agentCollMap.set(key, { cash: 0, cheque: 0, online: 0, generic: 0, branded: 0, discount: 0, unallocated: 0, quotaGenNet: 0, pdc: 0 });
             const entry = agentCollMap.get(key)!;
             const method = (p.payment_method || 'CASH').toUpperCase();
             const amt = Number(p.amount || 0);
@@ -4611,11 +4629,18 @@ export async function GET(request: Request) {
               entry.unallocated += amt;
             }
           });
+          // Post-dated cheques: NOT included in any column above, shown separately in the PDC column.
+          pdcNotCounted.forEach((p: any) => {
+            const key = ((p.orders as any)?.agent || 'MAIN OFFICE').trim().toUpperCase();
+            if (!agentCollMap.has(key))
+              agentCollMap.set(key, { cash: 0, cheque: 0, online: 0, generic: 0, branded: 0, discount: 0, unallocated: 0, quotaGenNet: 0, pdc: 0 });
+            agentCollMap.get(key)!.pdc += Number(p.amount || 0);
+          });
           const agentCollRows = Array.from(agentCollMap.entries())
             .map(([key, v]) => ({
               agent: key.charAt(0) + key.slice(1).toLowerCase(),
               cash: v.cash, cheque: v.cheque, online: v.online,
-              generic: v.generic, branded: v.branded, discount: v.discount, unallocated: v.unallocated, quotaGenNet: v.quotaGenNet,
+              generic: v.generic, branded: v.branded, discount: v.discount, unallocated: v.unallocated, quotaGenNet: v.quotaGenNet, pdc: v.pdc,
               total: v.cash + v.cheque + v.online,
             }))
             .sort((a, b) => b.total - a.total);
@@ -4666,18 +4691,18 @@ export async function GET(request: Request) {
           const collGenNet = (p: any) => (isQuotaCountable(p) ? rawGenNet(p) : 0);
           const isPdc = (p: any) =>
             (p.payment_method || '').toUpperCase() === 'CHEQUE' && !!p.cheque_date && String(p.cheque_date).slice(0, 10) > p.report_date;
-          const agentNetByDate = new Map<string, { displayName: string; byDate: Map<string, number>; pdc: number }>();
+          const agentNetByDate = new Map<string, { displayName: string; byDate: Map<string, number>; pdc: number; pdcFull: number }>();
           (paymentsDataWide || []).filter((p: any) => !isOfficePayment(p)).forEach((p: any) => {
             const display = ((p.orders as any)?.agent || 'MAIN OFFICE').trim();
             const key = display.toUpperCase();
             if (!agentNetByDate.has(key)) {
-              agentNetByDate.set(key, { displayName: agentSalesMap.get(key)?.displayName || display, byDate: new Map(), pdc: 0 });
+              agentNetByDate.set(key, { displayName: agentSalesMap.get(key)?.displayName || display, byDate: new Map(), pdc: 0, pdcFull: 0 });
             }
             const entry = agentNetByDate.get(key)!;
             const m = entry.byDate;
             m.set(p.report_date, (m.get(p.report_date) || 0) + collGenNet(p));
             if (p.report_date >= monthStart && p.report_date <= monthEnd) {
-              if (isPdc(p)) entry.pdc += rawGenNet(p);
+              if (isPdc(p)) { entry.pdc += rawGenNet(p); entry.pdcFull += Number(p.amount || 0); }
             }
           });
           const monthlyQuotaCheckRows = Array.from(agentNetByDate.entries())
@@ -4708,9 +4733,10 @@ export async function GET(request: Request) {
                 monthNet, monthlyQuota, monthHit, dailyPay, weeklyPay, monthlyPay,
                 totalPay: dailyPay + weeklyPay + monthlyPay,
                 excludedPdc: v.pdc,
+                excludedPdcFull: v.pdcFull,
               };
             })
-            .filter((r) => r.monthNet !== 0 || r.weeks.some((w) => w.weekNet !== 0) || r.excludedPdc > 0)
+            .filter((r) => r.monthNet !== 0 || r.weeks.some((w) => w.weekNet !== 0) || r.excludedPdcFull > 0)
             .sort((a, b) => b.monthNet - a.monthNet);
 
           // ── Online payments ──
@@ -4829,7 +4855,7 @@ export async function GET(request: Request) {
           const noDueDateReceivables = receivableRows.filter((r) => !r.dueDate).reduce((s, r) => s + r.remainingBalance, 0);
 
           // ── HTML helpers ──
-          const fmt = (n: number) => `₱${n.toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
+          const fmt = (n: number) => `₱${n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
           const tdR = `style="padding:8px 12px; text-align:right; font-family:monospace;"`;
           const tdL = `style="padding:8px 12px; text-align:left;"`;
           const thR = `style="padding:10px 12px; text-align:right; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;"`;
@@ -5126,12 +5152,10 @@ export async function GET(request: Request) {
                   <thead>
                     <tr>
                       <th ${thL}>Agent</th>
-                      ${Array.from({ length: 6 }).map((_, wi) => {
-                        const w = weekWindows[wi];
-                        if (!w) return `<th style="padding:8px 6px; text-align:center; background:#1e293b; color:#475569; font-size:9px; text-transform:uppercase; letter-spacing:0.5px;">—</th>`;
+                      ${weekWindows.map((w, wi) => {
                         return `<th style="padding:8px 6px; text-align:center; background:#1e293b; color:#94a3b8; font-size:9px; text-transform:uppercase; letter-spacing:0.5px;">Wk ${wi + 1}<br><span style="font-weight:400; text-transform:none; letter-spacing:0; font-size:8px; color:#64748b;">${fmtWeekRange(w)}</span></th>`;
                       }).join('')}
-                      <th style="padding:10px 8px; text-align:center; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Month (Net / Quota)</th>
+                      <th style="padding:10px 8px; text-align:center; background:#1e293b; color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Month (Counted / Quota)</th>
                       <th ${thR}>Daily ₱</th>
                       <th ${thR}>Weekly ₱</th>
                       <th ${thR}>Monthly ₱</th>
@@ -5142,9 +5166,9 @@ export async function GET(request: Request) {
                     ${monthlyQuotaCheckRows.map((r, i) => {
                       const row = i % 2 === 0 ? trNorm : trAlt;
                       const hasQuota = r.weeklyQuota > 0;
-                      const weekCells = Array.from({ length: 6 }).map((_, wi) => {
+                      const weekCells = weekWindows.map((_, wi) => {
                         const w = r.weeks[wi];
-                        if (!weekWindows[wi] || !w) return `<td style="padding:6px; text-align:center; font-family:monospace; font-size:10px; color:#334155;">—</td>`;
+                        if (!w) return `<td style="padding:6px; text-align:center; font-family:monospace; font-size:10px; color:#334155;">—</td>`;
                         const color = !hasQuota ? '#64748b' : !w.paidThisMonth ? '#94a3b8' : w.weekHit ? '#10b981' : '#ef4444';
                         const tag = !w.paidThisMonth
                           ? '<br><span style="font-size:8px;color:#64748b;">paid next month</span>'
@@ -5157,7 +5181,7 @@ export async function GET(request: Request) {
                       return `<tr ${row}>
                         <td style="padding:8px 12px; text-align:left; font-weight:700; color:#e2e8f0; white-space:nowrap;">${r.agent}<br><span style="font-weight:400; font-size:10px; color:#94a3b8; font-family:monospace;">${hasQuota ? `Daily ${fmt(r.dailyQuota)}<br>Wk ${fmt(r.weeklyQuota)}<br>Month ${fmt(r.monthlyQuota)}` : 'No quota set'}</span></td>
                         ${weekCells}
-                        <td style="padding:8px; text-align:center; font-family:monospace; font-size:11px; font-weight:700; color:${monthColor};">${fmt(r.monthNet)}${r.monthHit ? ' ✓' : ''}<br><span style="font-size:9px; font-weight:400; color:#64748b;">of ${hasQuota ? fmt(r.monthlyQuota) : '—'}</span>${r.excludedPdc > 0 ? `<br><span style="font-size:9px; font-weight:400; color:#f59e0b;">not counted: PDC ${fmt(r.excludedPdc)}</span>` : ''}</td>
+                        <td style="padding:8px; text-align:center; font-family:monospace; font-size:11px; font-weight:700; color:${monthColor};">${fmt(r.monthNet)}${r.monthHit ? ' ✓' : ''}<br><span style="font-size:9px; font-weight:400; color:#64748b;">quota ${hasQuota ? fmt(r.monthlyQuota) : '—'}</span>${r.excludedPdcFull > 0 ? `<br><span style="font-size:9px; font-weight:400; color:#f59e0b;">PDC not included: ${fmt(r.excludedPdcFull)}<br>(generic part ${fmt(r.excludedPdc)})</span>` : ''}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.dailyPay > 0 ? fmt(r.dailyPay) : '—'}<br><span style="font-size:9px;color:#64748b;">${hasQuota ? r.daysHit + ' day' + (r.daysHit === 1 ? '' : 's') : ''}</span></td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.weeklyPay > 0 ? fmt(r.weeklyPay) : '—'}<br><span style="font-size:9px;color:#64748b;">${hasQuota ? r.weeksHit + ' wk' + (r.weeksHit === 1 ? '' : 's') : ''}</span></td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fbbf24; font-weight:700;">${r.monthlyPay > 0 ? fmt(r.monthlyPay) : '—'}</td>
@@ -5166,7 +5190,7 @@ export async function GET(request: Request) {
                     }).join('')}
                     <tr style="background:#1e293b; border-top:2px solid #475569;">
                       <td ${tdL} style="padding:10px 12px; font-weight:900; color:#2dd4bf; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
-                      ${Array.from({ length: 6 }).map(() => `<td></td>`).join('')}
+                      ${weekWindows.map(() => `<td></td>`).join('')}
                       <td style="padding:10px 8px; text-align:center; font-family:monospace; color:#e2e8f0; font-weight:900;">${fmt(monthlyQuotaCheckRows.reduce((s, r) => s + r.monthNet, 0))}</td>
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(monthlyQuotaCheckRows.reduce((s, r) => s + r.dailyPay, 0))}</td>
                       <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(monthlyQuotaCheckRows.reduce((s, r) => s + r.weeklyPay, 0))}</td>
@@ -5182,33 +5206,35 @@ export async function GET(request: Request) {
               <!-- AGENT COLLECTIONS -->
               <h3 style="color:#a855f7; font-size:12px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin:0 0 12px 0;">💰 Monthly Collections by Agent</h3>
               <div style="overflow-x:auto; margin-bottom:28px;">
-                <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <table style="width:100%; border-collapse:collapse; font-size:11.5px; white-space:nowrap;">
                   <thead>
                     <tr>
-                      <th ${thL}>Agent</th>
-                      <th ${thR}>Generic</th>
-                      <th ${thR}>Branded</th>
-                      <th ${thR}>Discount</th>
-                      <th style="padding:10px 12px; text-align:right; background:#134e4a; color:#5eead4; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Generic Net<br><span style="font-size:8px; letter-spacing:0; text-transform:none; color:#99f6e4;">quota basis · cash, online, dated chq</span></th>
-                      <th ${thR}>Cash</th>
-                      <th ${thR}>Cheque</th>
-                      <th ${thR}>Online</th>
-                      <th ${thR}>Total</th>
+                      <th style="padding:9px 7px; text-align:left; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Agent</th>
+                      <th style="padding:9px 7px; text-align:right; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Generic</th>
+                      <th style="padding:9px 7px; text-align:right; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Branded</th>
+                      <th style="padding:9px 7px; text-align:right; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Discount</th>
+                      <th style="padding:9px 7px; text-align:right; background:#134e4a; color:#5eead4; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Generic Net<br><span style="font-size:8px; letter-spacing:0; text-transform:none; color:#99f6e4;">quota basis · cash, online, dated chq</span></th>
+                      <th style="padding:9px 7px; text-align:right; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Cash</th>
+                      <th style="padding:9px 7px; text-align:right; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Cheque</th>
+                      <th style="padding:9px 7px; text-align:right; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Online</th>
+                      <th style="padding:9px 7px; text-align:right; background:#1e293b; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Total</th>
+                      <th style="padding:9px 7px; text-align:right; background:#422006; color:#fbbf24; font-size:11px; text-transform:uppercase; letter-spacing:1px;">PDC<br><span style="font-size:8px; letter-spacing:0; text-transform:none; color:#fcd34d;">not included</span></th>
                     </tr>
                   </thead>
                   <tbody>
                     ${agentCollRows.map((r, i) => {
                       const row = i % 2 === 0 ? trNorm : trAlt;
                       return `<tr ${row}>
-                        <td ${tdL} style="padding:8px 12px; font-weight:700; color:#e2e8f0;">${r.agent}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${fmt(r.generic)}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd;">${fmt(r.branded)}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fdba74;">${fmt(r.discount)}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(r.quotaGenNet)}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.cash > 0 ? fmt(r.cash) : '<span style="color:#1e293b;">—</span>'}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fcd34d;">${r.cheque > 0 ? fmt(r.cheque) : '<span style="color:#1e293b;">—</span>'}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#7dd3fc;">${r.online > 0 ? fmt(r.online) : '<span style="color:#1e293b;">—</span>'}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(r.total)}</td>
+                        <td style="text-align:left; padding:7px 7px; font-weight:700; color:#e2e8f0;">${r.agent}</td>
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#6ee7b7;">${fmt(r.generic)}</td>
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#c4b5fd;">${fmt(r.branded)}</td>
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#fdba74;">${fmt(r.discount)}</td>
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(r.quotaGenNet)}</td>
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.cash > 0 ? fmt(r.cash) : '<span style="color:#1e293b;">—</span>'}</td>
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#fcd34d;">${r.cheque > 0 ? fmt(r.cheque) : '<span style="color:#1e293b;">—</span>'}</td>
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#7dd3fc;">${r.online > 0 ? fmt(r.online) : '<span style="color:#1e293b;">—</span>'}</td>
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(r.total)}</td>
+                        <td style="padding:7px 7px; text-align:right; font-family:monospace; color:#fbbf24; background:#1c1203; font-weight:700;">${r.pdc > 0 ? fmt(r.pdc) : '—'}</td>
                       </tr>`;
                     }).join('')}
                     ${(() => {
@@ -5219,15 +5245,16 @@ export async function GET(request: Request) {
                       const tb = agentCollRows.reduce((s, r) => s + r.branded, 0);
                       const tdisc = agentCollRows.reduce((s, r) => s + r.discount, 0);
                       return `<tr style="background:#1e293b; border-top:2px solid #475569;">
-                        <td ${tdL} style="padding:10px 12px; font-weight:900; color:#a855f7; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(tg)}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(tb)}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fdba74; font-weight:900;">${fmt(tdisc)}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(agentCollRows.reduce((s, r) => s + r.quotaGenNet, 0))}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(tc)}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fcd34d; font-weight:900;">${fmt(tch)}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#7dd3fc; font-weight:900;">${fmt(to)}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(tc + tch + to)}</td>
+                        <td style="text-align:left; padding:9px 7px; font-weight:900; color:#a855f7; font-size:11px; text-transform:uppercase; letter-spacing:1px;">TOTAL</td>
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(tg)}</td>
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(tb)}</td>
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#fdba74; font-weight:900;">${fmt(tdisc)}</td>
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(agentCollRows.reduce((s, r) => s + r.quotaGenNet, 0))}</td>
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(tc)}</td>
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#fcd34d; font-weight:900;">${fmt(tch)}</td>
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#7dd3fc; font-weight:900;">${fmt(to)}</td>
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(tc + tch + to)}</td>
+                        <td style="padding:9px 7px; text-align:right; font-family:monospace; color:#fbbf24; background:#1c1203; font-weight:900;">${fmt(agentCollRows.reduce((s, r) => s + r.pdc, 0))}</td>
                       </tr>`;
                     })()}
                   </tbody>
@@ -5235,7 +5262,7 @@ export async function GET(request: Request) {
               </div>
               ${(() => {
                 const ua = agentCollRows.reduce((s, r) => s + r.unallocated, 0);
-                return `<p style="margin:-20px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Generic / Branded / Discount on collections are split pro-rata from each payment's linked SO. <strong>Generic Net (generic − discount) is what the Agent Quota Checker uses</strong>, counting CASH, ONLINE and DATED cheques (cheque date on/before the collection date). Post-dated cheques aren't counted anywhere (not in Cheque, Total or the quota), and branded never raises it.${ua > 0 ? ` ${fmt(ua)} came from payments with no linked SO (legacy / standalone), so it's in the Total but not in the split, and doesn't count toward the quota.` : ''}</p>`;
+                return `<p style="margin:-20px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Generic / Branded / Discount on collections are split pro-rata from each payment's linked SO. <strong>Generic Net (generic − discount) is what the Agent Quota Checker uses</strong>, counting CASH, ONLINE and DATED cheques (cheque date on/before the collection date). Post-dated cheques are NOT included in Cheque, Total or the quota — their full amount is shown on its own in the amber PDC column so you can see what's pending. Branded never raises the quota.${ua > 0 ? ` ${fmt(ua)} came from payments with no linked SO (legacy / standalone), so it's in the Total but not in the split, and doesn't count toward the quota.` : ''}</p>`;
               })()}
 
 
