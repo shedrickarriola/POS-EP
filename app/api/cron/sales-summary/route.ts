@@ -580,7 +580,7 @@ export async function GET(request: Request) {
             await supabaseAdmin
               .from('daily_payments')
               .select(
-                `*, orders (client_name, order_number, dr_number, delivery_date, created_date_pht, total_amount)`
+                `*, orders (client_name, order_number, dr_number, delivery_date, created_date_pht, total_amount, agent, generic_amt, branded_amt, discount_total)`
               )
               .eq('branch_id', b.id)
               .eq('report_date', reportDate);
@@ -646,6 +646,13 @@ export async function GET(request: Request) {
           // Helper: check if a payment belongs to an office account
           const isOfficePayment = (p: any) =>
             officeSet.has(p.orders?.client_name || '');
+          // Post-dated cheque (PDC) = cheque dated AFTER today's report date. Never counted in totals;
+          // still listed in the Daily Sales Table (tagged) so it stays visible.
+          const isPostDatedCheque = (p: any) =>
+            (p.payment_method || '').toUpperCase() === 'CHEQUE' && !!p.cheque_date && String(p.cheque_date).slice(0, 10) > reportDate;
+          const pdcNotCountedTotal = (allPaymentsRaw || [])
+            .filter((p: any) => isPostDatedCheque(p) && !isOfficePayment(p))
+            .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
 
           // === DAILY SALES ===
           const gen = Number(report?.generic_sales || 0);
@@ -679,7 +686,7 @@ export async function GET(request: Request) {
 
           const dailyCheque = sameDayPayments
             .filter(
-              (p: any) => p.payment_method === 'CHEQUE' && !isOfficePayment(p)
+              (p: any) => p.payment_method === 'CHEQUE' && !isOfficePayment(p) && !isPostDatedCheque(p)
             )
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
@@ -700,7 +707,7 @@ export async function GET(request: Request) {
 
           const remCheque = allRemittances
             .filter(
-              (p: any) => p.payment_method === 'CHEQUE' && !isOfficePayment(p)
+              (p: any) => p.payment_method === 'CHEQUE' && !isOfficePayment(p) && !isPostDatedCheque(p)
             )
             .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
@@ -773,6 +780,60 @@ export async function GET(request: Request) {
             ).toLowerCase();
             return nameA.localeCompare(nameB);
           });
+
+          // === AGENT QUOTA TODAY (office incentives, COLLECTION generic-net basis) ===
+          // Same rules as the Weekly Report's Agent Quota Checker: only the generic-net part of each
+          // payment counts (payment × (generic − discount) ÷ SO net; branded never counts, whole
+          // discount treated as generic; no linked SO = doesn't count). CASH, ONLINE and DATED
+          // cheques count; post-dated cheques (cheque_date after the collection date) don't.
+          // Office accounts excluded. Daily quota = agent_weekly_quota ÷ 6 (Mon–Sat; no Sunday quota).
+          const OFFICE_DAILY_INCENTIVE = 200;
+          const isWorkingDayToday = new Date(reportDate + 'T00:00:00').getDay() !== 0;
+          const { data: quotaProfiles } = await supabaseAdmin
+            .from('profiles')
+            .select('full_name, agent_weekly_quota')
+            .not('agent_weekly_quota', 'is', null)
+            .gt('agent_weekly_quota', 0);
+          const dailyQuotaMap = new Map<string, { name: string; weekly: number }>();
+          (quotaProfiles || []).forEach((pr: any) => {
+            if (pr.full_name)
+              dailyQuotaMap.set(pr.full_name.trim().toUpperCase(), { name: pr.full_name.trim(), weekly: Number(pr.agent_weekly_quota || 0) });
+          });
+          const isQuotaCountableToday = (p: any) => {
+            const method = (p.payment_method || 'CASH').toUpperCase();
+            if (method === 'CASH' || method === 'ONLINE') return true;
+            if (method === 'CHEQUE') return !p.cheque_date || String(p.cheque_date).slice(0, 10) <= reportDate;
+            return false;
+          };
+          const genNetOfPayment = (p: any) => {
+            const ord = p.orders || {};
+            const oGen = Number(ord.generic_amt || 0);
+            const oBrd = Number(ord.branded_amt || 0);
+            const oDisc = Number(ord.discount_total || 0);
+            const oNet = oGen + oBrd - oDisc;
+            return p.orders && oNet > 0 ? Number(p.amount || 0) * ((oGen - oDisc) / oNet) : 0;
+          };
+          const agentTodayMap = new Map<string, { name: string; counted: number; pdc: number; collected: number }>();
+          (allPaymentsRaw || [])
+            .filter((p: any) => !isOfficePayment(p))
+            .forEach((p: any) => {
+              const display = (p.orders?.agent || 'MAIN OFFICE').trim();
+              const key = display.toUpperCase();
+              if (!agentTodayMap.has(key))
+                agentTodayMap.set(key, { name: dailyQuotaMap.get(key)?.name || display, counted: 0, pdc: 0, collected: 0 });
+              const e = agentTodayMap.get(key)!;
+              e.collected += Number(p.amount || 0);
+              if (isQuotaCountableToday(p)) e.counted += genNetOfPayment(p);
+              else if ((p.payment_method || '').toUpperCase() === 'CHEQUE') e.pdc += genNetOfPayment(p);
+            });
+          const agentQuotaTodayRows = Array.from(agentTodayMap.entries())
+            .map(([key, v]) => {
+              const dailyQuota = (dailyQuotaMap.get(key)?.weekly || 0) / 6;
+              const hit = isWorkingDayToday && dailyQuota > 0 && v.counted >= dailyQuota;
+              return { ...v, dailyQuota, hit, earned: hit ? OFFICE_DAILY_INCENTIVE : 0 };
+            })
+            .sort((a, b) => b.counted - a.counted);
+          const agentQuotaTodayTotal = agentQuotaTodayRows.reduce((s, r) => s + r.earned, 0);
 
           // === FULL HTML ===
           const reportNotes = report?.notes?.trim() || '';
@@ -902,6 +963,12 @@ export async function GET(request: Request) {
                   </div>
                 </div>
 
+                ${
+                  pdcNotCountedTotal > 0
+                    ? `<div style="padding:0 32px;"><div style="margin:-16px 0 24px 0;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:8px 12px;color:#b45309;font-size:11px;">⏳ Post-dated cheques not counted in any total above: <strong>₱${pdcNotCountedTotal.toLocaleString()}</strong> — listed in the Daily Sales Table (tagged PDC).</div></div>`
+                    : ''
+                }
+
                 <!-- ===== DIVIDER ===== -->
                 <div style="margin:0 32px;border-top:1px solid #e2e8f0;"></div>
 
@@ -963,6 +1030,71 @@ export async function GET(request: Request) {
                     : ''
                 }
 
+                <!-- ===== AGENT QUOTA TODAY ===== -->
+                ${
+                  agentQuotaTodayRows.length > 0
+                    ? `
+                <div style="padding:28px 32px 0 32px;">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+                    <div style="width:4px;height:20px;background:#0d9488;border-radius:2px;"></div>
+                    <span style="font-size:11px;font-weight:800;letter-spacing:3px;color:#64748b;text-transform:uppercase;">Agent Quota Today (Collections, Generic Net)</span>
+                  </div>
+                  <div style="background:linear-gradient(135deg,#fef9c3,#fde68a);border:2px solid #facc15;border-radius:10px;padding:14px 18px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                      <div style="color:#854d0e;font-size:11px;font-weight:800;letter-spacing:2px;text-transform:uppercase;">💵 Daily Incentive Earned Today</div>
+                      <div style="color:#a16207;font-size:11px;margin-top:3px;">${
+                        isWorkingDayToday
+                          ? `${agentQuotaTodayRows.filter((r) => r.hit).length} agent(s) hit • ₱${OFFICE_DAILY_INCENTIVE} each • paid with the Saturday Weekly Report`
+                          : 'Sunday — no daily quota (collections still count toward the week)'
+                      }</div>
+                    </div>
+                    <div style="color:#854d0e;font-size:24px;font-weight:900;font-variant-numeric:tabular-nums;">₱${agentQuotaTodayTotal.toLocaleString()}</div>
+                  </div>
+                  <div style="overflow-x:auto;border-radius:10px;border:1px solid #e2e8f0;">
+                    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                      <thead>
+                        <tr style="background:#1e293b;color:#94a3b8;text-align:left;">
+                          <th style="padding:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:10px;">Agent</th>
+                          <th style="padding:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:10px;text-align:right;">Collected</th>
+                          <th style="padding:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:10px;text-align:right;">Generic Net (counted)</th>
+                          <th style="padding:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:10px;text-align:center;">Status</th>
+                          <th style="padding:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:10px;text-align:right;background:#713f12;color:#fde047;">Earned</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        ${agentQuotaTodayRows
+                          .map((r: any, idx: number) => {
+                            const rowBg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
+                            const status = !isWorkingDayToday
+                              ? '<span style="color:#94a3b8;font-weight:700;">SUNDAY</span>'
+                              : r.dailyQuota <= 0
+                              ? '<span style="color:#94a3b8;font-weight:700;">NO QUOTA</span>'
+                              : r.hit
+                              ? '<span style="color:#059669;font-weight:800;">✓ HIT</span>'
+                              : `<span style="color:#dc2626;font-weight:700;">✗ short ₱${Math.max(0, r.dailyQuota - r.counted).toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>`;
+                            return `
+                            <tr style="background:${rowBg};border-bottom:1px solid #f1f5f9;">
+                              <td style="padding:9px 10px;font-weight:700;color:#111827;">${r.name}<br><span style="font-weight:400;font-size:10px;color:#6b7280;">${r.dailyQuota > 0 ? `Daily quota ₱${r.dailyQuota.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : 'No quota set'}</span></td>
+                              <td style="padding:9px 10px;text-align:right;color:#6b7280;">₱${r.collected.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                              <td style="padding:9px 10px;text-align:right;font-weight:800;color:#0f766e;">₱${r.counted.toLocaleString(undefined, { maximumFractionDigits: 2 })}${r.pdc > 0 ? `<br><span style="font-weight:400;font-size:10px;color:#d97706;">not counted: PDC ₱${r.pdc.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>` : ''}</td>
+                              <td style="padding:9px 10px;text-align:center;">${status}</td>
+                              <td style="padding:9px 10px;text-align:right;font-weight:900;color:#854d0e;background:#fefce8;">${r.earned > 0 ? `₱${r.earned.toLocaleString()}` : '—'}</td>
+                            </tr>`;
+                          })
+                          .join('')}
+                        <tr style="background:#fef9c3;">
+                          <td colspan="4" style="padding:10px;font-weight:800;color:#854d0e;font-size:12px;text-transform:uppercase;letter-spacing:1px;">Total to give today</td>
+                          <td style="padding:10px;text-align:right;font-weight:900;color:#422006;background:#facc15;font-size:14px;">₱${agentQuotaTodayTotal.toLocaleString()}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <p style="margin:8px 2px 0 2px;color:#94a3b8;font-size:10px;line-height:1.5;">Counts only the generic-net part of today's collections (generic − discount; branded never counts). Cash, online and dated cheques count; post-dated cheques don't. Office accounts and payments with no linked SO are excluded. Daily quota = weekly quota ÷ 6 (Mon–Sat). The ₱${OFFICE_DAILY_INCENTIVE} is paid out with the Saturday Weekly Report.</p>
+                </div>
+                `
+                    : ''
+                }
+
                 <!-- ===== DAILY SALES TABLE ===== -->
                 <div style="padding:28px 32px 0 32px;">
                   <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
@@ -1017,7 +1149,7 @@ export async function GET(request: Request) {
                                 p.pr_number || '—'
                               }</td>
                               <td style="padding:9px 10px;text-align:right;color:#059669;font-weight:600;">₱${cashAmt.toLocaleString()}</td>
-                              <td style="padding:9px 10px;text-align:right;color:#7c3aed;font-weight:600;">₱${chequeAmt.toLocaleString()}</td>
+                              <td style="padding:9px 10px;text-align:right;color:#7c3aed;font-weight:600;">₱${chequeAmt.toLocaleString()}${isPostDatedCheque(p) ? '<br><span style="display:inline-block;margin-top:2px;background:#fef3c7;color:#b45309;font-size:9px;font-weight:800;padding:1px 6px;border-radius:99px;white-space:nowrap;">PDC · not counted</span>' : ''}</td>
                               <td style="padding:9px 10px;color:#6b7280;">${
                                 p.cheque_date || '—'
                               }</td>
@@ -2907,7 +3039,7 @@ export async function GET(request: Request) {
               .from('daily_payments')
               .select(
                 `
-                id, amount, payment_method, report_date, order_id,
+                id, amount, payment_method, report_date, order_id, cheque_date,
                 customer_name, pr_number, notes,
                 orders ( id, order_number, dr_number, client_name, agent, generic_amt, branded_amt, discount_total, total_amount )
               `
@@ -2957,6 +3089,13 @@ export async function GET(request: Request) {
             officeMap[
               (p.orders as any)?.client_name || p.customer_name || ''
             ] || false;
+          // Post-dated cheque (PDC) = cheque whose cheque_date is AFTER the day it was collected.
+          // PDCs are never counted in any total in this report (cheque, collections, client paid).
+          const isPostDatedCheque = (p: any) =>
+            (p.payment_method || '').toUpperCase() === 'CHEQUE' && !!p.cheque_date && String(p.cheque_date).slice(0, 10) > p.report_date;
+          const pdcNotCounted = (paymentsData || []).filter((p: any) => isPostDatedCheque(p) && !isOfficePayment(p));
+          const pdcNotCountedTotal = pdcNotCounted.reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
+          const paymentsCounted = (paymentsData || []).filter((p: any) => !isPostDatedCheque(p));
 
           // ── Report map ──
           const reportMap: Record<string, any> = {};
@@ -3006,7 +3145,7 @@ export async function GET(request: Request) {
             const disc = Number(report?.discount_total || 0);
             const netTotal = gen + brd - disc - others;
 
-            const dayPay = (paymentsData || []).filter(
+            const dayPay = paymentsCounted.filter(
               (p: any) => p.report_date === dateStr
             );
             const cash = dayPay
@@ -3155,7 +3294,16 @@ export async function GET(request: Request) {
           // Sunday collections still count toward the week). All three incentives stack.
           const OFFICE_DAILY_INCENTIVE = 200; // per agent, per Mon–Sat day generic-net collected ≥ daily quota
           const OFFICE_WEEKLY_INCENTIVE = 500; // per agent, if the week's generic-net collected ≥ weekly quota
-          const collGenNet = (p: any) => {
+          // CASH, ONLINE and DATED cheques count toward the quota. A cheque counts when its cheque_date
+          // is on/before the day it was collected (report_date) — post-dated cheques (PDC) don't.
+          // A cheque with no cheque_date on file is treated as dated.
+          const isQuotaCountable = (p: any) => {
+            const method = (p.payment_method || 'CASH').toUpperCase();
+            if (method === 'CASH' || method === 'ONLINE') return true;
+            if (method === 'CHEQUE') return !p.cheque_date || String(p.cheque_date).slice(0, 10) <= p.report_date;
+            return false;
+          };
+          const rawGenNet = (p: any) => {
             const ord = p.orders as any;
             const oGen = Number(ord?.generic_amt || 0);
             const oBrd = Number(ord?.branded_amt || 0);
@@ -3163,7 +3311,10 @@ export async function GET(request: Request) {
             const oNet = oGen + oBrd - oDisc;
             return ord && oNet > 0 ? Number(p.amount || 0) * ((oGen - oDisc) / oNet) : 0;
           };
-          const agentDayNetMap = new Map<string, { displayName: string; days: number[] }>();
+          const collGenNet = (p: any) => (isQuotaCountable(p) ? rawGenNet(p) : 0);
+          const isPdc = (p: any) =>
+            (p.payment_method || '').toUpperCase() === 'CHEQUE' && !!p.cheque_date && String(p.cheque_date).slice(0, 10) > p.report_date;
+          const agentDayNetMap = new Map<string, { displayName: string; days: number[]; pdc: number }>();
           (paymentsData || [])
             .filter((p: any) => !isOfficePayment(p))
             .forEach((p: any) => {
@@ -3175,8 +3326,11 @@ export async function GET(request: Request) {
                 agentDayNetMap.set(key, {
                   displayName: agentSalesMap.get(key)?.displayName || display,
                   days: weekDates.map(() => 0),
+                  pdc: 0,
                 });
-              agentDayNetMap.get(key)!.days[di] += collGenNet(p);
+              const entry = agentDayNetMap.get(key)!;
+              entry.days[di] += collGenNet(p);
+              if (isPdc(p)) entry.pdc += rawGenNet(p);
             });
           const isWorkingDay = (dateStr: string) =>
             new Date(dateStr + 'T00:00:00').getDay() !== 0;
@@ -3205,6 +3359,7 @@ export async function GET(request: Request) {
                 dailyPay,
                 weeklyPay,
                 totalPay: dailyPay + weeklyPay,
+                excludedPdc: v.pdc,
               };
             })
             .sort((a, b) => b.weekNet - a.weekNet);
@@ -3216,15 +3371,15 @@ export async function GET(request: Request) {
           // stay in the Total and are counted in `unallocated` instead.
           const agentCollMap = new Map<
             string,
-            { cash: number; cheque: number; online: number; generic: number; branded: number; discount: number; unallocated: number }
+            { cash: number; cheque: number; online: number; generic: number; branded: number; discount: number; unallocated: number; quotaGenNet: number }
           >();
-          (paymentsData || [])
+          paymentsCounted
             .filter((p: any) => !isOfficePayment(p))
             .forEach((p: any) => {
               const agent = ((p.orders as any)?.agent || 'MAIN OFFICE').trim();
               const key = agent.toUpperCase();
               if (!agentCollMap.has(key))
-                agentCollMap.set(key, { cash: 0, cheque: 0, online: 0, generic: 0, branded: 0, discount: 0, unallocated: 0 });
+                agentCollMap.set(key, { cash: 0, cheque: 0, online: 0, generic: 0, branded: 0, discount: 0, unallocated: 0, quotaGenNet: 0 });
               const entry = agentCollMap.get(key)!;
               const method = (p.payment_method || 'CASH').toUpperCase();
               const amt = Number(p.amount || 0);
@@ -3241,6 +3396,9 @@ export async function GET(request: Request) {
                 entry.generic += oGen * share;
                 entry.branded += oBrd * share;
                 entry.discount += oDisc * share;
+                // quota basis: cash + online + dated cheques (no PDC)
+                if (method === 'CASH' || method === 'ONLINE' || (method === 'CHEQUE' && (!p.cheque_date || String(p.cheque_date).slice(0, 10) <= p.report_date)))
+                  entry.quotaGenNet += (oGen - oDisc) * share;
               } else {
                 entry.unallocated += amt;
               }
@@ -3255,6 +3413,7 @@ export async function GET(request: Request) {
               branded: v.branded,
               discount: v.discount,
               unallocated: v.unallocated,
+              quotaGenNet: v.quotaGenNet,
               total: v.cash + v.cheque + v.online,
             }))
             .sort((a, b) => b.total - a.total);
@@ -3291,7 +3450,7 @@ export async function GET(request: Request) {
             string,
             { cash: number; cheque: number; online: number }
           >();
-          (paymentsData || [])
+          paymentsCounted
             .filter((p: any) => !isOfficePayment(p))
             .forEach((p: any) => {
               const client =
@@ -3426,6 +3585,8 @@ export async function GET(request: Request) {
                   weekActualCash
                 )}</div>
               </div>
+
+              ${pdcNotCountedTotal > 0 ? `<div style="margin:-14px 0 24px 0; background:#422006; border:1px solid #b45309; border-radius:10px; padding:10px 14px; color:#fbbf24; font-size:12px;">⏳ Post-dated cheques not counted in any total in this report: <strong style="font-family:monospace;">${fmt(pdcNotCountedTotal)}</strong> <span style="color:#d6b25e; font-size:11px;">(${pdcNotCounted.length} cheque${pdcNotCounted.length === 1 ? '' : 's'} dated after the day collected — excluded from Cheque, Collections and Client Paid)</span></div>` : ''}
 
               <!-- CASH vs STOCKS SUMMARY -->
               <table style="width:100%; border-collapse:collapse; margin-bottom:28px;">
@@ -3763,7 +3924,7 @@ export async function GET(request: Request) {
                         ${dayCells}
                         <td style="padding:8px; text-align:center; font-family:monospace; font-weight:700; color:${r.daysHit > 0 ? '#10b981' : '#64748b'};">${hasQuota ? r.daysHit + ' / 6' : '—'}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.dailyPay > 0 ? fmt(r.dailyPay) : '—'}</td>
-                        <td style="padding:8px; text-align:center; font-family:monospace; font-size:11px; font-weight:700; color:${weekColor};">${fmt(r.weekNet)}${r.weekHit ? ' ✓' : ''}<br><span style="font-size:9px; font-weight:400; color:#64748b;">of ${hasQuota ? fmt(r.weeklyQuota) : '—'}</span></td>
+                        <td style="padding:8px; text-align:center; font-family:monospace; font-size:11px; font-weight:700; color:${weekColor};">${fmt(r.weekNet)}${r.weekHit ? ' ✓' : ''}<br><span style="font-size:9px; font-weight:400; color:#64748b;">of ${hasQuota ? fmt(r.weeklyQuota) : '—'}</span>${r.excludedPdc > 0 ? `<br><span style="font-size:9px; font-weight:400; color:#f59e0b;">not counted: PDC ${fmt(r.excludedPdc)}</span>` : ''}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.weeklyPay > 0 ? fmt(r.weeklyPay) : '—'}</td>
                         <td style="padding:8px 12px; text-align:right; font-family:monospace; color:#fde047; font-weight:900; font-size:14px; background:#422006; border-left:2px solid #facc15;">${fmt(r.totalPay)}</td>
                       </tr>`;
@@ -3780,7 +3941,7 @@ export async function GET(request: Request) {
                   </tbody>
                 </table>
               </div>
-              <p style="margin:-2px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Quota basis = <strong>COLLECTIONS</strong>, generic net only: each payment counts only for its generic − discount share of the linked SO (branded never counts, the whole discount is treated as generic discount; payments with no linked SO don't count). Collections are dated by report date. Office accounts are excluded. Sales are not used for incentives. Daily quota = agent_weekly_quota ÷ 6 working days (Mon–Sat). Sunday has no daily quota, but Sunday collections still count toward the week. Payout: +₱${OFFICE_DAILY_INCENTIVE} for each Mon–Sat day hit (green ✓), +₱${OFFICE_WEEKLY_INCENTIVE} if the week's generic-net collections meet the weekly quota. They stack, and the ₱1,000 monthly bonus is checked in the Monthly Report. "—" = no quota set for that agent.</p>
+              <p style="margin:-2px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Quota basis = <strong>COLLECTIONS</strong>, generic net only: each payment counts only for its generic − discount share of the linked SO (branded never counts, the whole discount is treated as generic discount; payments with no linked SO don't count). <strong>CASH, ONLINE and DATED cheques count</strong> — a cheque counts when its cheque date is on/before the day it was collected; post-dated cheques (PDC) don't count and are listed in amber as "not counted". Collections are dated by report date. Office accounts are excluded. Sales are not used for incentives. Daily quota = agent_weekly_quota ÷ 6 working days (Mon–Sat). Sunday has no daily quota, but Sunday collections still count toward the week. Payout: +₱${OFFICE_DAILY_INCENTIVE} for each Mon–Sat day hit (green ✓), +₱${OFFICE_WEEKLY_INCENTIVE} if the week's generic-net collections meet the weekly quota. They stack, and the ₱1,000 monthly bonus is checked in the Monthly Report. "—" = no quota set for that agent.</p>
               ` : ''}
 
               <!-- AGENT COLLECTIONS -->
@@ -3793,7 +3954,7 @@ export async function GET(request: Request) {
                       <th ${thR}>Generic</th>
                       <th ${thR}>Branded</th>
                       <th ${thR}>Discount</th>
-                      <th style="padding:10px 12px; text-align:right; background:#134e4a; color:#5eead4; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Generic Net<br><span style="font-size:8px; letter-spacing:0; text-transform:none; color:#99f6e4;">quota basis</span></th>
+                      <th style="padding:10px 12px; text-align:right; background:#134e4a; color:#5eead4; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Generic Net<br><span style="font-size:8px; letter-spacing:0; text-transform:none; color:#99f6e4;">quota basis · cash, online, dated chq</span></th>
                       <th ${thR}>Cash</th>
                       <th ${thR}>Cheque</th>
                       <th ${thR}>Online</th>
@@ -3818,7 +3979,7 @@ export async function GET(request: Request) {
                           r.discount
                         )}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(
-                          r.generic - r.discount
+                          r.quotaGenNet
                         )}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${
                           r.cash > 0
@@ -3866,7 +4027,7 @@ export async function GET(request: Request) {
                         tdisc
                       )}</td>
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(
-                        tg - tdisc
+                        agentCollRows.reduce((s, r) => s + r.quotaGenNet, 0)
                       )}</td>
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(
                         tc
@@ -3887,7 +4048,7 @@ export async function GET(request: Request) {
               </div>
               ${(() => {
                 const ua = agentCollRows.reduce((s, r) => s + r.unallocated, 0);
-                return `<p style="margin:-20px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Generic / Branded / Discount on collections are split pro-rata from each payment's linked SO. <strong>Generic Net (generic − discount) is what the Agent Quota Checker uses</strong> — branded collections are shown but never raise it.${ua > 0 ? ` ${fmt(ua)} came from payments with no linked SO (legacy / standalone), so it's in the Total but not in the split, and doesn't count toward the quota.` : ''}</p>`;
+                return `<p style="margin:-20px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Generic / Branded / Discount on collections are split pro-rata from each payment's linked SO. <strong>Generic Net (generic − discount) is what the Agent Quota Checker uses</strong>, counting CASH, ONLINE and DATED cheques (cheque date on/before the collection date). Post-dated cheques aren't counted anywhere (not in Cheque, Total or the quota), and branded never raises it.${ua > 0 ? ` ${fmt(ua)} came from payments with no linked SO (legacy / standalone), so it's in the Total but not in the split, and doesn't count toward the quota.` : ''}</p>`;
               })()}
 
               ${
@@ -4213,7 +4374,7 @@ export async function GET(request: Request) {
             supabaseAdmin
               .from('daily_payments')
               .select(`
-                id, amount, payment_method, report_date, order_id,
+                id, amount, payment_method, report_date, order_id, cheque_date,
                 customer_name, pr_number, notes,
                 orders ( id, order_number, dr_number, client_name, agent, generic_amt, branded_amt, discount_total, total_amount )
               `)
@@ -4242,7 +4403,7 @@ export async function GET(request: Request) {
             supabaseAdmin
               .from('daily_payments')
               .select(`
-                id, amount, payment_method, report_date, order_id,
+                id, amount, payment_method, report_date, order_id, cheque_date,
                 customer_name, pr_number, notes,
                 orders ( id, order_number, dr_number, client_name, agent, generic_amt, branded_amt, discount_total, total_amount )
               `)
@@ -4270,6 +4431,13 @@ export async function GET(request: Request) {
           const isOfficeOrder = (o: any) => officeMap[o.client_name] || false;
           const isOfficePayment = (p: any) =>
             officeMap[(p.orders as any)?.client_name || p.customer_name || ''] || false;
+          // Post-dated cheque (PDC) = cheque whose cheque_date is AFTER the day it was collected.
+          // PDCs are never counted in any total in this report (cheque, collections, client paid).
+          const isPostDatedCheque = (p: any) =>
+            (p.payment_method || '').toUpperCase() === 'CHEQUE' && !!p.cheque_date && String(p.cheque_date).slice(0, 10) > p.report_date;
+          const pdcNotCounted = (paymentsData || []).filter((p: any) => isPostDatedCheque(p) && !isOfficePayment(p));
+          const pdcNotCountedTotal = pdcNotCounted.reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
+          const paymentsCounted = (paymentsData || []).filter((p: any) => !isPostDatedCheque(p));
 
           // ── Report map ──
           const reportMap: Record<string, any> = {};
@@ -4298,7 +4466,7 @@ export async function GET(request: Request) {
             const disc = Number(report?.discount_total || 0);
             const netTotal = gen + brd - disc - others;
 
-            const dayPay = (paymentsData || []).filter((p: any) => p.report_date === dateStr);
+            const dayPay = paymentsCounted.filter((p: any) => p.report_date === dateStr);
             const cash = dayPay.filter((p: any) => p.payment_method === 'CASH' && !isOfficePayment(p))
               .reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
             const cheque = dayPay.filter((p: any) => p.payment_method === 'CHEQUE' && !isOfficePayment(p))
@@ -4415,11 +4583,11 @@ export async function GET(request: Request) {
           // linked SO's own mix (payment ÷ SO net), so the three always net back to the amount
           // collected. Payments with no linked SO (legacy / standalone) can't be split — they
           // stay in the Total and are counted in `unallocated` instead.
-          const agentCollMap = new Map<string, { cash: number; cheque: number; online: number; generic: number; branded: number; discount: number; unallocated: number }>();
-          (paymentsData || []).filter((p: any) => !isOfficePayment(p)).forEach((p: any) => {
+          const agentCollMap = new Map<string, { cash: number; cheque: number; online: number; generic: number; branded: number; discount: number; unallocated: number; quotaGenNet: number }>();
+          paymentsCounted.filter((p: any) => !isOfficePayment(p)).forEach((p: any) => {
             const agent = ((p.orders as any)?.agent || 'MAIN OFFICE').trim();
             const key = agent.toUpperCase();
-            if (!agentCollMap.has(key)) agentCollMap.set(key, { cash: 0, cheque: 0, online: 0, generic: 0, branded: 0, discount: 0, unallocated: 0 });
+            if (!agentCollMap.has(key)) agentCollMap.set(key, { cash: 0, cheque: 0, online: 0, generic: 0, branded: 0, discount: 0, unallocated: 0, quotaGenNet: 0 });
             const entry = agentCollMap.get(key)!;
             const method = (p.payment_method || 'CASH').toUpperCase();
             const amt = Number(p.amount || 0);
@@ -4436,6 +4604,9 @@ export async function GET(request: Request) {
               entry.generic += oGen * share;
               entry.branded += oBrd * share;
               entry.discount += oDisc * share;
+              // quota basis: cash + online + dated cheques (no PDC)
+              if (method === 'CASH' || method === 'ONLINE' || (method === 'CHEQUE' && (!p.cheque_date || String(p.cheque_date).slice(0, 10) <= p.report_date)))
+                entry.quotaGenNet += (oGen - oDisc) * share;
             } else {
               entry.unallocated += amt;
             }
@@ -4444,7 +4615,7 @@ export async function GET(request: Request) {
             .map(([key, v]) => ({
               agent: key.charAt(0) + key.slice(1).toLowerCase(),
               cash: v.cash, cheque: v.cheque, online: v.online,
-              generic: v.generic, branded: v.branded, discount: v.discount, unallocated: v.unallocated,
+              generic: v.generic, branded: v.branded, discount: v.discount, unallocated: v.unallocated, quotaGenNet: v.quotaGenNet,
               total: v.cash + v.cheque + v.online,
             }))
             .sort((a, b) => b.total - a.total);
@@ -4475,7 +4646,16 @@ export async function GET(request: Request) {
           });
           // COLLECTION basis: generic-net part of each payment (payment × (generic − discount) ÷ SO
           // net), by report_date. Branded never counts; payments with no linked SO don't count.
-          const collGenNet = (p: any) => {
+          // CASH, ONLINE and DATED cheques count toward the quota. A cheque counts when its cheque_date
+          // is on/before the day it was collected (report_date) — post-dated cheques (PDC) don't.
+          // A cheque with no cheque_date on file is treated as dated.
+          const isQuotaCountable = (p: any) => {
+            const method = (p.payment_method || 'CASH').toUpperCase();
+            if (method === 'CASH' || method === 'ONLINE') return true;
+            if (method === 'CHEQUE') return !p.cheque_date || String(p.cheque_date).slice(0, 10) <= p.report_date;
+            return false;
+          };
+          const rawGenNet = (p: any) => {
             const ord = p.orders as any;
             const oGen = Number(ord?.generic_amt || 0);
             const oBrd = Number(ord?.branded_amt || 0);
@@ -4483,15 +4663,22 @@ export async function GET(request: Request) {
             const oNet = oGen + oBrd - oDisc;
             return ord && oNet > 0 ? Number(p.amount || 0) * ((oGen - oDisc) / oNet) : 0;
           };
-          const agentNetByDate = new Map<string, { displayName: string; byDate: Map<string, number> }>();
+          const collGenNet = (p: any) => (isQuotaCountable(p) ? rawGenNet(p) : 0);
+          const isPdc = (p: any) =>
+            (p.payment_method || '').toUpperCase() === 'CHEQUE' && !!p.cheque_date && String(p.cheque_date).slice(0, 10) > p.report_date;
+          const agentNetByDate = new Map<string, { displayName: string; byDate: Map<string, number>; pdc: number }>();
           (paymentsDataWide || []).filter((p: any) => !isOfficePayment(p)).forEach((p: any) => {
             const display = ((p.orders as any)?.agent || 'MAIN OFFICE').trim();
             const key = display.toUpperCase();
             if (!agentNetByDate.has(key)) {
-              agentNetByDate.set(key, { displayName: agentSalesMap.get(key)?.displayName || display, byDate: new Map() });
+              agentNetByDate.set(key, { displayName: agentSalesMap.get(key)?.displayName || display, byDate: new Map(), pdc: 0 });
             }
-            const m = agentNetByDate.get(key)!.byDate;
+            const entry = agentNetByDate.get(key)!;
+            const m = entry.byDate;
             m.set(p.report_date, (m.get(p.report_date) || 0) + collGenNet(p));
+            if (p.report_date >= monthStart && p.report_date <= monthEnd) {
+              if (isPdc(p)) entry.pdc += rawGenNet(p);
+            }
           });
           const monthlyQuotaCheckRows = Array.from(agentNetByDate.entries())
             .map(([key, v]) => {
@@ -4520,9 +4707,10 @@ export async function GET(request: Request) {
                 agent: v.displayName, dailyQuota, weeklyQuota, weeks, daysHit, weeksHit,
                 monthNet, monthlyQuota, monthHit, dailyPay, weeklyPay, monthlyPay,
                 totalPay: dailyPay + weeklyPay + monthlyPay,
+                excludedPdc: v.pdc,
               };
             })
-            .filter((r) => r.monthNet !== 0 || r.weeks.some((w) => w.weekNet !== 0))
+            .filter((r) => r.monthNet !== 0 || r.weeks.some((w) => w.weekNet !== 0) || r.excludedPdc > 0)
             .sort((a, b) => b.monthNet - a.monthNet);
 
           // ── Online payments ──
@@ -4545,7 +4733,7 @@ export async function GET(request: Request) {
             });
           });
           const clientPayMap = new Map<string, { cash: number; cheque: number; online: number }>();
-          (paymentsData || []).filter((p: any) => !isOfficePayment(p)).forEach((p: any) => {
+          paymentsCounted.filter((p: any) => !isOfficePayment(p)).forEach((p: any) => {
             const client = (p.orders as any)?.client_name || p.customer_name || 'WALK-IN';
             if (!clientPayMap.has(client)) clientPayMap.set(client, { cash: 0, cheque: 0, online: 0 });
             const entry = clientPayMap.get(client)!;
@@ -4717,6 +4905,8 @@ export async function GET(request: Request) {
                 <div style="color:#38bdf8; font-size:28px; font-weight:900; font-family:monospace;">${fmt(monthActualCashCheque)}</div>
                 <div style="color:#64748b; font-size:10px; margin-top:4px;">What we actually have — cash and cheque together, net of expenses</div>
               </div>
+
+              ${pdcNotCountedTotal > 0 ? `<div style="margin:-14px 0 24px 0; background:#422006; border:1px solid #b45309; border-radius:10px; padding:10px 14px; color:#fbbf24; font-size:12px;">⏳ Post-dated cheques not counted in any total in this report: <strong style="font-family:monospace;">${fmt(pdcNotCountedTotal)}</strong> <span style="color:#d6b25e; font-size:11px;">(${pdcNotCounted.length} cheque${pdcNotCounted.length === 1 ? '' : 's'} dated after the day collected — excluded from Cheque, Collections and Client Paid)</span></div>` : ''}
 
               <!-- CASH vs STOCKS SUMMARY -->
               <table style="width:100%; border-collapse:collapse; margin-bottom:28px;">
@@ -4967,7 +5157,7 @@ export async function GET(request: Request) {
                       return `<tr ${row}>
                         <td style="padding:8px 12px; text-align:left; font-weight:700; color:#e2e8f0; white-space:nowrap;">${r.agent}<br><span style="font-weight:400; font-size:10px; color:#94a3b8; font-family:monospace;">${hasQuota ? `Daily ${fmt(r.dailyQuota)}<br>Wk ${fmt(r.weeklyQuota)}<br>Month ${fmt(r.monthlyQuota)}` : 'No quota set'}</span></td>
                         ${weekCells}
-                        <td style="padding:8px; text-align:center; font-family:monospace; font-size:11px; font-weight:700; color:${monthColor};">${fmt(r.monthNet)}${r.monthHit ? ' ✓' : ''}<br><span style="font-size:9px; font-weight:400; color:#64748b;">of ${hasQuota ? fmt(r.monthlyQuota) : '—'}</span></td>
+                        <td style="padding:8px; text-align:center; font-family:monospace; font-size:11px; font-weight:700; color:${monthColor};">${fmt(r.monthNet)}${r.monthHit ? ' ✓' : ''}<br><span style="font-size:9px; font-weight:400; color:#64748b;">of ${hasQuota ? fmt(r.monthlyQuota) : '—'}</span>${r.excludedPdc > 0 ? `<br><span style="font-size:9px; font-weight:400; color:#f59e0b;">not counted: PDC ${fmt(r.excludedPdc)}</span>` : ''}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.dailyPay > 0 ? fmt(r.dailyPay) : '—'}<br><span style="font-size:9px;color:#64748b;">${hasQuota ? r.daysHit + ' day' + (r.daysHit === 1 ? '' : 's') : ''}</span></td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.weeklyPay > 0 ? fmt(r.weeklyPay) : '—'}<br><span style="font-size:9px;color:#64748b;">${hasQuota ? r.weeksHit + ' wk' + (r.weeksHit === 1 ? '' : 's') : ''}</span></td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fbbf24; font-weight:700;">${r.monthlyPay > 0 ? fmt(r.monthlyPay) : '—'}</td>
@@ -4986,7 +5176,7 @@ export async function GET(request: Request) {
                   </tbody>
                 </table>
               </div>
-              <p style="margin:-2px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Quota basis = <strong>COLLECTIONS</strong>, generic net only: each payment counts only for its generic − discount share of the linked SO (branded never counts, the whole discount is treated as generic discount; payments with no linked SO don't count). Collections are dated by report date, office accounts excluded. Sales are not used for incentives. Daily quota = agent_weekly_quota ÷ 6 (Mon–Sat). Monthly quota = daily quota × ${workingDaysInMonth} working days. Payout: +₱${OFFICE_DAILY_INCENTIVE} per Mon–Sat day hit, +₱${OFFICE_WEEKLY_INCENTIVE} per week hit, +₱${OFFICE_MONTHLY_INCENTIVE} if the month is hit. They all stack. <strong>Daily ₱ and Weekly ₱ were already listed in this month's Saturday Weekly Reports</strong> (weeks whose Saturday falls in ${monthLabel}, each judged on its full Sun–Sat week); only <strong>Monthly ₱</strong> is new here. A week ending next month shows "paid next month" and is counted there. Each week cell shows this month's slice of generic-net collections, with "(x/7)" and the full-week total for a split week.</p>
+              <p style="margin:-2px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Quota basis = <strong>COLLECTIONS</strong>, generic net only: each payment counts only for its generic − discount share of the linked SO (branded never counts, the whole discount is treated as generic discount; payments with no linked SO don't count). <strong>CASH, ONLINE and DATED cheques count</strong> — a cheque counts when its cheque date is on/before the day it was collected; post-dated cheques (PDC) don't count and are listed in amber as "not counted". Collections are dated by report date, office accounts excluded. Sales are not used for incentives. Daily quota = agent_weekly_quota ÷ 6 (Mon–Sat). Monthly quota = daily quota × ${workingDaysInMonth} working days. Payout: +₱${OFFICE_DAILY_INCENTIVE} per Mon–Sat day hit, +₱${OFFICE_WEEKLY_INCENTIVE} per week hit, +₱${OFFICE_MONTHLY_INCENTIVE} if the month is hit. They all stack. <strong>Daily ₱ and Weekly ₱ were already listed in this month's Saturday Weekly Reports</strong> (weeks whose Saturday falls in ${monthLabel}, each judged on its full Sun–Sat week); only <strong>Monthly ₱</strong> is new here. A week ending next month shows "paid next month" and is counted there. Each week cell shows this month's slice of generic-net collections, with "(x/7)" and the full-week total for a split week.</p>
               ` : ''}
 
               <!-- AGENT COLLECTIONS -->
@@ -4999,7 +5189,7 @@ export async function GET(request: Request) {
                       <th ${thR}>Generic</th>
                       <th ${thR}>Branded</th>
                       <th ${thR}>Discount</th>
-                      <th style="padding:10px 12px; text-align:right; background:#134e4a; color:#5eead4; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Generic Net<br><span style="font-size:8px; letter-spacing:0; text-transform:none; color:#99f6e4;">quota basis</span></th>
+                      <th style="padding:10px 12px; text-align:right; background:#134e4a; color:#5eead4; font-size:11px; text-transform:uppercase; letter-spacing:1px;">Generic Net<br><span style="font-size:8px; letter-spacing:0; text-transform:none; color:#99f6e4;">quota basis · cash, online, dated chq</span></th>
                       <th ${thR}>Cash</th>
                       <th ${thR}>Cheque</th>
                       <th ${thR}>Online</th>
@@ -5014,7 +5204,7 @@ export async function GET(request: Request) {
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${fmt(r.generic)}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#c4b5fd;">${fmt(r.branded)}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fdba74;">${fmt(r.discount)}</td>
-                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(r.generic - r.discount)}</td>
+                        <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(r.quotaGenNet)}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#6ee7b7;">${r.cash > 0 ? fmt(r.cash) : '<span style="color:#1e293b;">—</span>'}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#fcd34d;">${r.cheque > 0 ? fmt(r.cheque) : '<span style="color:#1e293b;">—</span>'}</td>
                         <td ${tdR} style="padding:8px 12px; text-align:right; font-family:monospace; color:#7dd3fc;">${r.online > 0 ? fmt(r.online) : '<span style="color:#1e293b;">—</span>'}</td>
@@ -5033,7 +5223,7 @@ export async function GET(request: Request) {
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(tg)}</td>
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#c4b5fd; font-weight:900;">${fmt(tb)}</td>
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fdba74; font-weight:900;">${fmt(tdisc)}</td>
-                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(tg - tdisc)}</td>
+                        <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#2dd4bf; font-weight:900; background:#042f2e;">${fmt(agentCollRows.reduce((s, r) => s + r.quotaGenNet, 0))}</td>
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#6ee7b7; font-weight:900;">${fmt(tc)}</td>
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#fcd34d; font-weight:900;">${fmt(tch)}</td>
                         <td ${tdR} style="padding:10px 12px; text-align:right; font-family:monospace; color:#7dd3fc; font-weight:900;">${fmt(to)}</td>
@@ -5045,7 +5235,7 @@ export async function GET(request: Request) {
               </div>
               ${(() => {
                 const ua = agentCollRows.reduce((s, r) => s + r.unallocated, 0);
-                return `<p style="margin:-20px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Generic / Branded / Discount on collections are split pro-rata from each payment's linked SO. <strong>Generic Net (generic − discount) is what the Agent Quota Checker uses</strong> — branded collections are shown but never raise it.${ua > 0 ? ` ${fmt(ua)} came from payments with no linked SO (legacy / standalone), so it's in the Total but not in the split, and doesn't count toward the quota.` : ''}</p>`;
+                return `<p style="margin:-20px 2px 28px 2px; color:#64748b; font-size:10px; line-height:1.5;">Generic / Branded / Discount on collections are split pro-rata from each payment's linked SO. <strong>Generic Net (generic − discount) is what the Agent Quota Checker uses</strong>, counting CASH, ONLINE and DATED cheques (cheque date on/before the collection date). Post-dated cheques aren't counted anywhere (not in Cheque, Total or the quota), and branded never raises it.${ua > 0 ? ` ${fmt(ua)} came from payments with no linked SO (legacy / standalone), so it's in the Total but not in the split, and doesn't count toward the quota.` : ''}</p>`;
               })()}
 
 
